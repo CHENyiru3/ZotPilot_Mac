@@ -3,7 +3,7 @@
   <h3>让 AI 接管你的 Zotero</h3>
   <p>
     按语义搜索、探索引用、用自然语言整理文献。<br>
-    <b>一个 MCP 服务器，完整 Zotero 访问，无需插件。</b>
+    <b>一个 AI Agent Skill，完整 Zotero 访问，无需插件。</b>
   </p>
 
   <p>
@@ -120,62 +120,30 @@
 
 ## 📥 快速开始
 
-### Claude Code（推荐）
+### 方式一：自动安装（推荐）
 
-仓库本身就是 Skill —— 直接 clone 到 skills 目录即可：
+把这段话复制给你的 AI agent：
+
+> 安装 ZotPilot skill：clone https://github.com/xunhe730/ZotPilot.git 到我的 skills 目录，然后帮我配置 Zotero 文献库。
+
+Agent 会自动处理一切——clone、MCP 服务器安装、配置和索引。
+
+### 方式二：手动安装
 
 ```bash
+# Claude Code
 git clone https://github.com/xunhe730/ZotPilot.git ~/.claude/skills/zotpilot
+
+# OpenCode
+git clone https://github.com/xunhe730/ZotPilot.git ~/.config/opencode/skills/zotpilot
+
+# OpenClaw
+git clone https://github.com/xunhe730/ZotPilot.git ~/.openclaw/skills/zotpilot
 ```
 
-重启 Claude Code，Skill 自动被发现。当你提到 Zotero 或论文时，Skill 会自动触发并引导你完成安装、索引和使用。
+重启你的 AI agent。当你提到 Zotero、论文或研究时，Skill 自动触发并引导你完成后续步骤。
 
-### 其他 MCP 客户端（Cursor、Windsurf 等）
-
-```bash
-# 安装
-git clone https://github.com/xunhe730/ZotPilot.git
-uv tool install ./ZotPilot
-
-# 配置（自动检测 Zotero）
-zotpilot setup
-
-# 索引论文
-zotpilot index
-```
-
-然后添加到你的 MCP 客户端配置：
-
-<div align="center">
-  <table>
-    <tr>
-      <td align="center"><b>Claude Code</b></td>
-      <td align="center"><b>Cursor</b></td>
-      <td align="center"><b>Windsurf</b></td>
-    </tr>
-    <tr>
-      <td><code>~/.claude.json</code></td>
-      <td><code>.cursor/mcp.json</code></td>
-      <td><code>~/.codeium/windsurf/mcp_config.json</code></td>
-    </tr>
-  </table>
-</div>
-
-```json
-{
-  "mcpServers": {
-    "zotpilot": {
-      "command": "uv",
-      "args": ["tool", "run", "zotpilot"],
-      "env": {
-        "GEMINI_API_KEY": "你的密钥"
-      }
-    }
-  }
-}
-```
-
-> **嵌入模型选择：** Gemini（推荐，有免费额度）或 Local（离线，无需 API key）。在 `zotpilot setup` 中选择。
+> **嵌入模型选择：** Gemini（推荐，有免费额度）或 Local（离线，无需 API key）。Skill 会在安装时询问你。
 
 ---
 
@@ -201,12 +169,7 @@ Skill 引导 AI：
 - **错误恢复** — 索引为空、DOI 缺失、API key 未设置时怎么办
 - **输出格式** — 如何呈现结果（引用段落、标注页码、按论文分组）
 
-**安装**（Claude Code）：
-```bash
-git clone https://github.com/xunhe730/ZotPilot.git ~/.claude/skills/zotpilot
-```
-
-仓库本身就是 Skill——直接 clone 到 skills 目录，Claude Code 重启后自动发现。
+**安装：** 见上方[快速开始](#-快速开始)——一行 `git clone` 即可。
 
 没有 Skill，AI 仍可调用全部 24 个工具——但不知道先选哪个、哪些参数重要、如何串联。Skill 是"我有工具"和"我会做研究"的区别。
 
@@ -279,10 +242,10 @@ git clone https://github.com/xunhe730/ZotPilot.git ~/.claude/skills/zotpilot
                      └────┬─────┘     └──────────┘
                           │
                    ┌──────┴──────┐
-                   │  AI 客户端  │
+                   │  AI Agent   │
                    │ Claude Code │
-                   │   Cursor    │
-                   │  Windsurf   │
+                   │  OpenCode   │
+                   │  OpenClaw   │
                    └─────────────┘
 ```
 

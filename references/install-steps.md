@@ -73,22 +73,7 @@ Determine which client the user has and write the appropriate config:
 }
 ```
 
-**Cursor** — add to `.cursor/mcp.json`:
-```json
-{
-  "mcpServers": {
-    "zotpilot": {
-      "command": "uv",
-      "args": ["tool", "run", "zotpilot"],
-      "env": { "GEMINI_API_KEY": "..." }
-    }
-  }
-}
-```
-
-**Windsurf** — add to `~/.codeium/windsurf/mcp_config.json` (same format as Cursor).
-
-After configuring, the user needs to restart their AI client for the MCP server to connect.
+After configuring, the user needs to restart their AI agent for the MCP server to connect.
 
 ## Step 6: Verify
 

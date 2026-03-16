@@ -3,7 +3,7 @@
   <h3>Let AI Take Over Your Zotero</h3>
   <p>
     Search by meaning, explore citations, organize with natural language.<br>
-    <b>One MCP server. Full Zotero access. No plugin required.</b>
+    <b>An AI Agent Skill for Zotero. Full library access. No plugin required.</b>
   </p>
 
   <p>
@@ -120,62 +120,30 @@ Ships with a [Skill file](SKILL.md) that teaches your AI _how_ to use ZotPilot �
 
 ## 📥 Quick Start
 
-### Claude Code (recommended)
+### Option 1: Auto Install (recommended)
 
-The repository itself is a Skill — just clone it into your skills directory:
+Copy this to your AI agent:
+
+> Install ZotPilot skill: clone https://github.com/xunhe730/ZotPilot.git into my skills directory, then help me set up my Zotero library.
+
+The agent handles everything — cloning, MCP server installation, configuration, and indexing.
+
+### Option 2: Manual Install
 
 ```bash
+# Claude Code
 git clone https://github.com/xunhe730/ZotPilot.git ~/.claude/skills/zotpilot
+
+# OpenCode
+git clone https://github.com/xunhe730/ZotPilot.git ~/.config/opencode/skills/zotpilot
+
+# OpenClaw
+git clone https://github.com/xunhe730/ZotPilot.git ~/.openclaw/skills/zotpilot
 ```
 
-Restart Claude Code. The Skill is auto-discovered. When you ask about Zotero or papers, the Skill triggers and guides you through installation, indexing, and usage automatically.
+Restart your AI agent. When you mention Zotero, papers, or research, the Skill triggers automatically and guides you through the rest.
 
-### Other MCP clients (Cursor, Windsurf, etc.)
-
-```bash
-# Install
-git clone https://github.com/xunhe730/ZotPilot.git
-uv tool install ./ZotPilot
-
-# Setup (auto-detects Zotero)
-zotpilot setup
-
-# Index your papers
-zotpilot index
-```
-
-Then add to your MCP client config:
-
-<div align="center">
-  <table>
-    <tr>
-      <td align="center"><b>Claude Code</b></td>
-      <td align="center"><b>Cursor</b></td>
-      <td align="center"><b>Windsurf</b></td>
-    </tr>
-    <tr>
-      <td><code>~/.claude.json</code></td>
-      <td><code>.cursor/mcp.json</code></td>
-      <td><code>~/.codeium/windsurf/mcp_config.json</code></td>
-    </tr>
-  </table>
-</div>
-
-```json
-{
-  "mcpServers": {
-    "zotpilot": {
-      "command": "uv",
-      "args": ["tool", "run", "zotpilot"],
-      "env": {
-        "GEMINI_API_KEY": "your-key-here"
-      }
-    }
-  }
-}
-```
-
-> **Embedding choice:** Gemini (recommended, free tier available) or Local (offline, no API key needed). Choose during `zotpilot setup`.
+> **Embedding choice:** Gemini (recommended, free tier available) or Local (offline, no API key needed). The Skill asks you during setup.
 
 ---
 
@@ -201,12 +169,7 @@ Skill guides AI to:
 - **Error recovery** — what to do when index is empty, DOI is missing, API key isn't set
 - **Output formatting** — how to present results (quote passages, show page numbers, group by paper)
 
-**Install** (Claude Code):
-```bash
-git clone https://github.com/xunhe730/ZotPilot.git ~/.claude/skills/zotpilot
-```
-
-The repository itself is the Skill — clone it directly into your skills directory. Claude Code auto-discovers it on restart.
+**Install:** See [Quick Start](#-quick-start) above — one `git clone` into your skills directory.
 
 Without the Skill, AI can still call all 24 tools — but it won't know which to pick first, what parameters matter, or how to chain them. The Skill is the difference between "I have tools" and "I know how to do research."
 
@@ -281,10 +244,10 @@ Without the Skill, AI can still call all 24 tools — but it won't know which to
                      └────┬─────┘     └──────────┘
                           │
                    ┌──────┴──────┐
-                   │  AI Client  │
+                   │  AI Agent   │
                    │ Claude Code │
-                   │   Cursor    │
-                   │  Windsurf   │
+                   │  OpenCode   │
+                   │  OpenClaw   │
                    └─────────────┘
 ```
 
