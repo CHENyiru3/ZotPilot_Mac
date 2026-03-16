@@ -124,9 +124,9 @@ Ships with a [Skill file](SKILL.md) that teaches your AI _how_ to use ZotPilot �
 
 Copy this to your AI agent:
 
-> Install ZotPilot skill: clone https://github.com/xunhe730/ZotPilot.git into my skills directory, then help me set up my Zotero library.
+> Install the ZotPilot skill for me: clone https://github.com/xunhe730/ZotPilot.git into my skills directory, set it up, and help me search my Zotero library.
 
-The agent handles everything — cloning, MCP server installation, configuration, and indexing.
+The agent handles everything — cloning, CLI installation, MCP registration, indexing, and tool selection.
 
 ### Option 2: Manual Install
 
@@ -141,7 +141,7 @@ git clone https://github.com/xunhe730/ZotPilot.git ~/.config/opencode/skills/zot
 git clone https://github.com/xunhe730/ZotPilot.git ~/.openclaw/skills/zotpilot
 ```
 
-Restart your AI agent. When you mention Zotero, papers, or research, the Skill triggers automatically and guides you through the rest.
+Restart your AI agent. Say "search my Zotero for..." — the Skill handles MCP setup, indexing, and tool selection automatically. Zero configuration.
 
 > **Embedding choice:** Gemini (recommended, free tier available) or Local (offline, no API key needed). The Skill asks you during setup.
 

@@ -124,9 +124,9 @@
 
 把这段话复制给你的 AI agent：
 
-> 安装 ZotPilot skill：clone https://github.com/xunhe730/ZotPilot.git 到我的 skills 目录，然后帮我配置 Zotero 文献库。
+> 帮我安装 ZotPilot skill：clone https://github.com/xunhe730/ZotPilot.git 到我的 skills 目录，完成配置，然后帮我搜索 Zotero 文献库。
 
-Agent 会自动处理一切——clone、MCP 服务器安装、配置和索引。
+Agent 会自动处理一切——clone、CLI 安装、MCP 注册、索引和工具选择。
 
 ### 方式二：手动安装
 
@@ -141,7 +141,7 @@ git clone https://github.com/xunhe730/ZotPilot.git ~/.config/opencode/skills/zot
 git clone https://github.com/xunhe730/ZotPilot.git ~/.openclaw/skills/zotpilot
 ```
 
-重启你的 AI agent。当你提到 Zotero、论文或研究时，Skill 自动触发并引导你完成后续步骤。
+重启你的 AI agent。说"搜索我的 Zotero……"——Skill 会自动处理 MCP 注册、索引和工具选择，零配置。
 
 > **嵌入模型选择：** Gemini（推荐，有免费额度）或 Local（离线，无需 API key）。Skill 会在安装时询问你。
 

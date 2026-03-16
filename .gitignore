@@ -17,3 +17,19 @@ htmlcov/
 venv/
 *.sqlite
 *.db
+
+# Skill runtime data (created on first use)
+data/
+
+# Plans (local only)
+docs/superpowers/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
