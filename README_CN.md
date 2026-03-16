@@ -93,6 +93,9 @@
 ### 🀄 中文支持
 自动翻译中文查询，双语并行搜索。
 
+### 🧠 内置 Agent Skill
+自带 [Skill 文件](skill/SKILL.md)，教会 AI _如何_使用 ZotPilot——自动选择工具、串联多步工作流、排查错误。无需提示工程。
+
 </td>
 </tr>
 </table>
@@ -110,6 +113,7 @@
 | 浏览集合与标签 | ✅ | 部分 | ✅ |
 | 管理标签与集合 | ✅ | 部分 | ✅ |
 | 中文查询支持 | | | ✅ |
+| Agent Skill（引导式工作流） | | | ✅ |
 | 100% 本地处理 | ✅ | | ✅ |
 
 ---
@@ -160,6 +164,35 @@ zotpilot index
 ```
 
 > **嵌入模型选择：** Gemini（推荐，有免费额度）或 Local（离线，无需 API key）。在 `zotpilot setup` 中选择。
+
+---
+
+## 🧠 Agent Skill——让 AI 学会做研究
+
+大多数 MCP 服务器给 AI 一堆工具，然后听天由命。ZotPilot 自带 **[Skill 文件](skill/SKILL.md)**，教会 AI _如何用你的文献库做研究_：
+
+```
+你：     "帮我写一段关于 EEG 脑机接口的 Related Work"
+
+Skill:   ① search_topic → 找到该主题的核心论文
+         ② get_paper_details → 获取摘要和元数据
+         ③ find_references → 从参考文献扩展阅读列表
+         ④ search_papers → 深入挖掘具体论点
+         ⑤ get_passage_context → 获取完整上下文
+```
+
+Skill 包含：
+- **搜索策略决策树** — 根据目标自动选择合适的工具
+- **工作流模板** — 文献综述、相关工作、文献库整理
+- **参数指南** — 何时使用 `section_weights`、`required_terms`、`chunk_types`
+- **故障排除** — 常见错误及修复方法
+
+**安装 Skill**（Claude Code）：
+```bash
+cp -r ZotPilot/skill/ ~/.claude/skills/zotpilot/
+```
+
+没有 Skill，AI 仍可使用全部 24 个工具。有了 Skill，它知道_选哪个_、_什么时候用_、以及_如何串联_成真正的研究工作流。
 
 ---
 

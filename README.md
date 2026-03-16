@@ -93,6 +93,9 @@ Composite scoring: semantic similarity × section weight × journal quality (SCI
 ### 🀄 Chinese Support
 Auto-translates Chinese queries for bilingual parallel search.
 
+### 🧠 Built-in Agent Skill
+Ships with a [Skill file](skill/SKILL.md) that teaches your AI _how_ to use ZotPilot — auto-selects the right tool, chains multi-step workflows, and troubleshoots errors. No prompt engineering needed.
+
 </td>
 </tr>
 </table>
@@ -110,6 +113,7 @@ Auto-translates Chinese queries for bilingual parallel search.
 | Browse collections & tags | ✅ | Partial | ✅ |
 | Manage tags & collections | ✅ | Partial | ✅ |
 | Chinese query support | | | ✅ |
+| Agent Skill (guided workflows) | | | ✅ |
 | 100% local processing | ✅ | | ✅ |
 
 ---
@@ -160,6 +164,35 @@ Then add to your MCP client:
 ```
 
 > **Embedding choice:** Gemini (recommended, free tier available) or Local (offline, no API key needed). Choose during `zotpilot setup`.
+
+---
+
+## 🧠 Agent Skill — AI that knows how to research
+
+Most MCP servers give AI a bag of tools and hope for the best. ZotPilot ships with a **[Skill file](skill/SKILL.md)** that teaches AI _how to do research_ with your library:
+
+```
+You:    "Help me write a related work section on EEG-based BCI"
+
+Skill:  ① search_topic → find top papers on the topic
+        ② get_paper_details → get abstracts and metadata
+        ③ find_references → expand reading list from bibliographies
+        ④ search_papers → deep-dive into specific claims
+        ⑤ get_passage_context → get full surrounding text
+```
+
+The Skill includes:
+- **Search strategy decision tree** — auto-selects the right tool for each goal
+- **Workflow templates** — literature review, related work, library organization
+- **Parameter guidance** — when to use `section_weights`, `required_terms`, `chunk_types`
+- **Troubleshooting** — common errors and fixes
+
+**Install the Skill** (Claude Code):
+```bash
+cp -r ZotPilot/skill/ ~/.claude/skills/zotpilot/
+```
+
+Without the Skill, AI can still use all 24 tools. With the Skill, it knows _which_ tool to pick, _when_, and _how to chain them_ into real research workflows.
 
 ---
 
