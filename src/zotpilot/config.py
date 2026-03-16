@@ -112,7 +112,7 @@ class Config:
         else:
             config_path = Path("~/.config/zotpilot/config.json").expanduser()
 
-        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         # Never persist API keys to disk — they should come from env vars.
         # Only save non-sensitive configuration.
@@ -141,7 +141,9 @@ class Config:
             "zotero_library_type": self.zotero_library_type,
         }
 
-        with open(config_path, "w") as f:
+        import os as _os
+        fd = _os.open(str(config_path), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600)
+        with _os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
 
     def validate(self) -> list[str]:

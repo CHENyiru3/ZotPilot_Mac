@@ -64,7 +64,7 @@ def get_vision_costs(last_n: int = 10) -> dict:
     if not log_path.exists():
         return {
             "message": "Vision API has not been used yet -- no cost log found.",
-            "log_path": str(log_path),
+            "log_path": log_path.name,
         }
 
     try:
@@ -76,7 +76,7 @@ def get_vision_costs(last_n: int = 10) -> dict:
     if not entries:
         return {
             "message": "Vision cost log exists but contains no entries.",
-            "log_path": str(log_path),
+            "log_path": log_path.name,
         }
 
     # Aggregate totals
@@ -135,5 +135,5 @@ def get_vision_costs(last_n: int = 10) -> dict:
         },
         "sessions": sessions,
         "recent_entries": recent,
-        "log_path": str(log_path),
+        "log_path": log_path.name,
     }

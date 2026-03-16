@@ -231,17 +231,28 @@ class ZoteroClient:
             """).fetchall())
 
             # Items with only non-PDF attachments (excluding those that also have PDFs)
-            non_pdf_rows = conn.execute("""
-                SELECT ia.contentType,
-                       COUNT(DISTINCT COALESCE(ia.parentItemID, ia.itemID))
-                FROM itemAttachments ia
-                JOIN items base ON COALESCE(ia.parentItemID, ia.itemID) = base.itemID
-                WHERE base.itemTypeID NOT IN (1, 14)
-                  AND base.itemID NOT IN (SELECT itemID FROM deletedItems)
-                  AND COALESCE(ia.parentItemID, ia.itemID) NOT IN ({})
-                GROUP BY ia.contentType
-            """.format(",".join(str(i) for i in pdf_item_ids) if pdf_item_ids else "NULL")
-            ).fetchall()
+            if pdf_item_ids:
+                placeholders = ",".join("?" * len(pdf_item_ids))
+                non_pdf_rows = conn.execute(f"""
+                    SELECT ia.contentType,
+                           COUNT(DISTINCT COALESCE(ia.parentItemID, ia.itemID))
+                    FROM itemAttachments ia
+                    JOIN items base ON COALESCE(ia.parentItemID, ia.itemID) = base.itemID
+                    WHERE base.itemTypeID NOT IN (1, 14)
+                      AND base.itemID NOT IN (SELECT itemID FROM deletedItems)
+                      AND COALESCE(ia.parentItemID, ia.itemID) NOT IN ({placeholders})
+                    GROUP BY ia.contentType
+                """, list(pdf_item_ids)).fetchall()
+            else:
+                non_pdf_rows = conn.execute("""
+                    SELECT ia.contentType,
+                           COUNT(DISTINCT COALESCE(ia.parentItemID, ia.itemID))
+                    FROM itemAttachments ia
+                    JOIN items base ON COALESCE(ia.parentItemID, ia.itemID) = base.itemID
+                    WHERE base.itemTypeID NOT IN (1, 14)
+                      AND base.itemID NOT IN (SELECT itemID FROM deletedItems)
+                    GROUP BY ia.contentType
+                """).fetchall()
 
             non_pdf_types = {r[0] or "(null)": r[1] for r in non_pdf_rows}
             items_with_non_pdf = sum(non_pdf_types.values())

@@ -51,7 +51,7 @@ def cmd_setup(args):
         import os
         existing_key = os.environ.get("GEMINI_API_KEY")
         if existing_key:
-            print(f"  Found GEMINI_API_KEY in environment ({existing_key[:8]}...)")
+            print("  Found GEMINI_API_KEY in environment (***hidden)")
             if input("  Use this key? [Y/n] ").strip().lower() not in ("n", "no"):
                 gemini_api_key = existing_key
         if not gemini_api_key:
