@@ -40,8 +40,8 @@ def cmd_setup(args):
 
         # Provider from flag
         embedding_provider = getattr(args, "provider", None) or "gemini"
-        if embedding_provider not in ("gemini", "local"):
-            print(f"ERROR: Invalid provider '{embedding_provider}'. Must be 'gemini' or 'local'.", file=sys.stderr)
+        if embedding_provider not in ("gemini", "dashscope", "local"):
+            print(f"ERROR: Invalid provider '{embedding_provider}'. Must be 'gemini', 'dashscope', or 'local'.", file=sys.stderr)
             return 1
 
     else:
@@ -72,11 +72,17 @@ def cmd_setup(args):
         # Choose embedding provider
         print("\n[2/5] Choose embedding provider:")
         print("  1. Gemini (recommended, requires API key)")
-        print("  2. Local (all-MiniLM-L6-v2, no API key needed)")
-        choice = input("  Choice [1/2]: ").strip()
-        embedding_provider = "local" if choice == "2" else "gemini"
+        print("  2. DashScope / Bailian (Alibaba Cloud, requires API key)")
+        print("  3. Local (all-MiniLM-L6-v2, no API key needed)")
+        choice = input("  Choice [1/2/3]: ").strip()
+        if choice == "2":
+            embedding_provider = "dashscope"
+        elif choice == "3":
+            embedding_provider = "local"
+        else:
+            embedding_provider = "gemini"
 
-    # Step 3: Configure API key if Gemini (interactive only)
+    # Step 3: Configure API key (interactive only)
     gemini_api_key = None
     if embedding_provider == "gemini":
         import os as _os
@@ -95,6 +101,19 @@ def cmd_setup(args):
                 gemini_api_key = input("  Enter Gemini API key: ").strip()
                 if not gemini_api_key:
                     print("  WARNING: No API key provided. Set GEMINI_API_KEY env var later.")
+    elif embedding_provider == "dashscope":
+        import os as _os
+        existing_key = _os.environ.get("DASHSCOPE_API_KEY")
+        if non_interactive:
+            if not existing_key:
+                print("NOTE: DASHSCOPE_API_KEY not set. Set it before running the MCP server.", file=sys.stderr)
+        else:
+            print("\n[3/5] DashScope API key:")
+            if existing_key:
+                print("  Found DASHSCOPE_API_KEY in environment (***hidden)")
+            else:
+                print("  Get a key at https://bailian.console.aliyun.com/")
+                print("  Set it as: export DASHSCOPE_API_KEY='your-key'")
     elif not non_interactive:
         print("\n[3/5] Skipping API key (local embeddings selected)")
 
@@ -181,12 +200,15 @@ def cmd_index(args):
         from dataclasses import replace
         config = replace(config, vision_enabled=False)
 
+    max_pages = args.max_pages if args.max_pages is not None else config.max_pages
+
     indexer = Indexer(config)
     result = indexer.index_all(
         force_reindex=args.force,
         limit=args.limit,
         item_key=args.item_key,
         title_pattern=args.title,
+        max_pages=max_pages,
     )
 
     print(f"\nIndexing complete:")
@@ -214,6 +236,12 @@ def cmd_index(args):
         for f in failures:
             print(f"  {f.item_key}: {f.reason}")
 
+    if result.get("long_documents"):
+        print(f"\nSkipped {result['skipped_long']} long documents (>{max_pages} pages):")
+        for doc in result["long_documents"]:
+            print(f"  {doc['item_key']}: {doc['title']} ({doc['pages']} pages)")
+        print(f"\nTo index these, re-run with: zotpilot index --max-pages 0")
+
     if result["indexed"] > 0:
         logging.getLogger(__name__).info(
             "Waiting 60s for ChromaDB compaction to persist HNSW index to disk..."
@@ -239,6 +267,7 @@ def cmd_status(args):
                 and (config.zotero_data_dir / "zotero.sqlite").exists(),
             "embedding_provider": config.embedding_provider,
             "gemini_key_set": bool(config.gemini_api_key),
+            "dashscope_key_set": bool(config.dashscope_api_key),
             "index_ready": False,
             "doc_count": 0,
             "chunk_count": 0,
@@ -313,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
     sub_setup.add_argument("--zotero-dir", type=str, default=None, help="Zotero data directory path")
     sub_setup.add_argument(
         "--provider", type=str, default=None,
-        choices=["gemini", "local"],
+        choices=["gemini", "dashscope", "local"],
         help="Embedding provider (default: gemini)",
     )
     sub_setup.set_defaults(func=cmd_setup)
@@ -324,6 +353,8 @@ def main(argv: list[str] | None = None) -> int:
     sub_index.add_argument("--limit", type=int, default=None, help="Max items to index")
     sub_index.add_argument("--item-key", type=str, default=None, help="Index specific item")
     sub_index.add_argument("--title", type=str, default=None, help="Filter by title regex")
+    sub_index.add_argument("--max-pages", type=int, default=None,
+        help="Skip PDFs longer than N pages (default: 40, 0=no limit)")
     sub_index.add_argument("--no-vision", action="store_true", help="Disable vision extraction")
     sub_index.add_argument("--config", type=str, default=None, help="Config file path")
     sub_index.add_argument("-v", "--verbose", action="store_true", help="Debug logging")

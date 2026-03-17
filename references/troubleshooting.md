@@ -9,6 +9,7 @@
 | status shows `config_exists: false` | Never ran setup | `zotpilot setup --non-interactive` |
 | status shows `zotero_dir_valid: false` | Wrong Zotero path | `zotpilot setup --non-interactive --zotero-dir /correct/path` |
 | `GEMINI_API_KEY not set` | Missing API key | Set env var: `export GEMINI_API_KEY=...` Get key at https://aistudio.google.com/apikey |
+| `DASHSCOPE_API_KEY not set` | Missing API key | Set env var: `export DASHSCOPE_API_KEY=...` Get key at https://bailian.console.aliyun.com/ |
 | `index_ready: false, doc_count: 0` | Never indexed | `zotpilot index` (full) or `zotpilot index --limit 10` (test) |
 | Search returns empty results | Query too specific or index empty | Check `get_index_stats`. Try broader query or `search_boolean` |
 | `ZOTERO_API_KEY not set` | Write operation without credentials | See "Enable Write Operations" below |
@@ -20,13 +21,20 @@
 ## Embedding Provider Issues
 
 **Gemini (default):**
-- Free tier: 1,500 requests/day — enough for ~500 papers
-- If rate limited: wait 60s or switch to local: `zotpilot setup --non-interactive --provider local`
+- Free tier: ~1,000 requests/day (after Dec 2025 reduction)
+- If rate limited: wait 60s or switch to dashscope/local
 - Key from: https://aistudio.google.com/apikey
+
+**DashScope / Bailian (Alibaba Cloud):**
+- Recommended for users in China (no VPN needed)
+- Model: text-embedding-v3 (1024 dimensions)
+- Pricing: ¥0.0005/1k tokens — very affordable
+- Key from: https://bailian.console.aliyun.com/
+- Setup: `zotpilot setup --non-interactive --provider dashscope`
 
 **Local (all-MiniLM-L6-v2):**
 - No API key needed, fully offline
-- Lower quality than Gemini but works everywhere
+- Lower quality than Gemini/DashScope but works everywhere
 - First run downloads the model (~80MB)
 
 ## Indexing Issues

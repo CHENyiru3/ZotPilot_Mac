@@ -133,6 +133,7 @@ class Indexer:
         limit: int | None = None,
         item_key: str | None = None,
         title_pattern: str | None = None,
+        max_pages: int = 0,
     ) -> dict:
         """
         Index all PDFs in Zotero library.
@@ -217,6 +218,27 @@ class Indexer:
                     reindex_reasons[item.item_key] = "changed"
 
             to_index.append(item)
+
+        # Filter long documents
+        long_items: list[tuple[ZoteroItem, int]] = []
+        if max_pages and max_pages > 0:
+            import fitz
+            short_items = []
+            for item in to_index:
+                try:
+                    doc = fitz.open(str(item.pdf_path))
+                    pages = len(doc)
+                    doc.close()
+                    if pages > max_pages:
+                        long_items.append((item, pages))
+                        results.append(IndexResult(
+                            item.item_key, item.title, "skipped",
+                            reason=f"too long ({pages} pages, max {max_pages})"))
+                    else:
+                        short_items.append(item)
+                except Exception:
+                    short_items.append(item)
+            to_index = short_items
 
         reindex_count = len(reindex_reasons)
         n_skipped = sum(1 for r in results if r.status == "skipped")
@@ -385,6 +407,12 @@ class Indexer:
             "quality_distribution": quality_distribution,
             "extraction_stats": aggregated_extraction_stats,
         }
+
+        counts["skipped_long"] = len(long_items)
+        counts["long_documents"] = [
+            {"item_key": item.item_key, "title": item.title, "pages": pages}
+            for item, pages in long_items
+        ]
 
         # Save config hash after successful indexing
         if counts["indexed"] > 0 or counts["already_indexed"] > 0:

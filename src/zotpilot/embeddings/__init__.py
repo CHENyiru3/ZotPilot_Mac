@@ -1,6 +1,7 @@
 """Embedding providers for ZotPilot."""
 from .gemini import GeminiEmbedder, EmbeddingError
 from .local import LocalEmbedder
+from .dashscope import DashScopeEmbedder
 from .base import EmbedderProtocol
 
 
@@ -21,11 +22,20 @@ def create_embedder(config):
             timeout=config.embedding_timeout,
             max_retries=config.embedding_max_retries,
         )
+    elif config.embedding_provider == "dashscope":
+        logger.info(f"Using DashScope embeddings ({config.embedding_model}, {config.embedding_dimensions} dimensions)")
+        return DashScopeEmbedder(
+            model=config.embedding_model,
+            dimensions=config.embedding_dimensions,
+            api_key=config.dashscope_api_key,
+            timeout=config.embedding_timeout,
+            max_retries=config.embedding_max_retries,
+        )
     else:
         raise ValueError(
             f"Invalid embedding_provider: {config.embedding_provider}. "
-            f"Must be 'gemini' or 'local'"
+            f"Must be 'gemini', 'dashscope', or 'local'"
         )
 
 
-__all__ = ["create_embedder", "GeminiEmbedder", "LocalEmbedder", "EmbeddingError", "EmbedderProtocol"]
+__all__ = ["create_embedder", "GeminiEmbedder", "DashScopeEmbedder", "LocalEmbedder", "EmbeddingError", "EmbedderProtocol"]

@@ -71,9 +71,9 @@ class TestConfigLoadFromFile:
         assert cfg.chunk_size == 800
         assert cfg.embedding_provider == "local"
         assert cfg.ocr_language == "deu"
-        # Non-specified fields keep defaults
+        # Non-specified fields keep provider-aware defaults
         assert cfg.chunk_overlap == 100
-        assert cfg.embedding_dimensions == 768
+        assert cfg.embedding_dimensions == 384  # local provider default
 
 
 class TestConfigLoadEnvVars:
@@ -173,6 +173,7 @@ class TestConfigValidation:
             chunk_size=cfg.chunk_size,
             chunk_overlap=cfg.chunk_overlap,
             gemini_api_key="some-key",
+            dashscope_api_key=None,
             embedding_provider="gemini",
             embedding_timeout=cfg.embedding_timeout,
             embedding_max_retries=cfg.embedding_max_retries,
@@ -188,6 +189,7 @@ class TestConfigValidation:
             vision_enabled=cfg.vision_enabled,
             vision_model=cfg.vision_model,
             anthropic_api_key=cfg.anthropic_api_key,
+            max_pages=cfg.max_pages,
             zotero_api_key=cfg.zotero_api_key,
             zotero_user_id=cfg.zotero_user_id,
             zotero_library_type=cfg.zotero_library_type,

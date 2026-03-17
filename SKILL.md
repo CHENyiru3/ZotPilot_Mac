@@ -37,13 +37,19 @@ This section runs once. After setup, the user must restart their AI agent before
 
 ### 1. Configure Zotero + embedding provider
 
-Ask the user: "Do you have a Gemini API key, or prefer fully offline (local) embeddings?"
+Ask the user: "Which embedding provider do you prefer? Gemini (recommended), DashScope/Bailian (recommended for China), or fully offline (local)?"
 
 **With Gemini (recommended, higher quality):**
 ```bash
 python3 scripts/run.py setup --non-interactive --provider gemini
 ```
 User needs `GEMINI_API_KEY` — get one free at https://aistudio.google.com/apikey
+
+**With DashScope / Bailian (recommended for China):**
+```bash
+python3 scripts/run.py setup --non-interactive --provider dashscope
+```
+User needs `DASHSCOPE_API_KEY` — get one at https://bailian.console.aliyun.com/
 
 **Without API key (fully offline):**
 ```bash
@@ -92,16 +98,21 @@ Say: "Setup complete! Please restart your AI agent (or run `/mcp` in Claude Code
 MCP tools are now available. Index the user's papers:
 
 ```bash
-python3 scripts/run.py index --limit 10
-```
-
-This indexes 10 papers as a quick test. If successful, run full index:
-
-```bash
 python3 scripts/run.py index
 ```
 
-Indexing takes ~2-5 seconds per paper. After completion, proceed to the user's original request.
+Indexing takes ~2-5 seconds per paper. Documents longer than 40 pages are automatically skipped (configurable via `--max-pages`).
+
+### Long document handling
+
+After indexing completes, check the output for "Skipped N long documents". If long documents were skipped:
+
+1. Show the user the list of skipped documents (titles and page counts from the output)
+2. Ask: "The following long documents (over 40 pages) were skipped. Would you like to index any of them?"
+3. If user wants specific papers: `python3 scripts/run.py index --item-key KEY`
+4. If user wants all of them: `python3 scripts/run.py index --max-pages 0`
+
+After completion, proceed to the user's original request.
 
 ## Research (daily use)
 
@@ -148,7 +159,8 @@ search_boolean first (exact terms) → fallback to search_papers (semantic) → 
 | Error | Fix |
 |---|---|
 | Empty results | Try broader query, or `search_boolean` for exact terms. Check `get_index_stats` |
-| "GEMINI_API_KEY not set" | User must set env var |
+| "GEMINI_API_KEY not set" | User must set env var, or switch to dashscope/local |
+| "DASHSCOPE_API_KEY not set" | User must set env var |
 | "ZOTERO_API_KEY not set" | Write ops need Zotero Web API credentials — see below |
 | "Document has no DOI" | Cannot use citation tools for this paper |
 | "No chunks found" | Paper not indexed — run `index_library(item_key="...")` |

@@ -46,7 +46,8 @@ class Config:
     chunk_size: int
     chunk_overlap: int
     gemini_api_key: str | None
-    # Embedding provider: "gemini" (API) or "local" (ChromaDB default all-MiniLM-L6-v2)
+    dashscope_api_key: str | None
+    # Embedding provider: "gemini", "dashscope", or "local"
     embedding_provider: str
     # Embedding settings
     embedding_timeout: float
@@ -67,6 +68,8 @@ class Config:
     vision_enabled: bool
     vision_model: str
     anthropic_api_key: str | None
+    # Long document filtering
+    max_pages: int  # Maximum PDF pages to index (0 = no limit)
     # Zotero Web API (for write operations)
     zotero_api_key: str | None
     zotero_user_id: str | None
@@ -97,14 +100,24 @@ class Config:
 
         default_chroma = str(_default_data_dir() / "chroma")
 
+        provider = data.get("embedding_provider", "gemini")
+        # Provider-aware defaults for model and dimensions
+        model_defaults = {
+            "gemini": ("gemini-embedding-001", 768),
+            "dashscope": ("text-embedding-v3", 1024),
+            "local": ("all-MiniLM-L6-v2", 384),
+        }
+        default_model, default_dims = model_defaults.get(provider, ("gemini-embedding-001", 768))
+
         return cls(
             zotero_data_dir=Path(data.get("zotero_data_dir", "~/Zotero")).expanduser(),
             chroma_db_path=Path(data.get("chroma_db_path", default_chroma)).expanduser(),
-            embedding_model=data.get("embedding_model", "gemini-embedding-001"),
-            embedding_dimensions=data.get("embedding_dimensions", 768),
+            embedding_model=data.get("embedding_model", default_model),
+            embedding_dimensions=data.get("embedding_dimensions", default_dims),
             chunk_size=data.get("chunk_size", 400),
             chunk_overlap=data.get("chunk_overlap", 100),
             gemini_api_key=data.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY"),
+            dashscope_api_key=data.get("dashscope_api_key") or os.environ.get("DASHSCOPE_API_KEY"),
             embedding_provider=data.get("embedding_provider", "gemini"),
             embedding_timeout=data.get("embedding_timeout", 120.0),
             embedding_max_retries=data.get("embedding_max_retries", 3),
@@ -120,6 +133,7 @@ class Config:
             vision_enabled=data.get("vision_enabled", True),
             vision_model=data.get("vision_model", "claude-haiku-4-5-20251001"),
             anthropic_api_key=data.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY"),
+            max_pages=data.get("max_pages", 40),
             zotero_api_key=data.get("zotero_api_key") or os.environ.get("ZOTERO_API_KEY"),
             zotero_user_id=data.get("zotero_user_id") or os.environ.get("ZOTERO_USER_ID"),
             zotero_library_type=data.get("zotero_library_type", "user"),
@@ -156,6 +170,7 @@ class Config:
             "openalex_email": self.openalex_email,
             "vision_enabled": self.vision_enabled,
             "vision_model": self.vision_model,
+            "max_pages": self.max_pages,
             "zotero_user_id": self.zotero_user_id,
             "zotero_library_type": self.zotero_library_type,
         }
@@ -179,7 +194,9 @@ class Config:
 
         if self.embedding_provider == "gemini" and not self.gemini_api_key:
             errors.append("GEMINI_API_KEY not set (required for embedding_provider='gemini')")
-        elif self.embedding_provider not in ("gemini", "local"):
-            errors.append(f"Invalid embedding_provider: {self.embedding_provider}. Must be 'gemini' or 'local'")
+        elif self.embedding_provider == "dashscope" and not self.dashscope_api_key:
+            errors.append("DASHSCOPE_API_KEY not set (required for embedding_provider='dashscope')")
+        elif self.embedding_provider not in ("gemini", "dashscope", "local"):
+            errors.append(f"Invalid embedding_provider: {self.embedding_provider}. Must be 'gemini', 'dashscope', or 'local'")
 
         return errors

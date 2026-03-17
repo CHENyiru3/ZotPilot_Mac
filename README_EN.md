@@ -65,7 +65,7 @@ Zotero SQLite ──→ PDF extraction (PyMuPDF) ──→ Chunking + section cl
 - **Citation graph**: forward and backward citation lookup via OpenAlex API
 
 **Key design decisions:**
-- Fully local — papers never leave your machine (except Gemini embedding API calls)
+- Fully local — papers never leave your machine (except Gemini/DashScope embedding API calls)
 - Zotero SQLite read-only — safe even while Zotero is running
 - Asymmetric embeddings — documents encoded with `RETRIEVAL_DOCUMENT`, queries with `RETRIEVAL_QUERY`, improving retrieval quality
 - Built-in Skill — doesn't just give AI tools, teaches AI _which tool to pick and how to chain them_
@@ -121,7 +121,7 @@ When you say "search my Zotero for..." the first time, the Skill walks you throu
 5. **Indexes your papers** — on second launch, indexes your library (~2-5s per paper)
 6. **Ready to search** — from here on, just ask naturally
 
-> **Embedding choice:** Gemini (recommended, free tier at https://aistudio.google.com/apikey) or Local (offline, no API key). The Skill asks during setup.
+> **Embedding choice:** Gemini (recommended, free tier at https://aistudio.google.com/apikey), DashScope/Bailian (recommended for China, get API key at https://bailian.console.aliyun.com/), or Local (offline, no API key). The Skill asks during setup.
 
 ---
 
@@ -284,10 +284,11 @@ When you mention Zotero or papers, the AI:
 
 ### Embedding Options
 
-| Provider | API Key | Quality | Offline |
-|----------|---------|---------|---------|
-| **Gemini** `gemini-embedding-001` | Required (free tier) | MTEB #1 | No |
-| **Local** `all-MiniLM-L6-v2` | Not needed | Good | Yes |
+| Provider | API Key | Quality | Offline | Notes |
+|----------|---------|---------|---------|-------|
+| **Gemini** `gemini-embedding-001` | Required (free tier) | MTEB #1 | No | Recommended, 768d |
+| **DashScope** `text-embedding-v3` | Required (Alibaba Cloud) | Excellent | No | Recommended for China, 1024d, ¥0.0005/1k tokens |
+| **Local** `all-MiniLM-L6-v2` | Not needed | Good | Yes | 384d, fully offline |
 
 ### Data Storage
 
@@ -296,7 +297,7 @@ When you mention Zotero or papers, the AI:
 ~/.local/share/zotpilot/chroma/     # ChromaDB vector index
 ```
 
-Your Zotero data is read directly from its SQLite database. The index is local. No data leaves your machine (except embedding API calls if using Gemini).
+Your Zotero data is read directly from its SQLite database. The index is local. No data leaves your machine (except embedding API calls if using Gemini or DashScope).
 
 ---
 
@@ -353,7 +354,10 @@ Claude Code, OpenCode, and OpenClaw. Any agent that supports the Skill + MCP pro
 ### Cost & Resources
 
 **Does Gemini embedding cost money?**
-Gemini Embedding API has a **free tier** (1,500 requests/day). ZotPilot sends 1 request per 32 text chunks. A 10-page paper produces ~15-25 chunks = 1 request. The free tier is enough to index ~500 papers in one go. Daily search queries consume 1 request each. After indexing, there's virtually no ongoing cost.
+Gemini Embedding API has a **free tier** (~1,000 requests/day after the Dec 2025 reduction). ZotPilot sends 1 request per 32 text chunks. A 10-page paper produces ~15-25 chunks = 1 request. The free tier is enough to index several hundred papers in one go. **Each search query also requires 1 embedding request** (the query text must be vectorized for cosine similarity search). Paid pricing is $0.15/million tokens — daily search costs are negligible. The local model (`--provider local`) consumes zero API requests.
+
+**What about DashScope/Bailian embeddings?**
+Alibaba Cloud's DashScope offers `text-embedding-v3` with 1024-dimensional vectors. Ideal for users in China (no VPN needed). Pricing: ¥0.0005/1k tokens — extremely affordable. Use `--provider dashscope` during setup and set `DASHSCOPE_API_KEY`. Get a key at https://bailian.console.aliyun.com/.
 
 **What about the local embedding model?**
 `all-MiniLM-L6-v2` is ~80MB, downloaded automatically on first use. Runs fully offline after that — zero API cost. Lower quality than Gemini (384d vs 768d) but sufficient for small-to-medium libraries.
@@ -376,14 +380,15 @@ Yes. PyMuPDF has built-in OCR that detects image-only pages and extracts text au
 No. ZotPilot embeds **figure captions and the surrounding paragraph text** that references the figure — not the image pixels. Figure PNGs are saved to disk; `search_figures` returns the image path. You can search by "what Figure 3's caption says" but not by image content.
 
 **How are very long books (hundreds of pages) handled?**
-All PDFs are uniformly chunked at 400 tokens (~1600 chars) with 100-token overlap. A 500-page monograph will produce thousands of chunks — indexing takes longer but works fine. If you want to skip certain long documents:
+By default, documents longer than 40 pages are skipped (adjustable via `--max-pages`, use `--max-pages 0` to disable the limit). After indexing, skipped long documents are listed so you can decide whether to index them. You can also use `--item-key KEY` to index a specific long document individually.
+
+Other filtering options:
 - `--title "pattern"` — regex filter by title, index only matching papers
-- `--item-key KEY` — index a single specific paper
 - `--limit N` — cap the number of papers processed
 - Already-indexed papers are never re-indexed (tracked by PDF hash)
 
 **Can I use this without any API key?**
-Yes. Choose `--provider local` during setup. Uses all-MiniLM-L6-v2 offline. No API key needed for anything — search, browse, and organize all work locally.
+Yes. Choose `--provider local` during setup. Uses all-MiniLM-L6-v2 offline. No API key needed for anything — search, browse, and organize all work locally. If you're in China and can't easily access Gemini, `--provider dashscope` (Alibaba Cloud) is another option.
 
 ### Citation Graph
 
