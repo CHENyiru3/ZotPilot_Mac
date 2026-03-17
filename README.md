@@ -122,6 +122,8 @@ git clone https://github.com/xunhe730/ZotPilot.git ~/.openclaw/skills/zotpilot
 6. **开始搜索** — 之后直接用自然语言提问即可
 
 > **嵌入模型选择：** Gemini（推荐，免费额度在 https://aistudio.google.com/apikey 获取）、DashScope/百炼（国内推荐，在 https://bailian.console.aliyun.com/ 获取 API key）或 Local（离线，无需 API key）。Skill 会在安装时询问你。
+>
+> **注意：** 嵌入模型的选择在首次索引后就会锁定。不同模型的向量维度不兼容（Gemini 768 维、DashScope 1024 维、Local 384 维），切换后必须用 `zotpilot index --force` 重新索引全部论文。请在索引前慎重选择。
 
 ---
 

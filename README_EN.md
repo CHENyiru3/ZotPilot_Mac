@@ -122,6 +122,8 @@ When you say "search my Zotero for..." the first time, the Skill walks you throu
 6. **Ready to search** — from here on, just ask naturally
 
 > **Embedding choice:** Gemini (recommended, free tier at https://aistudio.google.com/apikey), DashScope/Bailian (recommended for China, get API key at https://bailian.console.aliyun.com/), or Local (offline, no API key). The Skill asks during setup.
+>
+> **Note:** The embedding provider is locked in after first index. Different providers produce incompatible vector dimensions (Gemini 768d, DashScope 1024d, Local 384d). Switching requires re-indexing with `zotpilot index --force`. Choose carefully.
 
 ---
 
