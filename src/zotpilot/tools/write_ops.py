@@ -78,6 +78,17 @@ def create_collection(
     return result
 
 
+@mcp.tool()
+def create_note(
+    item_key: Annotated[str, Field(description="Parent item key")],
+    content: Annotated[str, Field(description="Note content (plain text or HTML)")],
+    title: Annotated[str | None, Field(description="Note title (prepended as heading)")] = None,
+    tags: Annotated[list[str] | None, Field(description="Tags for the note")] = None,
+) -> dict:
+    """Create a child note on a Zotero item. Requires ZOTERO_API_KEY."""
+    return _get_writer().create_note(item_key, content, title=title, tags=tags)
+
+
 def _extract_tag_item(item) -> tuple[str | None, list[str] | None]:
     """Extract item_key and tags from a TagItem (dict at runtime)."""
     item_key = item.get("item_key") if isinstance(item, dict) else getattr(item, "item_key", None)

@@ -3,7 +3,7 @@ import time
 import logging
 from collections import defaultdict
 from dataclasses import replace
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field
 
@@ -401,3 +401,24 @@ def search_figures(
 
     logger.debug(f"search_figures: {time.perf_counter() - start:.3f}s")
     return output
+
+
+@mcp.tool()
+def advanced_search(
+    conditions: Annotated[list[dict], Field(description='[{field, op, value}]. Fields: title, author, year, tag, collection, publication, doi. Ops: contains, is, isNot, beginsWith, gt, lt.')],
+    match: Annotated[Literal["all", "any"], Field(description="all=AND, any=OR")] = "all",
+    sort_by: Annotated[str | None, Field(description="Sort: year, title, dateAdded")] = None,
+    sort_dir: Annotated[Literal["asc", "desc"], Field(description="Sort direction")] = "desc",
+    limit: Annotated[int, Field(description="Max results", ge=1, le=500)] = 50,
+) -> list[dict]:
+    """Multi-condition metadata search. Works without indexing. Use for precise filters by year/author/tag/etc."""
+    try:
+        return _get_zotero().advanced_search(
+            conditions=conditions,
+            match=match,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            limit=limit,
+        )
+    except ValueError as e:
+        raise ToolError(str(e))

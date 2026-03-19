@@ -126,6 +126,7 @@ ZotPilot — AI-powered Zotero research assistant. Tool selection guide:
 | Find specific passages or claims   | search_papers    |
 | Survey a topic / find papers       | search_topic     |
 | Find paper by exact terms          | search_boolean   |
+| Filter by year/author/tag/etc.     | advanced_search  |
 | Find data tables                   | search_tables    |
 | Find figures or diagrams           | search_figures   |
 
@@ -137,8 +138,11 @@ search_papers with section_weights. Use search_boolean for exact \
 terms (author names, acronyms). Use get_passage_context to expand \
 any result with surrounding text.
 
-Write operations (tags, collections) require ZOTERO_API_KEY and \
-ZOTERO_USER_ID environment variables.
+advanced_search works without indexing — use for precise metadata \
+filters. get_notes/create_note for reading and writing notes.
+
+Write operations (tags, collections, notes) require ZOTERO_API_KEY \
+and ZOTERO_USER_ID environment variables.
 """
 
 mcp = FastMCP("zotpilot", instructions=_MCP_INSTRUCTIONS)

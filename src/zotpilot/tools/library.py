@@ -138,3 +138,28 @@ def get_library_overview(
             for item in page
         ],
     }
+
+
+@mcp.tool()
+def get_notes(
+    item_key: Annotated[str | None, Field(description="Parent item key. None for all notes.")] = None,
+    limit: Annotated[int, Field(description="Max notes to return", ge=1, le=200)] = 20,
+    query: Annotated[str | None, Field(description="Search within note content (case-insensitive)")] = None,
+) -> list[dict]:
+    """Get or search notes. Filter by parent item and/or content keyword."""
+    return _get_zotero().get_notes(item_key=item_key, query=query, limit=limit)
+
+
+@mcp.tool()
+def get_feeds(
+    library_id: Annotated[int | None, Field(description="Feed library ID for items. None to list all feeds.")] = None,
+    limit: Annotated[int, Field(description="Max feed items", ge=1, le=100)] = 20,
+) -> dict:
+    """List RSS feeds or get items from a feed. Works without indexing."""
+    zotero = _get_zotero()
+    if library_id is None:
+        feeds = zotero.get_feeds()
+        return {"feeds": feeds, "total": len(feeds)}
+    else:
+        items = zotero.get_feed_items(library_id, limit=limit)
+        return {"library_id": library_id, "items": items, "total": len(items)}

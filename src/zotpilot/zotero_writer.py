@@ -73,3 +73,45 @@ class ZoteroWriter:
             created_key = list(result["success"].values())[0]
             return {"key": created_key, "name": name, "parent_key": parent_key}
         raise RuntimeError(f"Failed to create collection: {result}")
+
+    def create_note(self, item_key: str, content: str, title: str | None = None, tags: list[str] | None = None) -> dict:
+        """Create a child note on a Zotero item.
+
+        Args:
+            item_key: Parent item key
+            content: Note content (plain text or HTML)
+            title: Optional title (prepended as heading)
+            tags: Optional tags for the note
+
+        Returns:
+            Dict with key of created note
+        """
+        import html as html_mod
+
+        # Convert plain text to HTML if it doesn't look like HTML
+        if not content.strip().startswith("<"):
+            # Plain text → HTML: paragraphs and line breaks
+            paragraphs = content.split("\n\n")
+            html_parts = []
+            for p in paragraphs:
+                escaped = html_mod.escape(p).replace("\n", "<br/>")
+                html_parts.append(f"<p>{escaped}</p>")
+            html_content = "".join(html_parts)
+        else:
+            html_content = content
+
+        # Prepend title as heading
+        if title:
+            html_content = f"<h1>{html_mod.escape(title)}</h1>{html_content}"
+
+        # Build note template
+        template = self._zot.item_template("note")
+        template["parentItem"] = item_key
+        template["note"] = html_content
+        template["tags"] = [{"tag": t} for t in (tags or [])]
+
+        result = self._zot.create_items([template])
+        if result.get("success"):
+            created_key = list(result["success"].values())[0]
+            return {"key": created_key, "parent_key": item_key}
+        raise RuntimeError(f"Failed to create note: {result}")

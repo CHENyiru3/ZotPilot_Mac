@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.5] - 2026-03-19
+
+### Added
+- `get_feeds` tool — list RSS feeds or get feed items (SQLite, no API key needed). Graceful degradation for old Zotero versions without feeds table
+- Tool count: 29 → 30
+
+## [0.1.4] - 2026-03-19
+
+### Added
+- `get_notes` tool — read and search notes by parent item or content keyword (SQLite, no API key needed)
+- `create_note` tool — create child notes on Zotero items (requires ZOTERO_API_KEY)
+- `advanced_search` tool — multi-condition metadata search by year/author/tag/collection/title/doi/publication. Works without indexing. Tag matching uses direct JOIN to prevent false positives ("ML" won't match "HTML")
+- Tool count: 26 → 29
+
 ## [0.1.3] - 2026-03-19
 
 ### Changed

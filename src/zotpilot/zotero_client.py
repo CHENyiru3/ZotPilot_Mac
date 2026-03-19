@@ -1,7 +1,28 @@
 """Zotero SQLite database client."""
 import sqlite3
+from html.parser import HTMLParser
 from pathlib import Path
 from .models import ZoteroItem
+
+
+class _HTMLStripper(HTMLParser):
+    """Strip HTML tags, keeping text content."""
+    def __init__(self):
+        super().__init__()
+        self._parts: list[str] = []
+
+    def handle_data(self, data):
+        self._parts.append(data)
+
+    def get_text(self):
+        return "".join(self._parts).strip()
+
+
+def _strip_html(html: str) -> str:
+    """Convert HTML to plain text."""
+    stripper = _HTMLStripper()
+    stripper.feed(html)
+    return stripper.get_text()
 
 
 def _sqlite_uri(path: Path) -> str:
@@ -405,6 +426,36 @@ class ZoteroClient:
     LEFT JOIN pdfs ON base_items.itemID = pdfs.parentItemID;
     """
 
+    NOTES_SQL = """
+    SELECT
+        notes.key AS noteKey,
+        notes.itemID AS noteItemID,
+        parent.key AS parentKey,
+        COALESCE(titles.title, '[No Title]') AS parentTitle,
+        itemNotes.note AS noteContent,
+        notes.dateAdded,
+        COALESCE(item_tags.tags, '') AS tags
+    FROM items notes
+    JOIN itemNotes ON notes.itemID = itemNotes.itemID
+    LEFT JOIN items parent ON itemNotes.parentItemID = parent.itemID
+    LEFT JOIN (
+        SELECT itemData.itemID, itemDataValues.value AS title
+        FROM itemData
+        JOIN itemDataValues ON itemData.valueID = itemDataValues.valueID
+        JOIN fields ON itemData.fieldID = fields.fieldID
+        WHERE fields.fieldName = 'title'
+    ) titles ON parent.itemID = titles.itemID
+    LEFT JOIN (
+        SELECT items.itemID, GROUP_CONCAT(tags.name, '; ') AS tags
+        FROM items
+        JOIN itemTags ON items.itemID = itemTags.itemID
+        JOIN tags ON itemTags.tagID = tags.tagID
+        GROUP BY items.itemID
+    ) item_tags ON notes.itemID = item_tags.itemID
+    WHERE notes.itemTypeID = 1
+      AND notes.itemID NOT IN (SELECT itemID FROM deletedItems)
+"""
+
     def _row_to_item(self, row, citation_keys: dict[str, str]) -> ZoteroItem:
         """Convert a database row to a ZoteroItem."""
         pdf_path = self._resolve_pdf_path(
@@ -441,6 +492,44 @@ class ZoteroClient:
 
         citation_keys = self._load_citation_keys()
         return self._row_to_item(row, citation_keys)
+
+    def get_notes(self, item_key: str | None = None, query: str | None = None, limit: int = 20) -> list[dict]:
+        """Get notes, optionally filtered by parent item or content search."""
+        conn = sqlite3.connect(_sqlite_uri(self.db_path), uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            sql = self.NOTES_SQL
+            params = []
+            conditions = []
+
+            if item_key:
+                conditions.append("parent.key = ?")
+                params.append(item_key)
+
+            if query:
+                conditions.append("itemNotes.note LIKE ?")
+                params.append(f"%{query}%")
+
+            if conditions:
+                sql += " AND " + " AND ".join(conditions)
+
+            sql += " ORDER BY notes.dateAdded DESC LIMIT ?"
+            params.append(limit)
+
+            rows = conn.execute(sql, params).fetchall()
+            return [
+                {
+                    "key": row["noteKey"],
+                    "parent_key": row["parentKey"] or "",
+                    "parent_title": row["parentTitle"] or "",
+                    "tags": row["tags"],
+                    "content": _strip_html(row["noteContent"] or ""),
+                    "date_added": row["dateAdded"],
+                }
+                for row in rows
+            ]
+        finally:
+            conn.close()
 
     # =========================================================================
     # Boolean Full-Text Search (Feature 3)
@@ -573,5 +662,371 @@ class ZoteroClient:
                 WHERE i.key = ? AND f.fieldName = 'abstractNote'
             """, (item_key,)).fetchone()
             return row[0] if row else ""
+        finally:
+            conn.close()
+
+    ADVANCED_SEARCH_BASE_SQL = """
+    SELECT
+        base.itemID,
+        base.key AS itemKey,
+        COALESCE(titles.title, '[No Title]') AS title,
+        COALESCE(authors.authors, '[No Author]') AS authors,
+        years.year,
+        COALESCE(publications.publication, '') AS publication,
+        COALESCE(dois.doi, '') AS doi,
+        COALESCE(item_tags.tags, '') AS tags,
+        COALESCE(item_collections.collection_names, '') AS collections
+    FROM items base
+    LEFT JOIN (
+        SELECT itemData.itemID, itemDataValues.value AS title
+        FROM itemData
+        JOIN itemDataValues ON itemData.valueID = itemDataValues.valueID
+        JOIN fields ON itemData.fieldID = fields.fieldID
+        WHERE fields.fieldName = 'title'
+    ) titles ON base.itemID = titles.itemID
+    LEFT JOIN (
+        SELECT itemData.itemID, CAST(substr(itemDataValues.value, 1, 4) AS INTEGER) AS year
+        FROM itemData
+        JOIN itemDataValues ON itemData.valueID = itemDataValues.valueID
+        JOIN fields ON itemData.fieldID = fields.fieldID
+        WHERE fields.fieldName = 'date'
+    ) years ON base.itemID = years.itemID
+    LEFT JOIN (
+        SELECT
+            items.itemID,
+            CASE
+                WHEN COUNT(*) = 1 THEN
+                    MAX(creators.lastName) ||
+                    CASE WHEN MAX(creators.firstName) IS NOT NULL AND MAX(creators.firstName) != ''
+                         THEN ', ' || substr(MAX(creators.firstName), 1, 1) || '.'
+                         ELSE '' END
+                ELSE
+                    MAX(CASE WHEN itemCreators.orderIndex = 0 THEN creators.lastName END) || ' et al.'
+            END AS authors
+        FROM items
+        JOIN itemCreators ON items.itemID = itemCreators.itemID
+        JOIN creators ON itemCreators.creatorID = creators.creatorID
+        GROUP BY items.itemID
+    ) authors ON base.itemID = authors.itemID
+    LEFT JOIN (
+        SELECT itemData.itemID, itemDataValues.value AS publication
+        FROM itemData
+        JOIN itemDataValues ON itemData.valueID = itemDataValues.valueID
+        JOIN fields ON itemData.fieldID = fields.fieldID
+        WHERE fields.fieldName = 'publicationTitle'
+    ) publications ON base.itemID = publications.itemID
+    LEFT JOIN (
+        SELECT itemData.itemID, itemDataValues.value AS doi
+        FROM itemData
+        JOIN itemDataValues ON itemData.valueID = itemDataValues.valueID
+        JOIN fields ON itemData.fieldID = fields.fieldID
+        WHERE fields.fieldName = 'DOI'
+    ) dois ON base.itemID = dois.itemID
+    LEFT JOIN (
+        SELECT items.itemID, GROUP_CONCAT(tags.name, '; ') AS tags
+        FROM items
+        JOIN itemTags ON items.itemID = itemTags.itemID
+        JOIN tags ON itemTags.tagID = tags.tagID
+        GROUP BY items.itemID
+    ) item_tags ON base.itemID = item_tags.itemID
+    LEFT JOIN (
+        SELECT items.itemID, GROUP_CONCAT(c.collectionName, '; ') AS collection_names
+        FROM items
+        JOIN collectionItems ci ON items.itemID = ci.itemID
+        JOIN collections c ON ci.collectionID = c.collectionID
+        GROUP BY items.itemID
+    ) item_collections ON base.itemID = item_collections.itemID
+    WHERE base.itemTypeID NOT IN (1, 14)
+      AND base.itemID NOT IN (SELECT itemID FROM deletedItems)
+"""
+
+    _ADVANCED_FIELDS = {"title", "author", "year", "tag", "collection", "publication", "doi"}
+    _ADVANCED_OPS = {"contains", "is", "isNot", "beginsWith", "gt", "lt"}
+
+    def advanced_search(
+        self,
+        conditions: list[dict],
+        match: str = "all",
+        sort_by: str | None = None,
+        sort_dir: str = "desc",
+        limit: int = 50,
+    ) -> list[dict]:
+        """Multi-condition metadata search. Works without indexing.
+
+        Args:
+            conditions: List of {field, op, value} dicts.
+                Fields: title, author, year, tag, collection, publication, doi
+                Ops: contains, is, isNot, beginsWith, gt, lt
+            match: "all" (AND) or "any" (OR)
+            sort_by: Optional sort field: year, title, dateAdded
+            sort_dir: "asc" or "desc"
+            limit: Max results
+
+        Returns:
+            List of item dicts with metadata
+        """
+        if not conditions:
+            return []
+
+        where_clauses = []
+        params = []
+
+        for cond in conditions:
+            field = cond.get("field", "")
+            op = cond.get("op", "")
+            value = cond.get("value", "")
+
+            if field not in self._ADVANCED_FIELDS:
+                raise ValueError(f"Invalid field: '{field}'. Valid: {', '.join(sorted(self._ADVANCED_FIELDS))}")
+            if op not in self._ADVANCED_OPS:
+                raise ValueError(f"Invalid op: '{op}'. Valid: {', '.join(sorted(self._ADVANCED_OPS))}")
+
+            clause, clause_params = self._build_condition(field, op, str(value))
+            where_clauses.append(clause)
+            params.extend(clause_params)
+
+        joiner = " AND " if match == "all" else " OR "
+        combined = joiner.join(where_clauses)
+
+        sql = self.ADVANCED_SEARCH_BASE_SQL + f" AND ({combined})"
+
+        # Sorting
+        sort_map = {"year": "years.year", "title": "titles.title", "dateAdded": "base.dateAdded"}
+        if sort_by and sort_by in sort_map:
+            direction = "ASC" if sort_dir == "asc" else "DESC"
+            sql += f" ORDER BY {sort_map[sort_by]} {direction}"
+        else:
+            sql += " ORDER BY base.itemID DESC"
+
+        sql += " LIMIT ?"
+        params.append(limit)
+
+        conn = sqlite3.connect(_sqlite_uri(self.db_path), uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(sql, params).fetchall()
+            citation_keys = self._load_citation_keys()
+            return [
+                {
+                    "item_key": row["itemKey"],
+                    "doc_id": row["itemKey"],
+                    "title": row["title"],
+                    "authors": row["authors"],
+                    "year": row["year"],
+                    "publication": row["publication"],
+                    "doi": row["doi"],
+                    "tags": row["tags"],
+                    "collections": row["collections"],
+                    "citation_key": citation_keys.get(row["itemKey"], ""),
+                }
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def _build_condition(self, field: str, op: str, value: str) -> tuple[str, list]:
+        """Build a single WHERE clause + params for advanced_search."""
+        # Tag: use EXISTS with direct JOIN for exact match
+        if field == "tag":
+            if op == "is":
+                return (
+                    "EXISTS (SELECT 1 FROM itemTags JOIN tags ON itemTags.tagID = tags.tagID "
+                    "WHERE itemTags.itemID = base.itemID AND tags.name = ?)",
+                    [value],
+                )
+            elif op == "isNot":
+                return (
+                    "NOT EXISTS (SELECT 1 FROM itemTags JOIN tags ON itemTags.tagID = tags.tagID "
+                    "WHERE itemTags.itemID = base.itemID AND tags.name = ?)",
+                    [value],
+                )
+            elif op == "contains":
+                return (
+                    "EXISTS (SELECT 1 FROM itemTags JOIN tags ON itemTags.tagID = tags.tagID "
+                    "WHERE itemTags.itemID = base.itemID AND tags.name LIKE ?)",
+                    [f"%{value}%"],
+                )
+            elif op == "beginsWith":
+                return (
+                    "EXISTS (SELECT 1 FROM itemTags JOIN tags ON itemTags.tagID = tags.tagID "
+                    "WHERE itemTags.itemID = base.itemID AND tags.name LIKE ?)",
+                    [f"{value}%"],
+                )
+            else:
+                raise ValueError(f"Op '{op}' not supported for field 'tag'")
+
+        # Collection: use EXISTS with direct JOIN
+        if field == "collection":
+            if op == "is":
+                return (
+                    "EXISTS (SELECT 1 FROM collectionItems ci JOIN collections c ON ci.collectionID = c.collectionID "
+                    "WHERE ci.itemID = base.itemID AND c.collectionName = ?)",
+                    [value],
+                )
+            elif op == "isNot":
+                return (
+                    "NOT EXISTS (SELECT 1 FROM collectionItems ci JOIN collections c ON ci.collectionID = c.collectionID "
+                    "WHERE ci.itemID = base.itemID AND c.collectionName = ?)",
+                    [value],
+                )
+            elif op == "contains":
+                return (
+                    "EXISTS (SELECT 1 FROM collectionItems ci JOIN collections c ON ci.collectionID = c.collectionID "
+                    "WHERE ci.itemID = base.itemID AND c.collectionName LIKE ?)",
+                    [f"%{value}%"],
+                )
+            elif op == "beginsWith":
+                return (
+                    "EXISTS (SELECT 1 FROM collectionItems ci JOIN collections c ON ci.collectionID = c.collectionID "
+                    "WHERE ci.itemID = base.itemID AND c.collectionName LIKE ?)",
+                    [f"{value}%"],
+                )
+            else:
+                raise ValueError(f"Op '{op}' not supported for field 'collection'")
+
+        # Year: numeric comparison
+        if field == "year":
+            col = "years.year"
+            if op == "is":
+                return f"{col} = ?", [int(value)]
+            elif op == "isNot":
+                return f"{col} != ?", [int(value)]
+            elif op == "gt":
+                return f"{col} > ?", [int(value)]
+            elif op == "lt":
+                return f"{col} < ?", [int(value)]
+            elif op == "contains":
+                return f"CAST({col} AS TEXT) LIKE ?", [f"%{value}%"]
+            elif op == "beginsWith":
+                return f"CAST({col} AS TEXT) LIKE ?", [f"{value}%"]
+            else:
+                raise ValueError(f"Op '{op}' not supported for field 'year'")
+
+        # Simple text fields: title, author, publication, doi
+        col_map = {
+            "title": "titles.title",
+            "author": "authors.authors",
+            "publication": "publications.publication",
+            "doi": "dois.doi",
+        }
+        col = col_map[field]
+
+        if op == "contains":
+            return f"{col} LIKE ?", [f"%{value}%"]
+        elif op == "is":
+            return f"{col} = ?", [value]
+        elif op == "isNot":
+            return f"({col} IS NULL OR {col} != ?)", [value]
+        elif op == "beginsWith":
+            return f"{col} LIKE ?", [f"{value}%"]
+        elif op == "gt":
+            return f"{col} > ?", [value]
+        elif op == "lt":
+            return f"{col} < ?", [value]
+        else:
+            raise ValueError(f"Unsupported op: {op}")
+
+    # =========================================================================
+    # RSS Feeds
+    # =========================================================================
+
+    def _table_exists(self, conn: sqlite3.Connection, table_name: str) -> bool:
+        """Check if a table exists in the database."""
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+
+    def get_feeds(self) -> list[dict]:
+        """List all RSS feeds configured in Zotero."""
+        conn = sqlite3.connect(_sqlite_uri(self.db_path), uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            if not self._table_exists(conn, "feeds"):
+                return []
+            rows = conn.execute("""
+                SELECT f.libraryID, f.url, f.title,
+                       f.lastCheck,
+                       (SELECT COUNT(*) FROM feedItems fi WHERE fi.libraryID = f.libraryID) AS itemCount
+                FROM feeds f
+                ORDER BY f.title
+            """).fetchall()
+            return [
+                {
+                    "library_id": row["libraryID"],
+                    "name": row["title"] or "",
+                    "url": row["url"] or "",
+                    "item_count": row["itemCount"],
+                    "last_check": row["lastCheck"] or "",
+                }
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def get_feed_items(self, library_id: int, limit: int = 20) -> list[dict]:
+        """Get items from a specific RSS feed."""
+        conn = sqlite3.connect(_sqlite_uri(self.db_path), uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            if not self._table_exists(conn, "feedItems"):
+                return []
+            rows = conn.execute("""
+                SELECT fi.itemID, i.key, fi.guid, fi.readTime,
+                       COALESCE(titles.title, '[No Title]') AS title,
+                       COALESCE(authors.authors, '') AS authors,
+                       COALESCE(abstracts.abstract, '') AS abstract,
+                       COALESCE(urls.url, '') AS url,
+                       i.dateAdded
+                FROM feedItems fi
+                JOIN items i ON fi.itemID = i.itemID
+                LEFT JOIN (
+                    SELECT id.itemID, idv.value AS title
+                    FROM itemData id
+                    JOIN itemDataValues idv ON id.valueID = idv.valueID
+                    JOIN fields f ON id.fieldID = f.fieldID
+                    WHERE f.fieldName = 'title'
+                ) titles ON fi.itemID = titles.itemID
+                LEFT JOIN (
+                    SELECT ic.itemID,
+                        CASE WHEN COUNT(*) = 1
+                            THEN MAX(c.lastName)
+                            ELSE MAX(CASE WHEN ic.orderIndex = 0 THEN c.lastName END) || ' et al.'
+                        END AS authors
+                    FROM itemCreators ic
+                    JOIN creators c ON ic.creatorID = c.creatorID
+                    GROUP BY ic.itemID
+                ) authors ON fi.itemID = authors.itemID
+                LEFT JOIN (
+                    SELECT id.itemID, idv.value AS abstract
+                    FROM itemData id
+                    JOIN itemDataValues idv ON id.valueID = idv.valueID
+                    JOIN fields f ON id.fieldID = f.fieldID
+                    WHERE f.fieldName = 'abstractNote'
+                ) abstracts ON fi.itemID = abstracts.itemID
+                LEFT JOIN (
+                    SELECT id.itemID, idv.value AS url
+                    FROM itemData id
+                    JOIN itemDataValues idv ON id.valueID = idv.valueID
+                    JOIN fields f ON id.fieldID = f.fieldID
+                    WHERE f.fieldName = 'url'
+                ) urls ON fi.itemID = urls.itemID
+                WHERE fi.libraryID = ?
+                ORDER BY i.dateAdded DESC
+                LIMIT ?
+            """, (library_id, limit)).fetchall()
+            return [
+                {
+                    "key": row["key"],
+                    "title": row["title"],
+                    "authors": row["authors"],
+                    "abstract": row["abstract"],
+                    "url": row["url"],
+                    "date_added": row["dateAdded"] or "",
+                    "read": row["readTime"] is not None,
+                }
+                for row in rows
+            ]
         finally:
             conn.close()
