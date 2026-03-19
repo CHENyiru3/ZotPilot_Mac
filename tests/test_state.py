@@ -10,7 +10,6 @@ from zotpilot.state import (
     _apply_text_filters,
     _has_text_filters,
     _apply_required_terms,
-    _contains_chinese,
     _result_to_dict,
     _merge_results_by_chunk,
 )
@@ -111,20 +110,6 @@ class TestApplyRequiredTerms:
         r1 = SimpleNamespace(text="The Transformer model is effective")
         filtered = _apply_required_terms([r1], ["transformer"])
         assert filtered == [r1]
-
-
-# ---------------------------------------------------------------------------
-# _contains_chinese
-# ---------------------------------------------------------------------------
-
-class TestContainsChinese:
-    def test_contains_chinese(self):
-        assert _contains_chinese("深度学习研究") is True
-        assert _contains_chinese("mixed 中文 text") is True
-
-    def test_contains_chinese_false(self):
-        assert _contains_chinese("deep learning research") is False
-        assert _contains_chinese("") is False
 
 
 # ---------------------------------------------------------------------------

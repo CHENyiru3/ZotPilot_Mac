@@ -106,6 +106,14 @@ def _check_zotero_web_api() -> CheckResult:
     user_id = os.environ.get("ZOTERO_USER_ID")
 
     if api_key and user_id:
+        if not user_id.isdigit():
+            return CheckResult(
+                "zotero_web_api",
+                "fail",
+                f"ZOTERO_USER_ID must be a numeric ID (e.g. '1234567'), "
+                f"not a username (got '{user_id}'). "
+                f"Find your numeric ID at https://www.zotero.org/settings/keys",
+            )
         return CheckResult("zotero_web_api", "pass", "ZOTERO_API_KEY and ZOTERO_USER_ID are set")
 
     missing = []

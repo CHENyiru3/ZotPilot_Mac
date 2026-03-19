@@ -12,7 +12,6 @@ from .filters import (  # noqa: F401
     VALID_CHUNK_TYPES, _build_chromadb_filters, _meta_get,
     _apply_text_filters, _has_text_filters, _apply_required_terms,
 )
-from .translation import _contains_chinese, _translate_to_english  # noqa: F401
 from .result_utils import (  # noqa: F401
     _stored_chunk_to_retrieval_result, _merge_results_by_chunk, _result_to_dict,
 )

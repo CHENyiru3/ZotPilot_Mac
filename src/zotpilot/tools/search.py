@@ -12,7 +12,6 @@ from ..filters import (
     VALID_CHUNK_TYPES, _build_chromadb_filters, _apply_text_filters,
     _has_text_filters, _apply_required_terms,
 )
-from ..translation import _contains_chinese, _translate_to_english
 from ..result_utils import (
     _stored_chunk_to_retrieval_result, _merge_results_by_chunk, _result_to_dict,
 )
@@ -105,13 +104,7 @@ def search_papers(
     reranker = _get_reranker()
     _config = _get_config()
 
-    # Auto-translate Chinese queries and run bilingual search
     queries = [query]
-    if _contains_chinese(query):
-        en_query = _translate_to_english(query)
-        if en_query:
-            queries.append(en_query)
-            logger.debug(f"Bilingual search: zh='{query}' en='{en_query}'")
 
     # Oversample for reranking; increase if post-retrieval filters will reduce results
     base_fetch = min(top_k * _config.oversample_multiplier, 150)
@@ -217,13 +210,7 @@ def search_topic(
     reranker = _get_reranker()
     _config = _get_config()
 
-    # Auto-translate Chinese queries and run bilingual search
     queries = [query]
-    if _contains_chinese(query):
-        en_query = _translate_to_english(query)
-        if en_query:
-            queries.append(en_query)
-            logger.debug(f"Bilingual topic search: zh='{query}' en='{en_query}'")
 
     # Fetch more chunks than papers requested; double if text filters active
     base_fetch = min(

@@ -43,6 +43,10 @@ class VectorStore:
         self.db_path = Path(db_path)
         self.db_path.mkdir(parents=True, exist_ok=True)
 
+        # Query embedding cache (FIFO eviction at maxsize)
+        self._query_cache: dict[str, list[float]] = {}
+        self._query_cache_maxsize = 512
+
         self.client = chromadb.PersistentClient(
             path=str(self.db_path),
             settings=Settings(anonymized_telemetry=False)
@@ -251,6 +255,21 @@ class VectorStore:
                 metadatas=metadatas,
             )
 
+    def _cached_embed_query(self, query: str) -> list[float]:
+        """Embed a query, returning cached result if available."""
+        if query in self._query_cache:
+            return self._query_cache[query]
+        embedding = self.embedder.embed_query(query)
+        if len(self._query_cache) >= self._query_cache_maxsize:
+            oldest = next(iter(self._query_cache))
+            del self._query_cache[oldest]
+        self._query_cache[query] = embedding
+        return embedding
+
+    def clear_query_cache(self):
+        """Clear cached query embeddings (call after index updates)."""
+        self._query_cache.clear()
+
     def search(
         self,
         query: str,
@@ -268,8 +287,8 @@ class VectorStore:
         Returns:
             List of StoredChunk objects sorted by similarity
         """
-        # Use RETRIEVAL_QUERY task type for asymmetric search
-        query_embedding = self.embedder.embed_query(query)
+        # Use RETRIEVAL_QUERY task type for asymmetric search (with caching)
+        query_embedding = self._cached_embed_query(query)
 
         results = self.collection.query(
             query_embeddings=[query_embedding],

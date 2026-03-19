@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.2] - 2026-03-19
+
+### Added
+- Query embedding cache in `VectorStore` (maxsize=512, FIFO eviction) — avoids repeated embedding API calls for identical queries
+- 5 batch write tools: `batch_add_tags`, `batch_set_tags`, `batch_remove_tags`, `batch_add_to_collection`, `batch_remove_from_collection` (max 100 items, per-item error reporting)
+- `zotpilot doctor` now validates `ZOTERO_USER_ID` is numeric (catches username vs ID confusion)
+- SKILL.md updated with batch tool documentation and workflow chains
+
+### Removed
+- Built-in Chinese→English query translation (`translation.py` deleted) — bilingual search is now the Agent's responsibility, not the MCP server's
+- `_contains_chinese` and `_translate_to_english` removed from search pipeline
+
+### Changed
+- `VectorStore.search()` uses cached embeddings via `_cached_embed_query()`
+- `index_library()` clears query cache after indexing to ensure new documents are findable
+- Search tool docstrings updated: query accepts any language, Agent should translate if needed
+
 ## [0.1.1] - 2026-03-19
 
 ### Fixed
@@ -28,7 +45,7 @@
 
 ### Added
 - Initial release as ZotPilot (repackaged from deep-zotero)
-- 24 MCP tools for search, indexing, citations, and library management
+- 29 MCP tools for search, indexing, citations, and library management
 - Gemini and local embedding providers
 - Section-aware reranking with journal quality weighting
 - PDF extraction with table, figure, and OCR support

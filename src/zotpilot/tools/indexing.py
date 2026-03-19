@@ -54,6 +54,9 @@ def index_library(
         title_pattern=title_pattern,
     )
 
+    # Clear query embedding cache so new documents are findable
+    _get_store().clear_query_cache()
+
     # Serialize IndexResult objects
     serialized_results = []
     for r in result["results"]:
