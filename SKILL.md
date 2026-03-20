@@ -60,38 +60,45 @@ python3 scripts/run.py setup --non-interactive --provider local
 
 If auto-detection of Zotero fails, add `--zotero-dir /path/to/Zotero`.
 
-### 2. Register MCP server
+### 2. Configure Zotero Web API (for write operations)
 
-**Claude Code:**
+Ask the user: "Do you want to be able to tag and organize papers from AI? If yes, you'll need a Zotero API key."
+
+If yes:
+1. Go to **https://www.zotero.org/settings/keys**
+2. **User ID**: The numeric ID shown at the top of the page (e.g. `16568173`). This is NOT your username — it's a number.
+3. Click **"Create new private key"**, check "Allow library access" + "Allow write access", save
+4. Copy the generated key
+
+If no, skip — search/read tools will still work without it.
+
+### 3. Register MCP server
+
+Run the cross-platform registration command with ALL credentials the user has:
+
 ```bash
-claude mcp add -s user zotpilot -- zotpilot
-```
-If using Gemini, pass the key:
-```bash
-claude mcp add -s user -e GEMINI_API_KEY=<key> zotpilot -- zotpilot
-```
+# Minimal (search only):
+python3 scripts/run.py register
 
-**OpenCode:**
-```bash
-opencode mcp add
-```
-Enter: name=`zotpilot`, command=`zotpilot`, transport=`stdio`.
+# With Gemini embeddings:
+python3 scripts/run.py register --gemini-key <key>
 
-**OpenClaw:**
-1. `openclaw plugins install @aiwerk/openclaw-mcp-bridge`
-2. Edit `~/.openclaw/openclaw.json`, add under `plugins.entries.openclaw-mcp-bridge.config.servers`:
-```json
-"zotpilot": {
-  "transport": "stdio",
-  "command": "zotpilot",
-  "args": [],
-  "env": { "GEMINI_API_KEY": "${GEMINI_API_KEY}" }
-}
+# Full setup (search + write + Gemini):
+python3 scripts/run.py register \
+  --gemini-key <key> \
+  --zotero-api-key <key> \
+  --zotero-user-id <numeric-id>
 ```
 
-### 3. Tell user to restart
+This auto-detects the user's AI agent platform(s) and registers accordingly. Supports Claude Code, Codex CLI, OpenCode, Gemini CLI, Cursor, Windsurf, Cline, and Roo Code.
 
-Say: "Setup complete! Please restart your AI agent (or run `/mcp` in Claude Code) to activate ZotPilot's 26 tools. After restarting, ask me again and I'll index your papers and start searching."
+If auto-detection fails, specify explicitly: `python3 scripts/run.py register --platform claude-code`
+
+### 4. Verify and restart
+
+Run: `python3 scripts/run.py status --json`
+
+Tell the user: "Setup complete! Please restart your AI agent to activate ZotPilot's tools. After restarting, ask me again and I'll index your papers."
 
 **IMPORTANT:** Stop here. Do NOT attempt to use MCP tools (search_papers, etc.) until the user restarts. The MCP server is not available until after restart.
 
@@ -131,7 +138,8 @@ After completion, proceed to the user's original request.
 | See all papers | `get_library_overview` | `limit=100`, `offset=0` |
 | Paper details | `get_paper_details` | `item_key` |
 | Who cites this? | `find_citing_papers` | `doc_id` |
-| Tag/organize papers | `add_item_tags`, `add_to_collection` | `item_key` |
+| Tag/organize one paper | `add_item_tags`, `add_to_collection` | `item_key` |
+| Batch tag/organize many papers | `batch_add_tags`, `batch_add_to_collection` | `items` or `item_keys` |
 
 ### Workflow chains
 
@@ -141,8 +149,8 @@ search_topic → get_paper_details (top 5) → find_references → search_papers
 **"What do I have on X?":**
 search_topic(num_papers=20) → report count, year range, key authors, top passages
 
-**Organize by theme:**
-search_topic → create_collection → add_to_collection for each match → add_item_tags
+**Organize by theme (batch):**
+search_topic → create_collection → batch_add_to_collection(item_keys=[...], collection_key) → batch_add_tags(items=[{item_key, tags}])
 
 **Find specific paper:**
 search_boolean first (exact terms) → fallback to search_papers (semantic) → get_paper_details
@@ -169,18 +177,19 @@ search_boolean first (exact terms) → fallback to search_papers (semantic) → 
 
 ### Write operations (tags, collections)
 
-Write tools (`add_item_tags`, `set_item_tags`, `add_to_collection`, `remove_from_collection`, `create_collection`) require Zotero Web API credentials. If user gets "ZOTERO_API_KEY not set":
+Write tools require Zotero Web API credentials. If user gets "ZOTERO_API_KEY not set" or "Invalid user ID":
 
-1. Go to https://www.zotero.org/settings/keys
-2. Click "Create new private key"
-3. Check "Allow library access" and "Allow write access"
-4. Copy the key and note the User ID (number on the same page)
-5. Re-register MCP with the credentials:
-   ```bash
-   claude mcp remove zotpilot
-   claude mcp add -s user -e GEMINI_API_KEY=<key> -e ZOTERO_API_KEY=<key> -e ZOTERO_USER_ID=<id> zotpilot -- zotpilot
-   ```
-6. Restart AI agent
+Go back to **Step 2** (Configure Zotero Web API) in **First-Time Setup** and re-register the MCP server with all credentials.
+
+Common pitfall: `ZOTERO_USER_ID` must be the **numeric ID** (e.g. `16568173`), not the username (e.g. `xunhe730`). Find it at https://www.zotero.org/settings/keys. Run `zotpilot doctor` to validate.
+
+**Single-item tools:** `add_item_tags`, `set_item_tags`, `remove_item_tags`, `add_to_collection`, `remove_from_collection`, `create_collection`
+
+**Batch tools (max 100 items per call):** `batch_add_tags`, `batch_set_tags`, `batch_remove_tags`, `batch_add_to_collection`, `batch_remove_from_collection`
+
+Batch tools accept `items: [{item_key, tags}]` (for tag ops) or `item_keys: [str]` + `collection_key` (for collection ops). Partial failures are reported per-item without rollback.
+
+**When to use batch:** First-time library reorganization, bulk tagging after topic search, migrating tags across papers.
 
 For detailed parameter reference, see `references/tool-guide.md`.
 For common issues and fixes, see `references/troubleshooting.md`.

@@ -102,7 +102,7 @@ The agent clones the repo, installs the CLI, configures Zotero, and registers th
 
 ### Option 2: Manual install
 
-**1. Clone to your skills directory:**
+**1. Clone to your skills directory (Tier 1 platforms with Skill support):**
 
 ```bash
 # Claude Code
@@ -114,22 +114,29 @@ git clone https://github.com/xunhe730/ZotPilot.git ~/.agents/skills/zotpilot
 # OpenCode
 git clone https://github.com/xunhe730/ZotPilot.git ~/.config/opencode/skills/zotpilot
 
-# OpenClaw
-git clone https://github.com/xunhe730/ZotPilot.git ~/.openclaw/skills/zotpilot
+# Gemini CLI
+git clone https://github.com/xunhe730/ZotPilot.git ~/.gemini/skills/zotpilot
+```
+
+Tier 2 platforms (Cursor, Windsurf, Cline, Roo Code) don't need the skill clone — just install the CLI and register MCP:
+```bash
+pip install zotpilot  # or: uv tool install zotpilot
 ```
 
 **2. Register the MCP server:**
 
 ```bash
-# Claude Code
-claude mcp add -s user zotpilot -- zotpilot
+# Auto-detect platform and register (recommended):
+python3 scripts/run.py register
 
-# Codex CLI
-codex mcp add zotpilot -- zotpilot
+# Specify platform:
+python3 scripts/run.py register --platform claude-code
 
-# OpenCode / OpenClaw
-# Add MCP server via your agent's config: command = zotpilot, transport = stdio
+# With credentials:
+python3 scripts/run.py register --gemini-key <key> --zotero-api-key <key> --zotero-user-id <id>
 ```
+
+Supports: Claude Code, Codex CLI, OpenCode, Gemini CLI, Cursor, Windsurf, Cline, Roo Code.
 
 **3. Restart your AI agent.**
 
@@ -318,37 +325,14 @@ Search and citation tools work without extra setup. Tagging and collection manag
 <details>
 <summary>Manual configuration</summary>
 
-**Claude Code:**
-
 ```bash
-claude mcp remove zotpilot
-claude mcp add -s user \
-  -e GEMINI_API_KEY=<your-gemini-key> \
-  -e ZOTERO_API_KEY=<your-zotero-key> \
-  -e ZOTERO_USER_ID=<your-user-id> \
-  zotpilot -- zotpilot
+python3 scripts/run.py register \
+  --gemini-key <your-gemini-key> \
+  --zotero-api-key <your-zotero-key> \
+  --zotero-user-id <your-user-id>
 ```
 
-**Codex CLI:**
-
-```bash
-codex mcp remove zotpilot
-codex mcp add zotpilot \
-  --env GEMINI_API_KEY=<your-gemini-key> \
-  --env ZOTERO_API_KEY=<your-zotero-key> \
-  --env ZOTERO_USER_ID=<your-user-id> \
-  -- zotpilot
-```
-
-Or edit `~/.codex/config.toml` directly:
-
-```toml
-[mcp_servers.zotpilot]
-command = "zotpilot"
-env = { GEMINI_API_KEY = "...", ZOTERO_API_KEY = "...", ZOTERO_USER_ID = "..." }
-```
-
-Restart your agent.
+Auto-detects platform and re-registers (removes stale entry first). Supports all platforms. Restart your agent.
 
 </details>
 
@@ -375,7 +359,11 @@ Yes, read-only mode doesn't conflict.
 <details>
 <summary>Which agents are supported?</summary>
 
-Claude Code, Codex CLI, OpenCode, OpenClaw. Anything that supports Skill + MCP protocol.
+**Tier 1 (Skill + MCP):** Claude Code, Codex CLI, OpenCode, Gemini CLI — full support with Skill-guided workflows + MCP tools.
+
+**Tier 2 (MCP only):** Cursor, Windsurf, Cline, Roo Code — MCP tools available, no Skill guidance.
+
+Any AI agent that supports MCP protocol can connect to ZotPilot's search and management tools.
 
 </details>
 
@@ -444,7 +432,7 @@ Optional feature. Uses Claude Haiku (via Batch API) to re-extract PDF tables, fi
 
 | Problem | Fix |
 |---------|-----|
-| Skill not found | `ls ~/.claude/skills/zotpilot/SKILL.md` (Claude Code) or `ls ~/.agents/skills/zotpilot/SKILL.md` (Codex) |
+| Skill not found | Verify clone target: Claude Code `~/.claude/skills/`, Codex `~/.agents/skills/`, OpenCode `~/.config/opencode/skills/`, Gemini `~/.gemini/skills/` |
 | `zotpilot: command not found` | `python3 scripts/run.py status` (auto-installs) |
 | MCP tools not showing up | Re-register MCP server and restart |
 | Empty search results | Run `zotpilot index` first, or try a broader query |

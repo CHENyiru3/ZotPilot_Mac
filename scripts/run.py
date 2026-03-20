@@ -5,7 +5,9 @@ Usage by AI agent (via SKILL.md):
     python scripts/run.py status --json
     python scripts/run.py setup --non-interactive --provider local
     python scripts/run.py index --limit 10
+    python scripts/run.py register [--platform <name>] [--gemini-key <k>] ...
 """
+import argparse
 import shutil
 import subprocess
 import sys
@@ -43,13 +45,53 @@ def _ensure_zotpilot(uv: str) -> None:
     print("ZotPilot CLI installed successfully.", file=sys.stderr)
 
 
+def _handle_register(argv: list[str]) -> int:
+    """Handle the 'register' subcommand for cross-platform MCP registration."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "platforms", Path(__file__).resolve().parent / "platforms.py"
+    )
+    platforms_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(platforms_mod)
+    register = platforms_mod.register
+    PLATFORMS = platforms_mod.PLATFORMS
+
+    parser = argparse.ArgumentParser(
+        prog="run.py register",
+        description="Register ZotPilot MCP server on AI agent platforms.",
+    )
+    parser.add_argument(
+        "--platform", action="append", dest="platforms",
+        choices=list(PLATFORMS.keys()),
+        help="Platform to register on (repeatable). Auto-detects if omitted.",
+    )
+    parser.add_argument("--gemini-key", help="Gemini API key for embeddings")
+    parser.add_argument("--dashscope-key", help="DashScope API key for embeddings")
+    parser.add_argument("--zotero-api-key", help="Zotero Web API key (for write ops)")
+    parser.add_argument("--zotero-user-id", help="Zotero numeric user ID (for write ops)")
+    args = parser.parse_args(argv)
+
+    results = register(
+        platforms=args.platforms,
+        gemini_key=args.gemini_key,
+        dashscope_key=args.dashscope_key,
+        zotero_api_key=args.zotero_api_key,
+        zotero_user_id=args.zotero_user_id,
+    )
+    return 0 if results and all(results.values()) else 1
+
+
 def main():
     uv = _ensure_uv()
     _ensure_zotpilot(uv)
 
     args = sys.argv[1:]
-    # Always use uv tool run for reliability — handles PATH issues
-    # after fresh install where the current shell may not see the new binary.
+
+    # Intercept 'register' subcommand — handled locally, not delegated to CLI.
+    if args and args[0] == "register":
+        sys.exit(_handle_register(args[1:]))
+
+    # All other subcommands delegate to zotpilot CLI via uv.
     sys.exit(subprocess.run([uv, "tool", "run", "zotpilot"] + args).returncode)
 
 

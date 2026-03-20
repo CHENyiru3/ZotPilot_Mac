@@ -55,25 +55,17 @@ This takes a while on first run (processes all PDFs). For testing, use `zotpilot
 
 Verify: `zotpilot status` should show "Documents: N" with N > 0.
 
-## Step 5: Configure MCP client
+## Step 5: Register MCP server
 
-Determine which client the user has and write the appropriate config:
-
-**Claude Code** — add to `~/.claude.json` under `projects.<cwd>.mcpServers`:
-```json
-{
-  "zotpilot": {
-    "type": "stdio",
-    "command": "zotpilot",
-    "args": [],
-    "env": {
-      "GEMINI_API_KEY": "the-users-key"
-    }
-  }
-}
+```bash
+python3 scripts/run.py register --gemini-key <the-users-key>
 ```
 
-After configuring, the user needs to restart their AI agent for the MCP server to connect.
+This auto-detects the AI agent platform and registers the MCP server. Supports Claude Code, Codex CLI, OpenCode, Gemini CLI, Cursor, Windsurf, Cline, and Roo Code.
+
+If auto-detection fails, specify explicitly: `python3 scripts/run.py register --platform claude-code`
+
+After registration, the user needs to restart their AI agent for the MCP server to connect.
 
 ## Step 6: Verify
 
