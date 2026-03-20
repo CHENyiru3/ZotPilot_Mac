@@ -24,7 +24,7 @@
 
 ## 这是什么
 
-ZotPilot 是一个 AI Agent Skill，给你的 Zotero 文献库加上语义搜索、引用图谱查询和 AI 辅助整理功能。
+ZotPilot 是一个 MCP server，给你的 Zotero 文献库加上语义搜索、引用图谱查询和 AI 辅助整理功能。附带 Agent Skill 提供安装引导和使用指南。
 
 具体来说，它在你本地的 Zotero 数据上建了一套向量索引，然后通过 MCP 协议暴露 32 个工具给 AI agent。AI 可以按意思搜论文（不是关键词匹配）、定位到具体章节段落、查谁引了谁、帮你打标签分类、读写笔记和批注。论文数据不离开你的电脑。支持 No-RAG 模式——不配置 embedding 也能使用元数据搜索、笔记、标签等基础功能。
 
@@ -254,7 +254,7 @@ python3 scripts/run.py register --gemini-key <key> --zotero-api-key <key> --zote
 
 ## 工作原理
 
-ZotPilot 是一个 AI Agent Skill：一个包含指令文件（[SKILL.md](SKILL.md)）和引导脚本（[scripts/run.py](scripts/run.py)）的仓库，AI agent 加载后会启动一个 MCP 服务器。
+ZotPilot 的核心是一个 MCP server，通过 [SKILL.md](SKILL.md) 提供安装和使用指导，[scripts/run.py](scripts/run.py) 负责自动安装和跨平台注册。AI agent 加载后会启动 MCP server，暴露 32 个工具。
 
 ```
 索引（跑一次）

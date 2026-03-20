@@ -24,7 +24,7 @@
 
 ## What is this
 
-ZotPilot is an AI Agent Skill that adds semantic search, citation graph queries, and AI-assisted organization to your Zotero library.
+ZotPilot is an MCP server that adds semantic search, citation graph queries, and AI-assisted organization to your Zotero library. It ships with an Agent Skill for guided setup and usage.
 
 It builds a local vector index over your Zotero data, then exposes 32 tools to AI agents via MCP protocol. The AI can search your papers by meaning (not keywords), locate specific passages within paper sections, look up who cited what, help you tag and sort your collection, and read/write notes and annotations. Your papers stay on your machine. No-RAG mode available — metadata search, notes, tags, and collections work without an embedding API key.
 
@@ -262,7 +262,7 @@ Note: this choice is hard to change later. The three providers produce different
 
 ## How it works
 
-ZotPilot is an AI Agent Skill: a repository with an instruction file ([SKILL.md](SKILL.md)) and a bootstrap script ([scripts/run.py](scripts/run.py)) that your AI agent loads. It starts an MCP server with 32 tools.
+ZotPilot's core is an MCP server. [SKILL.md](SKILL.md) provides setup and usage guidance, and [scripts/run.py](scripts/run.py) handles auto-installation and cross-platform registration. Your AI agent loads the skill and launches the MCP server with 32 tools.
 
 ```
 Indexing (run once)
