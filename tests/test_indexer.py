@@ -64,8 +64,10 @@ class TestIndexerReDoSIntegration:
             mock_item = MagicMock()
             mock_item.item_key = "KEY1"
             mock_item.title = "Test Paper"
-            mock_item.pdf_path = Path("/fake/test.pdf")
-            mock_item.pdf_path.exists = lambda: True
+            mock_pdf_path = MagicMock()
+            mock_pdf_path.exists.return_value = True
+            mock_pdf_path.__str__ = lambda self: "/fake/test.pdf"
+            mock_item.pdf_path = mock_pdf_path
             indexer.zotero.get_all_items_with_pdfs.return_value = [mock_item]
             indexer.store.get_indexed_doc_ids.return_value = set()
 

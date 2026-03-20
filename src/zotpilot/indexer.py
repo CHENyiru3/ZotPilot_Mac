@@ -9,7 +9,7 @@ from tqdm import tqdm
 from .config import Config
 from .zotero_client import ZoteroClient
 from .pdf import extract_document
-from .chunker import Chunker
+from .pdf.chunker import Chunker
 from .embeddings import create_embedder
 from .vector_store import VectorStore
 from .journal_ranker import JournalRanker

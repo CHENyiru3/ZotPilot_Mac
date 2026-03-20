@@ -3,6 +3,7 @@ import sqlite3
 import pytest
 from unittest.mock import patch, MagicMock
 
+from zotpilot.config import Config
 from zotpilot.zotero_client import ZoteroClient
 
 
@@ -51,6 +52,7 @@ class TestGetLibraries:
         client = ZoteroClient(tmp_path)
         libs = client.get_libraries()
         assert len(libs) == 2
+        assert libs[0]["item_count"] == 2  # user library only (not group items)
         assert libs[1]["library_type"] == "group"
         assert libs[1]["name"] == "Lab Group"
         assert libs[1]["item_count"] == 1
@@ -84,6 +86,87 @@ class TestSwitchLibraryTool:
         result = switch_library(library_id="1", library_type="default")
         assert result["switched"] is True
         mock_clear.assert_called_once()
+
+
+class TestLibraryOverrideIntegration:
+    """Tests that _library_override is actually used by factory functions."""
+
+    def test_writer_receives_override_ids(self):
+        """_get_writer uses override lib_id/lib_type when _library_override is set."""
+        import zotpilot.state as state
+        state._reset_singletons()
+        state._library_override = {"library_id": "200", "library_type": "group"}
+        state._config = MagicMock()
+        state._config.zotero_api_key = "test-key"
+        state._config.zotero_user_id = "12345"
+        state._config.zotero_library_type = "user"
+
+        with patch("zotpilot.zotero_writer.ZoteroWriter") as MockWriter:
+            state._get_writer()
+            MockWriter.assert_called_once_with("test-key", "200", "group")
+
+        state._library_override = None
+        state._reset_singletons()
+
+    def test_api_reader_receives_override_ids(self):
+        """_get_api_reader uses override lib_id/lib_type when _library_override is set."""
+        import zotpilot.state as state
+        state._reset_singletons()
+        state._library_override = {"library_id": "300", "library_type": "group"}
+        state._config = MagicMock()
+        state._config.zotero_api_key = "test-key"
+        state._config.zotero_user_id = "12345"
+        state._config.zotero_library_type = "user"
+
+        with patch("zotpilot.zotero_api_reader.ZoteroApiReader") as MockReader:
+            state._get_api_reader()
+            MockReader.assert_called_once_with("test-key", "300", "group")
+
+        state._library_override = None
+        state._reset_singletons()
+
+    def test_writer_uses_config_defaults_without_override(self):
+        """Without override, _get_writer uses config defaults."""
+        import zotpilot.state as state
+        state._reset_singletons()
+        state._library_override = None
+        state._config = MagicMock()
+        state._config.zotero_api_key = "test-key"
+        state._config.zotero_user_id = "12345"
+        state._config.zotero_library_type = "user"
+
+        with patch("zotpilot.zotero_writer.ZoteroWriter") as MockWriter:
+            state._get_writer()
+            MockWriter.assert_called_once_with("test-key", "12345", "user")
+
+        state._reset_singletons()
+
+    def test_clear_override_restores_defaults(self):
+        """After clearing override, factories use config defaults again."""
+        import zotpilot.state as state
+        state._reset_singletons()
+        # Set override and create writer
+        state._library_override = {"library_id": "200", "library_type": "group"}
+        state._config = MagicMock()
+        state._config.zotero_api_key = "test-key"
+        state._config.zotero_user_id = "12345"
+        state._config.zotero_library_type = "user"
+
+        with patch("zotpilot.zotero_writer.ZoteroWriter"):
+            state._get_writer()
+
+        # Clear override and re-init
+        state._clear_library_override()
+        state._config = MagicMock()
+        state._config.zotero_api_key = "test-key"
+        state._config.zotero_user_id = "12345"
+        state._config.zotero_library_type = "user"
+
+        with patch("zotpilot.zotero_writer.ZoteroWriter") as MockWriter:
+            state._get_writer()
+            MockWriter.assert_called_once_with("test-key", "12345", "user")
+
+        state._reset_singletons()
 
 
 class TestResetSingletons:

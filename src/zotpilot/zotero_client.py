@@ -630,6 +630,79 @@ class ZoteroClient:
         finally:
             conn.close()
 
+    def get_collection_items(self, collection_key: str, limit: int = 100) -> list[dict]:
+        """Get items in a specific collection by collection key."""
+        conn = sqlite3.connect(_sqlite_uri(self.db_path), uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute("""
+                SELECT i.key AS itemKey,
+                       COALESCE(
+                           (SELECT idv.value FROM itemData id
+                            JOIN itemDataValues idv ON id.valueID = idv.valueID
+                            JOIN fields f ON id.fieldID = f.fieldID
+                            WHERE id.itemID = i.itemID AND f.fieldName = 'title'),
+                           '[No Title]'
+                       ) AS title,
+                       COALESCE(
+                           (SELECT GROUP_CONCAT(
+                               CASE WHEN cr.firstName != '' THEN cr.lastName || ', ' || cr.firstName
+                                    ELSE cr.lastName END, '; ')
+                            FROM itemCreators ic
+                            JOIN creators cr ON ic.creatorID = cr.creatorID
+                            WHERE ic.itemID = i.itemID
+                            ORDER BY ic.orderIndex),
+                           '[No Author]'
+                       ) AS authors,
+                       (SELECT idv.value FROM itemData id
+                        JOIN itemDataValues idv ON id.valueID = idv.valueID
+                        JOIN fields f ON id.fieldID = f.fieldID
+                        WHERE id.itemID = i.itemID AND f.fieldName = 'date') AS year,
+                       COALESCE(
+                           (SELECT idv.value FROM itemData id
+                            JOIN itemDataValues idv ON id.valueID = idv.valueID
+                            JOIN fields f ON id.fieldID = f.fieldID
+                            WHERE id.itemID = i.itemID AND f.fieldName = 'publicationTitle'),
+                           ''
+                       ) AS publication,
+                       (SELECT idv.value FROM itemData id
+                        JOIN itemDataValues idv ON id.valueID = idv.valueID
+                        JOIN fields f ON id.fieldID = f.fieldID
+                        WHERE id.itemID = i.itemID AND f.fieldName = 'DOI') AS doi,
+                       COALESCE(
+                           (SELECT GROUP_CONCAT(t.name, '; ')
+                            FROM itemTags it JOIN tags t ON it.tagID = t.tagID
+                            WHERE it.itemID = i.itemID),
+                           ''
+                       ) AS tags,
+                       (SELECT idv.value FROM itemData id
+                        JOIN itemDataValues idv ON id.valueID = idv.valueID
+                        JOIN fields f ON id.fieldID = f.fieldID
+                        WHERE id.itemID = i.itemID AND f.fieldName = 'citationKey') AS citationKey
+                FROM items i
+                JOIN collectionItems ci ON i.itemID = ci.itemID
+                JOIN collections c ON ci.collectionID = c.collectionID
+                WHERE c.key = ?
+                  AND i.itemTypeID NOT IN (1, 14)
+                  AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+                LIMIT ?
+            """, (collection_key, limit)).fetchall()
+            return [
+                {
+                    "key": r["itemKey"],
+                    "title": r["title"],
+                    "authors": r["authors"],
+                    "year": r["year"],
+                    "publication": r["publication"],
+                    "doi": r["doi"] or "",
+                    "tags": r["tags"],
+                    "citation_key": r["citationKey"] or "",
+                }
+                for r in rows
+            ]
+        finally:
+            conn.close()
+
     def get_all_tags(self) -> list[dict]:
         """Get all tags with usage counts, sorted by frequency."""
         conn = sqlite3.connect(_sqlite_uri(self.db_path), uri=True)
@@ -674,7 +747,8 @@ class ZoteroClient:
             # User library is always present
             user_count = conn.execute("""
                 SELECT COUNT(*) FROM items
-                WHERE itemTypeID NOT IN (1, 14)
+                WHERE libraryID = 1
+                  AND itemTypeID NOT IN (1, 14)
                   AND itemID NOT IN (SELECT itemID FROM deletedItems)
             """).fetchone()[0]
             results.append({

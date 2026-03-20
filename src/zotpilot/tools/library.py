@@ -7,8 +7,8 @@ from ..state import mcp, _get_zotero, _get_store, _get_store_optional, _get_api_
 
 
 def _invalidate_collection_cache():
-    """Reset the cached collection map so next call re-fetches from DB."""
-    get_collection_papers._col_map = None
+    """No-op: collection queries are now direct SQL, no cache needed."""
+    pass
 
 
 @mcp.tool()
@@ -23,34 +23,7 @@ def get_collection_papers(
     limit: Annotated[int, Field(description="Max papers to return", ge=1)] = 100,
 ) -> list[dict]:
     """Get papers in a specific Zotero collection."""
-    zotero = _get_zotero()
-    all_items = zotero.get_all_items_with_pdfs()
-    result = []
-    for item in all_items:
-        cols = [c.strip() for c in item.collections.split(";") if c.strip()] if item.collections else []
-        # Match by collection key -- need to resolve collection names to keys
-        # Use a join: get all collections and match by key
-        if not hasattr(get_collection_papers, "_col_map"):
-            get_collection_papers._col_map = None
-        if get_collection_papers._col_map is None:
-            collections = zotero.get_all_collections()
-            get_collection_papers._col_map = {c["key"]: c["name"] for c in collections}
-        col_map = get_collection_papers._col_map
-        col_name = col_map.get(collection_key)
-        if col_name and col_name in cols:
-            result.append({
-                "key": item.item_key,
-                "title": item.title,
-                "authors": item.authors,
-                "year": item.year,
-                "publication": item.publication,
-                "doi": item.doi,
-                "tags": item.tags,
-                "citation_key": item.citation_key,
-            })
-        if len(result) >= limit:
-            break
-    return result
+    return _get_zotero().get_collection_items(collection_key, limit)
 
 
 @mcp.tool()

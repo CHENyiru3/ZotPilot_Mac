@@ -228,10 +228,17 @@ def _get_writer():
                 if not _config.zotero_user_id:
                     raise ToolError("ZOTERO_USER_ID not set -- write operations unavailable")
                 from .zotero_writer import ZoteroWriter
+                # Apply library override if set
+                if _library_override:
+                    lib_id = _library_override["library_id"]
+                    lib_type = _library_override["library_type"]
+                else:
+                    lib_id = _config.zotero_user_id
+                    lib_type = _config.zotero_library_type
                 _writer = ZoteroWriter(
                     _config.zotero_api_key,
-                    _config.zotero_user_id,
-                    _config.zotero_library_type,
+                    lib_id,
+                    lib_type,
                 )
     return _writer
 
@@ -252,10 +259,17 @@ def _get_api_reader():
                 if not _config.zotero_user_id:
                     raise ToolError("ZOTERO_USER_ID not set -- annotation reading unavailable")
                 from .zotero_api_reader import ZoteroApiReader
+                # Apply library override if set
+                if _library_override:
+                    lib_id = _library_override["library_id"]
+                    lib_type = _library_override["library_type"]
+                else:
+                    lib_id = _config.zotero_user_id
+                    lib_type = _config.zotero_library_type
                 _api_reader = ZoteroApiReader(
                     _config.zotero_api_key,
-                    _config.zotero_user_id,
-                    _config.zotero_library_type,
+                    lib_id,
+                    lib_type,
                 )
     return _api_reader
 
