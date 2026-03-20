@@ -465,5 +465,5 @@ git clone https://github.com/xunhe730/ZotPilot.git ~/.claude/skills/zotpilot
     <a href="https://github.com/xunhe730/ZotPilot/issues">功能建议</a> &middot;
     <a href="https://github.com/xunhe730/ZotPilot/discussions">讨论</a>
   </p>
-  <sub>MIT License &copy; 2026 Xiaodong Zhuang</sub>
+  <sub>MIT License &copy; 2026 xunhe</sub>
 </div>

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "AI-powered Zotero research assistant — MCP server + agent skill"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "Xiaodong Zhuang" }]
+authors = [{ name = "xunhe" }]
 keywords = ["zotero", "mcp", "semantic-search", "research", "ai"]
 classifiers = [
     "Development Status :: 4 - Beta",
