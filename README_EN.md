@@ -3,7 +3,7 @@
 
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
-    <img src="https://img.shields.io/badge/MCP-26_Tools-00B265?style=flat-square" alt="MCP">
+    <img src="https://img.shields.io/badge/MCP-32_Tools-00B265?style=flat-square" alt="MCP">
     <img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="License">
   </p>
   <p>
@@ -26,7 +26,7 @@
 
 ZotPilot is an AI Agent Skill that adds semantic search, citation graph queries, and AI-assisted organization to your Zotero library.
 
-It builds a local vector index over your Zotero data, then exposes 26 tools to AI agents via MCP protocol. The AI can search your papers by meaning (not keywords), locate specific passages within paper sections, look up who cited what, and help you tag and sort your collection. Your papers stay on your machine.
+It builds a local vector index over your Zotero data, then exposes 32 tools to AI agents via MCP protocol. The AI can search your papers by meaning (not keywords), locate specific passages within paper sections, look up who cited what, help you tag and sort your collection, and read/write notes and annotations. Your papers stay on your machine. No-RAG mode available — metadata search, notes, tags, and collections work without an embedding API key.
 
 ---
 
@@ -171,16 +171,17 @@ Note: this choice is hard to change later. The three providers produce different
 
 ---
 
-## 26 MCP tools
+## 32 MCP tools
 
 <details>
-<summary>Search (6)</summary>
+<summary>Search (7)</summary>
 
 | Tool | What it does |
 |------|-------------|
 | `search_papers` | Semantic search with section/journal weighting |
 | `search_topic` | Topic-level paper discovery, deduplicated by document |
 | `search_boolean` | Exact word matching (AND/OR) |
+| `advanced_search` | Multi-condition metadata search (year/author/tag/collection etc.), works without indexing |
 | `search_tables` | Search table content |
 | `search_figures` | Search figure captions |
 | `get_passage_context` | Expand a result with surrounding text |
@@ -188,7 +189,7 @@ Note: this choice is hard to change later. The three providers produce different
 </details>
 
 <details>
-<summary>Browse (6)</summary>
+<summary>Browse (9)</summary>
 
 | Tool | What it does |
 |------|-------------|
@@ -198,11 +199,14 @@ Note: this choice is hard to change later. The three providers produce different
 | `get_collection_papers` | Papers in a specific folder |
 | `list_tags` | All tags |
 | `get_index_stats` | Index status: doc count, chunk count |
+| `get_notes` | Read and search notes |
+| `get_feeds` | List RSS feeds or get feed items |
+| `get_annotations` | Read highlights and comments (requires ZOTERO_API_KEY) |
 
 </details>
 
 <details>
-<summary>Write (5)</summary>
+<summary>Write (6)</summary>
 
 | Tool | What it does |
 |------|-------------|
@@ -210,6 +214,17 @@ Note: this choice is hard to change later. The three providers produce different
 | `set_item_tags` | Replace all tags |
 | `add_to_collection` / `remove_from_collection` | Move in/out of folders |
 | `create_collection` | Create a folder |
+| `create_note` | Add a note to a paper (requires ZOTERO_API_KEY) |
+
+</details>
+
+<details>
+<summary>Batch (2)</summary>
+
+| Tool | What it does |
+|------|-------------|
+| `batch_tags(action="add\|set\|remove")` | Batch tag operations (up to 100 items) |
+| `batch_collections(action="add\|remove")` | Batch folder operations (up to 100 items) |
 
 </details>
 
@@ -225,11 +240,12 @@ Note: this choice is hard to change later. The three providers produce different
 </details>
 
 <details>
-<summary>Admin (4)</summary>
+<summary>Admin (5)</summary>
 
 | Tool | What it does |
 |------|-------------|
 | `index_library` | Index new papers (incremental) |
+| `switch_library` | List/switch libraries (supports group libraries) |
 | `get_reranking_config` | View ranking weights |
 | `get_vision_costs` | Check vision API usage |
 
@@ -239,14 +255,14 @@ Note: this choice is hard to change later. The three providers produce different
 
 ## How it works
 
-ZotPilot is an AI Agent Skill: a repository with an instruction file ([SKILL.md](SKILL.md)) and a bootstrap script ([scripts/run.py](scripts/run.py)) that your AI agent loads. It starts an MCP server with 26 tools.
+ZotPilot is an AI Agent Skill: a repository with an instruction file ([SKILL.md](SKILL.md)) and a bootstrap script ([scripts/run.py](scripts/run.py)) that your AI agent loads. It starts an MCP server with 32 tools.
 
 ```
 Indexing (run once)
 Zotero SQLite ──→ PDF extraction ──→ Chunking + sections ──→ Embeddings ──→ ChromaDB
 
 Usage (every query)
-AI Agent ──→ 26 MCP tools ──┬── Semantic search ──→ ChromaDB ──→ Reranking ──→ Results
+AI Agent ──→ 32 MCP tools ──┬── Semantic search ──→ ChromaDB ──→ Reranking ──→ Results
                              ├── Citation graph  ──→ OpenAlex
                              ├── Library browse  ──→ Zotero SQLite
                              └── Write ops       ──→ Zotero Web API ──→ Syncs to Zotero

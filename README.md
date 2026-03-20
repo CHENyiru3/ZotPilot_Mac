@@ -3,7 +3,7 @@
 
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
-    <img src="https://img.shields.io/badge/MCP-26_Tools-00B265?style=flat-square" alt="MCP">
+    <img src="https://img.shields.io/badge/MCP-32_Tools-00B265?style=flat-square" alt="MCP">
     <img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="License">
   </p>
   <p>
@@ -26,7 +26,7 @@
 
 ZotPilot 是一个 AI Agent Skill，给你的 Zotero 文献库加上语义搜索、引用图谱查询和 AI 辅助整理功能。
 
-具体来说，它在你本地的 Zotero 数据上建了一套向量索引，然后通过 MCP 协议暴露 26 个工具给 AI agent。AI 可以按意思搜论文（不是关键词匹配）、定位到具体章节段落、查谁引了谁、帮你打标签分类。论文数据不离开你的电脑。
+具体来说，它在你本地的 Zotero 数据上建了一套向量索引，然后通过 MCP 协议暴露 32 个工具给 AI agent。AI 可以按意思搜论文（不是关键词匹配）、定位到具体章节段落、查谁引了谁、帮你打标签分类、读写笔记和批注。论文数据不离开你的电脑。支持 No-RAG 模式——不配置 embedding 也能使用元数据搜索、笔记、标签等基础功能。
 
 ---
 
@@ -171,16 +171,17 @@ codex mcp add zotpilot -- zotpilot
 
 ---
 
-## 26 个 MCP 工具
+## 32 个 MCP 工具
 
 <details>
-<summary>搜索（6 个）</summary>
+<summary>搜索（7 个）</summary>
 
 | 工具 | 说明 |
 |------|------|
 | `search_papers` | 语义搜索，可以按章节、期刊加权 |
 | `search_topic` | 按主题找论文，结果按文档去重 |
 | `search_boolean` | 精确词匹配（AND/OR） |
+| `advanced_search` | 多条件元数据搜索（年份/作者/标签/集合等），无需索引 |
 | `search_tables` | 搜表格内容 |
 | `search_figures` | 搜图表标题 |
 | `get_passage_context` | 展开某个结果的上下文 |
@@ -188,7 +189,7 @@ codex mcp add zotpilot -- zotpilot
 </details>
 
 <details>
-<summary>浏览（6 个）</summary>
+<summary>浏览（9 个）</summary>
 
 | 工具 | 说明 |
 |------|------|
@@ -198,11 +199,14 @@ codex mcp add zotpilot -- zotpilot
 | `get_collection_papers` | 看某个文件夹里的论文 |
 | `list_tags` | 列出所有标签 |
 | `get_index_stats` | 索引状态：多少篇、多少 chunk |
+| `get_notes` | 读取和搜索笔记 |
+| `get_feeds` | 列出 RSS 订阅或获取订阅条目 |
+| `get_annotations` | 读取高亮和评论（需要 ZOTERO_API_KEY） |
 
 </details>
 
 <details>
-<summary>写操作（11 个）</summary>
+<summary>写操作（12 个）</summary>
 
 | 工具 | 说明 |
 |------|------|
@@ -210,6 +214,7 @@ codex mcp add zotpilot -- zotpilot
 | `set_item_tags` | 替换全部标签（单篇） |
 | `add_to_collection` / `remove_from_collection` | 移进/移出文件夹（单篇） |
 | `create_collection` | 建文件夹 |
+| `create_note` | 给论文添加笔记（需要 ZOTERO_API_KEY） |
 | `batch_tags(action="add\|set\|remove")` | 批量标签操作（最多 100 篇） |
 | `batch_collections(action="add\|remove")` | 批量文件夹操作（最多 100 篇） |
 
@@ -227,11 +232,12 @@ codex mcp add zotpilot -- zotpilot
 </details>
 
 <details>
-<summary>管理（4 个）</summary>
+<summary>管理（5 个）</summary>
 
 | 工具 | 说明 |
 |------|------|
 | `index_library` | 索引新论文（增量） |
+| `switch_library` | 列出/切换文献库（支持群组库） |
 | `get_reranking_config` | 看排序权重 |
 | `get_vision_costs` | 看视觉 API 用量 |
 
@@ -248,7 +254,7 @@ ZotPilot 是一个 AI Agent Skill：一个包含指令文件（[SKILL.md](SKILL.
 Zotero SQLite ──→ PDF 提取 ──→ 分块 + 章节分类 ──→ 向量嵌入 ──→ ChromaDB
 
 使用（每次查询）
-AI Agent ──→ 26 个 MCP 工具 ──┬── 语义搜索 ──→ ChromaDB ──→ 重排序 ──→ 结果
+AI Agent ──→ 32 个 MCP 工具 ──┬── 语义搜索 ──→ ChromaDB ──→ 重排序 ──→ 结果
                                ├── 引用图谱 ──→ OpenAlex
                                ├── 文献浏览 ──→ Zotero SQLite
                                └── 写操作   ──→ Zotero Web API ──→ 同步回 Zotero
