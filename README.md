@@ -105,6 +105,33 @@ python3 scripts/run.py register --gemini-key <key> --zotero-api-key <key> --zote
 
 **3. 重启你的 AI agent。**
 
+**4.（可选）启用写操作** — 搜索和引用装好就能用，打标签、建集合需要 Zotero Web API 密钥：
+
+1. 打开 [zotero.org/settings/keys](https://www.zotero.org/settings/keys)
+2. 记下页面顶部的 **数字 User ID**（例如 `12345678`，不是用户名）
+3. 点 **"Create new private key"**，勾上 "Allow library access" 和 "Allow write access"，复制 key
+
+<img src="assets/zotero-api-key.png" alt="Zotero API Key 页面" width="100%">
+
+4. 告诉 agent：
+
+> 帮我启用 ZotPilot 写操作，我的 Zotero API Key 是 `xxxxx`，User ID 是 `12345`。
+
+<details>
+<summary>或者手动配置</summary>
+
+```bash
+python3 scripts/run.py register \
+  --zotero-api-key <zotero密钥> \
+  --zotero-user-id <用户ID>
+```
+
+自动检测平台并重新注册。重启 agent。
+
+</details>
+
+不配也行，搜索和引用照常用，只有标签和集合管理需要。
+
 ### 第一次用会发生什么
 
 你说"搜我的 Zotero"时，Skill 会走一遍安装流程：
@@ -322,38 +349,6 @@ AI Agent ──→ 32 个 MCP 工具 ──┬── 语义搜索 ──→ Chro
 %APPDATA%\zotpilot\config.json
 %APPDATA%\zotpilot\chroma\
 ```
-
----
-
-## 启用写操作
-
-搜索和引用不需要额外配置，装好就能用。打标签、建集合这些写操作需要 Zotero Web API 密钥。
-
-1. 打开 [zotero.org/settings/keys](https://www.zotero.org/settings/keys)
-2. 记下页面顶部的 **数字 User ID**（例如 `12345678`，不是用户名）
-3. 点 **"Create new private key"**，勾上 "Allow library access" 和 "Allow write access"，复制 key
-
-<img src="assets/zotero-api-key.png" alt="Zotero API Key 页面" width="100%">
-
-4. 告诉 agent：
-
-> 帮我启用 ZotPilot 写操作，我的 Zotero API Key 是 `xxxxx`，User ID 是 `12345`。
-
-<details>
-<summary>手动配置</summary>
-
-```bash
-python3 scripts/run.py register \
-  --gemini-key <gemini密钥> \
-  --zotero-api-key <zotero密钥> \
-  --zotero-user-id <用户ID>
-```
-
-自动检测平台并重新注册（会先移除旧条目）。支持所有平台。重启 agent。
-
-</details>
-
-不配也行。搜索和引用照样能用，只有标签和集合管理需要这个 key。
 
 ---
 
