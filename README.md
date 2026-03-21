@@ -425,7 +425,7 @@ python3 scripts/run.py register \
 <details>
 <summary>扫描版 PDF / 图表 / 特别长的书怎么办？</summary>
 
-- 扫描版：自动 OCR 回退——当 PyMuPDF 提取文本过少时，自动用 Tesseract 全页 OCR 重新提取。需要安装 Tesseract（`brew install tesseract tesseract-lang`）
+- 扫描版：自动 OCR 回退——当 PyMuPDF 提取文本过少时，自动用 Tesseract 全页 OCR 重新提取。需要安装 Tesseract：macOS `brew install tesseract tesseract-lang`，Ubuntu/Debian `sudo apt install tesseract-ocr tesseract-ocr-chi-sim`，Windows 从 [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) 下载安装
 - 图表：提取的是标题文字和上下文段落，不是图片本身。图片 PNG 存在本地
 - 超长文献：默认跳过 40 页以上的（`--max-pages` 可以调），也可以用 `--item-key` 单独索引某一篇
 - 分批索引：MCP 默认每次处理 20 篇（`batch_size=20`），Agent 循环调用直到 `has_more=false`。CLI 默认一次全跑

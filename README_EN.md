@@ -398,7 +398,7 @@ Alibaba Cloud's `text-embedding-v3`, 1024 dimensions. No VPN needed in China, ¥
 <details>
 <summary>Scanned PDFs / figures / long documents?</summary>
 
-- Scanned PDFs: automatic OCR fallback — when PyMuPDF extracts too little text, retries with Tesseract full-page OCR. Requires Tesseract (`brew install tesseract tesseract-lang`)
+- Scanned PDFs: automatic OCR fallback — when PyMuPDF extracts too little text, retries with Tesseract full-page OCR. Install Tesseract: macOS `brew install tesseract tesseract-lang`, Ubuntu/Debian `sudo apt install tesseract-ocr`, Windows from [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki)
 - Figures: captions and surrounding text are indexed, not the image itself. PNG files saved locally
 - Long documents: skipped above 40 pages by default (`--max-pages` to adjust), `--item-key` to index specific ones
 - Batch indexing: MCP defaults to 20 items per call (`batch_size=20`), agent loops until `has_more=false`. CLI processes all at once by default
