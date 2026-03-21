@@ -319,6 +319,8 @@ Search and citation tools work without extra setup. Tagging and collection manag
 
 1. Go to [zotero.org/settings/keys](https://www.zotero.org/settings/keys), create a key with "Allow library access" and "Allow write access" checked
 2. Note your User ID (the number on the page, not your username)
+
+<img src="assets/zotero-api-key.png" alt="Zotero API Key page" width="100%">
 3. Tell your agent:
 
 > Enable ZotPilot write operations. My Zotero API Key is `xxxxx` and my User ID is `12345`.

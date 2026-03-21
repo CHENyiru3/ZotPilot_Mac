@@ -93,6 +93,8 @@ pip install zotpilot  # 或 uv tool install zotpilot
 2. 记下页面顶部的 **数字 User ID**（例如 `12345678`，不是用户名）
 3. 点 **"Create new private key"**，勾选 "Allow library access" + "Allow write access"，复制 key
 
+<img src="assets/zotero-api-key.png" alt="Zotero API Key 页面" width="100%">
+
 注册时附上凭证（否则只有搜索功能，无法写入 Zotero）：
 
 ```bash
