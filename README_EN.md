@@ -110,7 +110,7 @@ The agent clones the repo, installs the CLI, configures Zotero, and registers th
 git clone https://github.com/xunhe730/ZotPilot.git ~/.claude/skills/zotpilot
 
 # Codex CLI
-git clone https://github.com/xunhe730/ZotPilot.git ~/.agents/skills/zotpilot
+git clone https://github.com/xunhe730/ZotPilot.git ~/.codex/skills/zotpilot
 
 # OpenCode
 git clone https://github.com/xunhe730/ZotPilot.git ~/.config/opencode/skills/zotpilot
@@ -294,7 +294,7 @@ Design choices:
 ### File structure
 
 ```
-~/.claude/skills/zotpilot/          # or ~/.agents/skills/zotpilot/ (Codex)
+~/.claude/skills/zotpilot/          # or ~/.codex/skills/zotpilot/ (Codex)
 ├── SKILL.md                        # Decision tree: setup → index → research
 ├── scripts/run.py                  # Bootstrap: auto-installs CLI + delegates
 ├── references/                     # Reference docs
@@ -437,7 +437,7 @@ Optional feature. Uses Claude Haiku (via Batch API) to re-extract PDF tables, fi
 
 | Problem | Fix |
 |---------|-----|
-| Skill not found | Verify clone target: Claude Code `~/.claude/skills/`, Codex `~/.agents/skills/`, OpenCode `~/.config/opencode/skills/`, Gemini `~/.gemini/skills/` |
+| Skill not found | Verify clone target: Claude Code `~/.claude/skills/`, Codex `~/.codex/skills/`, OpenCode `~/.config/opencode/skills/`, Gemini `~/.gemini/skills/` |
 | `zotpilot: command not found` | `python3 scripts/run.py status` (auto-installs) |
 | MCP tools not showing up | Re-register MCP server and restart |
 | Empty search results | Run `zotpilot index` first, or try a broader query |
