@@ -105,7 +105,7 @@ Agent 会 clone 仓库、装 CLI、配好 Zotero、注册 MCP 服务器。重启
 | 平台 | 目标路径 |
 |------|----------|
 | Claude Code | `~/.claude/skills/zotpilot` |
-| Codex CLI | `~/.agents/skills/zotpilot` |
+| Codex CLI | `~/.codex/skills/zotpilot` |
 | OpenCode (Linux/macOS) | `~/.config/opencode/skills/zotpilot` |
 | OpenCode (Windows) | `%APPDATA%\opencode\skills\zotpilot` |
 | Gemini CLI | `~/.gemini/skills/zotpilot` |
@@ -119,7 +119,7 @@ Agent 会 clone 仓库、装 CLI、配好 Zotero、注册 MCP 服务器。重启
 git clone https://github.com/xunhe730/ZotPilot.git ~/.claude/skills/zotpilot
 
 # Codex CLI
-git clone https://github.com/xunhe730/ZotPilot.git ~/.agents/skills/zotpilot
+git clone https://github.com/xunhe730/ZotPilot.git ~/.codex/skills/zotpilot
 
 # OpenCode（Linux/macOS）
 git clone https://github.com/xunhe730/ZotPilot.git ~/.config/opencode/skills/zotpilot

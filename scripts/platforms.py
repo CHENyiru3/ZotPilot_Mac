@@ -34,7 +34,7 @@ PLATFORMS = {
         "tier": 1,
         "binary": "codex",
         "label": "Codex CLI",
-        "skills_dir": "~/.agents/skills",
+        "skills_dir": "~/.codex/skills",
     },
     "opencode": {
         "tier": 1,
