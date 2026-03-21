@@ -51,10 +51,41 @@ def _ensure_uv() -> str:
     sys.exit(1)
 
 
-def _ensure_zotpilot(uv: str) -> None:
-    """Install zotpilot CLI via uv tool install, with pip fallback."""
+def _find_zotpilot_after_pip() -> list[str] | None:
+    """Try to locate the zotpilot binary after a pip install.
+
+    Returns a ready-to-use command list, or None if not found.
+    """
+    # PATH may have been updated by the install
+    zp = shutil.which("zotpilot")
+    if zp:
+        return [zp]
+    # Linux/macOS pip --user installs to ~/.local/bin/
+    user_bin = Path.home() / ".local" / "bin" / "zotpilot"
+    if user_bin.exists():
+        return [str(user_bin)]
+    # Windows pip --user installs to %APPDATA%\Python\PythonXYY\Scripts\
+    import os as _os, platform as _plt
+    if _plt.system() == "Windows":
+        appdata = _os.environ.get("APPDATA", "")
+        if appdata:
+            py_ver = f"Python{sys.version_info.major}{sys.version_info.minor}"
+            win_scripts = Path(appdata) / "Python" / py_ver / "Scripts"
+            for name in ("zotpilot.exe", "zotpilot"):
+                candidate = win_scripts / name
+                if candidate.exists():
+                    return [str(candidate)]
+    return None
+
+
+def _ensure_zotpilot(uv: str) -> list[str] | None:
+    """Install zotpilot CLI if needed.
+
+    Returns an override command list when pip-installed (binary outside uv),
+    or None when uv tool run should be used (the normal case).
+    """
     if shutil.which("zotpilot"):
-        return
+        return None  # already on PATH, uv tool run will work
     print("ZotPilot CLI not found. Installing...", file=sys.stderr)
     uv_cmd = _uv_args(uv)
     result = subprocess.run(
@@ -64,8 +95,8 @@ def _ensure_zotpilot(uv: str) -> None:
     )
     if result.returncode == 0:
         print("ZotPilot CLI installed successfully.", file=sys.stderr)
-        return
-    # uv tool install failed (e.g. timeout, malformed tool) — try pip install
+        return None  # uv tool run works
+    # uv tool install failed — try pip install
     print(
         f"uv tool install failed:\n{result.stderr}\n"
         "Falling back to pip install...",
@@ -80,6 +111,15 @@ def _ensure_zotpilot(uv: str) -> None:
         print(f"pip install also failed:\n{pip_result.stderr}", file=sys.stderr)
         sys.exit(1)
     print("ZotPilot CLI installed via pip.", file=sys.stderr)
+    cmd = _find_zotpilot_after_pip()
+    if cmd is None:
+        print(
+            "WARNING: zotpilot binary not found after pip install.\n"
+            "You may need to add the scripts directory to your PATH.",
+            file=sys.stderr,
+        )
+        cmd = ["zotpilot"]  # last resort
+    return cmd
 
 
 def _handle_register(argv: list[str]) -> int:
@@ -130,9 +170,12 @@ def main():
         sys.exit(_handle_register(args[1:]))
 
     uv = _ensure_uv()
-    _ensure_zotpilot(uv)
+    pip_cmd = _ensure_zotpilot(uv)
 
-    # All other subcommands delegate to zotpilot CLI via uv.
+    # All other subcommands delegate to zotpilot CLI.
+    # pip_cmd is set only when installed via pip fallback (binary outside uv).
+    if pip_cmd is not None:
+        sys.exit(subprocess.run(pip_cmd + args).returncode)
     sys.exit(subprocess.run(_uv_args(uv) + ["tool", "run", "zotpilot"] + args).returncode)
 
 
