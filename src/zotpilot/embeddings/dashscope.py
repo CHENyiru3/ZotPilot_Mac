@@ -19,7 +19,7 @@ class DashScopeEmbedder:
     Supports text-embedding-v3 and text-embedding-v4 (Qwen3-Embedding).
     Uses asymmetric embeddings via DashScope native text_type parameter.
 
-    Default model: text-embedding-v3
+    Default model: text-embedding-v4
     Output dimensions: configurable (v3: 64–1024, v4: 64–2048)
     Max input: 8192 tokens per text
     Batch size: up to 10 texts (v3/v4)
@@ -28,7 +28,7 @@ class DashScopeEmbedder:
 
     def __init__(
         self,
-        model: str = "text-embedding-v3",
+        model: str = "text-embedding-v4",
         dimensions: int = 1024,
         api_key: str | None = None,
         base_url: str = DEFAULT_BASE_URL,

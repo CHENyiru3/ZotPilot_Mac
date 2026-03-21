@@ -104,7 +104,7 @@ class Config:
         # Provider-aware defaults for model and dimensions
         model_defaults = {
             "gemini": ("gemini-embedding-001", 768),
-            "dashscope": ("text-embedding-v3", 1024),
+            "dashscope": ("text-embedding-v4", 1024),
             "local": ("all-MiniLM-L6-v2", 384),
             "none": ("none", 0),
         }

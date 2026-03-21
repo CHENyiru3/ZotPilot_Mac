@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>ZotPilot</h1>
+  <img src="assets/banner.png" alt="ZotPilot" width="720">
 
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
@@ -153,11 +153,11 @@ When you say "search my Zotero" the first time, the Skill walks through setup:
 
 **Three embedding options:**
 
-| Provider | API Key needed | Quality | Offline | Dimensions |
+| Provider | API Key | Quality | Offline | Default Dimensions |
 |----------|:---:|------|:---:|------|
-| Gemini `gemini-embedding-001` | Yes ([free tier](https://aistudio.google.com/apikey)) | MTEB #1 | No | 768 |
-| DashScope `text-embedding-v3` | Yes ([Alibaba Cloud](https://bailian.console.aliyun.com/)) | Very good | No | 1024 |
-| Local `all-MiniLM-L6-v2` | No | Decent | Yes | 384 |
+| Gemini [`gemini-embedding-001`](https://ai.google.dev/gemini-api/docs/embeddings) | Yes ([free tier](https://aistudio.google.com/apikey)) | [MTEB 68.32](https://huggingface.co/spaces/mteb/leaderboard) | No | 768 |
+| DashScope [`text-embedding-v4`](https://help.aliyun.com/zh/model-studio/embedding) | Yes ([free tier](https://bailian.console.aliyun.com/)) | [MTEB 68.36 / C-MTEB 70.14](https://help.aliyun.com/zh/model-studio/embedding) | No | 1024 |
+| Local [`all-MiniLM-L6-v2`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) | Local (free) | [MTEB ~56](https://huggingface.co/spaces/mteb/leaderboard) | Yes | 384 |
 
 Note: this choice is hard to change later. The three providers produce different vector dimensions, so switching requires `zotpilot index --force` to re-index everything. Pick before you index.
 
@@ -377,7 +377,7 @@ Free tier is about 1,000 requests/day. One 10-page paper uses about 1 request (3
 <details>
 <summary>What about DashScope/Bailian?</summary>
 
-Alibaba Cloud's `text-embedding-v3`, 1024 dimensions. No VPN needed in China, ¥0.0005/1k tokens. Use `--provider dashscope` during setup. Key at https://bailian.console.aliyun.com/.
+Alibaba Cloud's `text-embedding-v4`, 1024 dimensions, MTEB 68.36 / C-MTEB 70.14. No VPN needed in China, ¥0.0005/1k tokens, 1M tokens free for new users. Use `--provider dashscope` during setup. Key at https://bailian.console.aliyun.com/.
 
 </details>
 

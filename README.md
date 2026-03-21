@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>ZotPilot</h1>
+  <img src="assets/banner.png" alt="ZotPilot" width="720">
 
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
@@ -132,11 +132,11 @@ python3 scripts/run.py register --gemini-key <key> --zotero-api-key <key> --zote
 
 **嵌入模型有三个选项：**
 
-| 模型 | 需要 API Key | 质量 | 离线 | 维度 |
+| 模型 | API Key | 质量 | 离线 | 默认维度 |
 |------|:---:|------|:---:|------|
-| Gemini `gemini-embedding-001` | 是（[免费额度](https://aistudio.google.com/apikey)） | MTEB 排名第一 | 否 | 768 |
-| DashScope `text-embedding-v3` | 是（[阿里云百炼](https://bailian.console.aliyun.com/)） | 很好 | 否 | 1024 |
-| Local `all-MiniLM-L6-v2` | 否 | 够用 | 是 | 384 |
+| Gemini [`gemini-embedding-001`](https://ai.google.dev/gemini-api/docs/embeddings) | 是（[免费额度](https://aistudio.google.com/apikey)） | [MTEB 68.32](https://huggingface.co/spaces/mteb/leaderboard) | 否 | 768 |
+| DashScope [`text-embedding-v4`](https://help.aliyun.com/zh/model-studio/embedding) | 是（[免费额度](https://bailian.console.aliyun.com/)） | [MTEB 68.36 / C-MTEB 70.14](https://help.aliyun.com/zh/model-studio/embedding) | 否 | 1024 |
+| Local [`all-MiniLM-L6-v2`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) | 本地部署（免费） | [MTEB ~56](https://huggingface.co/spaces/mteb/leaderboard) | 是 | 384 |
 
 注意：选了之后不好换。三个模型的向量维度不一样，换模型要 `zotpilot index --force` 全部重新索引。先想好再选。
 
@@ -404,7 +404,7 @@ python3 scripts/run.py register \
 <details>
 <summary>DashScope/百炼怎么样？</summary>
 
-阿里云百炼的 `text-embedding-v3`，1024 维。国内不用翻墙，¥0.0005/千 token。装的时候选 `--provider dashscope`，key 在 https://bailian.console.aliyun.com/ 拿。
+阿里云百炼的 `text-embedding-v4`，1024 维，MTEB 68.36 / C-MTEB 70.14。国内不用翻墙，¥0.0005/千 token，新用户 100 万 token 免费额度。装的时候选 `--provider dashscope`，key 在 https://bailian.console.aliyun.com/ 拿。
 
 </details>
 

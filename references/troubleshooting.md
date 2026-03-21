@@ -28,7 +28,7 @@
 
 **DashScope / Bailian (Alibaba Cloud):**
 - Recommended for users in China (no VPN needed)
-- Model: text-embedding-v3 (1024 dimensions)
+- Model: text-embedding-v4 (1024 dimensions)
 - Pricing: ¥0.0005/1k tokens — very affordable
 - Key from: https://bailian.console.aliyun.com/
 - Setup: `zotpilot setup --non-interactive --provider dashscope`
