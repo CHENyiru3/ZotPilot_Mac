@@ -1,5 +1,5 @@
 <div align="center">
-  <p><em>🧭 Your AI Pilot for Zotero</em></p>
+  <h2>🧭 Your AI Pilot for Zotero</h2>
   <img src="assets/banner.jpg" alt="ZotPilot" width="100%">
 
   <p>
