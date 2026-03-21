@@ -14,10 +14,31 @@ def _default_config_path() -> Path:
     return _default_config_dir() / "config.json"
 
 
+def _split_validate_errors(errors: list[str]) -> tuple[list[str], list[str]]:
+    """Split config.validate() errors into (blocking_errors, api_key_warnings).
+
+    API key errors are non-blocking warnings when keys may live in MCP config
+    environment section (injected at server startup, not in system env).
+    """
+    warnings = [e for e in errors if "_API_KEY not set" in e]
+    blocking = [e for e in errors if e not in warnings]
+    return blocking, warnings
+
+
 def cmd_setup(args):
     """Interactive or non-interactive setup wizard."""
     from .config import _default_config_dir, _default_data_dir, _old_config_path
     from .zotero_detector import detect_zotero_data_dir
+
+    # Redirect misused API key flags (agents sometimes guess these exist)
+    _py = "python" if sys.platform == "win32" else "python3"
+    for flag, opt in [("gemini_key", "--gemini-key"), ("dashscope_key", "--dashscope-key")]:
+        if getattr(args, flag, None):
+            print(
+                f"Note: {opt} is not a setup argument — API keys go in MCP config.\n"
+                f"Pass it to 'register' instead:\n"
+                f"  {_py} scripts/run.py register {opt} <key>"
+            )
 
     non_interactive = getattr(args, "non_interactive", False)
 
@@ -192,10 +213,13 @@ def cmd_index(args):
 
     config = Config.load(args.config)
     errors = config.validate()
-    if errors:
-        for e in errors:
+    blocking_errors, api_warnings = _split_validate_errors(errors)
+    if blocking_errors:
+        for e in blocking_errors:
             print(f"Config error: {e}", file=sys.stderr)
         return 1
+    for w in api_warnings:
+        print(f"Warning: {w} (OK if set in MCP config via 'register')", file=sys.stderr)
 
     if args.no_vision:
         from dataclasses import replace
@@ -258,6 +282,7 @@ def cmd_status(args):
 
     config = Config.load(args.config)
     errors = config.validate()
+    blocking_errors, api_warnings = _split_validate_errors(errors)
 
     if output_json:
         result = {
@@ -272,7 +297,8 @@ def cmd_status(args):
             "index_ready": False,
             "doc_count": 0,
             "chunk_count": 0,
-            "errors": errors,
+            "errors": blocking_errors,
+            "warnings": api_warnings,
         }
         try:
             from .embeddings import create_embedder
@@ -289,7 +315,7 @@ def cmd_status(args):
             result["errors"].append(f"Index error: {e}")
 
         print(json.dumps(result, indent=2))
-        return 1 if errors else 0
+        return 1 if blocking_errors else 0
 
     # Human-readable output
     print("ZotPilot Status")
@@ -302,11 +328,15 @@ def cmd_status(args):
     print(f"  Reranking enabled:  {config.rerank_enabled}")
     print(f"  Vision enabled:     {config.vision_enabled}")
 
-    if errors:
+    if blocking_errors:
         print(f"\n  Config errors:")
-        for e in errors:
-            print(f"    - {e}")
+        for e in blocking_errors:
+            print(f"    ✗ {e}")
         return 1
+    if api_warnings:
+        print(f"\n  Warnings:")
+        for w in api_warnings:
+            print(f"    ⚠ {w} (OK if set in MCP config via 'register')")
 
     try:
         from .embeddings import create_embedder
@@ -381,6 +411,8 @@ def main(argv: list[str] | None = None) -> int:
         choices=["gemini", "dashscope", "local"],
         help="Embedding provider (default: gemini)",
     )
+    sub_setup.add_argument("--gemini-key", type=str, default=None, help=argparse.SUPPRESS)
+    sub_setup.add_argument("--dashscope-key", type=str, default=None, help=argparse.SUPPRESS)
     sub_setup.set_defaults(func=cmd_setup)
 
     # index

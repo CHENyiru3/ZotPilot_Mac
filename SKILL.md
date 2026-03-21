@@ -31,7 +31,7 @@ This auto-installs the ZotPilot CLI if not present. Parse the JSON output and fo
 
 1. Command fails entirely → go to **Prerequisites**
 2. `config_exists` is false → go to **First-Time Setup**
-3. `errors` is non-empty → go to **First-Time Setup** (likely missing API key or invalid Zotero path)
+3. `errors` is non-empty → go to **First-Time Setup** (note: `warnings` like API key not in env are OK if key was passed to `register` — only `errors` trigger this branch)
 4. `index_ready` is false or `doc_count` is 0 → go to **Index**
 5. All green → go to **Research**
 
@@ -183,8 +183,8 @@ search_boolean first (exact terms) → fallback to search_papers (semantic) → 
 | Error | Fix |
 |---|---|
 | Empty results | Try broader query, or `search_boolean` for exact terms. Check `get_index_stats` |
-| "GEMINI_API_KEY not set" | User must set env var, or switch to dashscope/local |
-| "DASHSCOPE_API_KEY not set" | User must set env var |
+| "GEMINI_API_KEY not set" | Appears in `warnings` (not `errors`) — **expected** if key was passed to `register`. Only re-run setup if provider is wrong. |
+| "DASHSCOPE_API_KEY not set" | Same as above — expected if key was passed to `register`. |
 | "ZOTERO_API_KEY not set" | Write ops need Zotero Web API credentials — see below |
 | "Document has no DOI" | Cannot use citation tools for this paper |
 | "No chunks found" | Paper not indexed — run `index_library(item_key="...")` |
