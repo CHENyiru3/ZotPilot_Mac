@@ -148,7 +148,7 @@ def _mcp_config_path(plat: str) -> Path | None:
         appdata = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
         code_support = appdata / "Code"
         paths = {
-            "opencode": appdata / "opencode" / "opencode.jsonc",
+            "opencode": appdata / "opencode" / "opencode.json",
             "gemini": home / ".gemini" / "settings.json",
             "cursor": home / ".cursor" / "mcp.json",
             "windsurf": appdata / "windsurf" / "mcp_config.json",
@@ -159,7 +159,7 @@ def _mcp_config_path(plat: str) -> Path | None:
         is_mac = platform.system() == "Darwin"
         code_support = (home / "Library" / "Application Support" / "Code") if is_mac else (home / ".config" / "Code")
         paths = {
-            "opencode": home / ".config" / "opencode" / "opencode.jsonc",
+            "opencode": home / ".config" / "opencode" / "opencode.json",
             "gemini": home / ".gemini" / "settings.json",
             "cursor": home / ".cursor" / "mcp.json",
             "windsurf": home / ".codeium" / "windsurf" / "mcp_config.json",
