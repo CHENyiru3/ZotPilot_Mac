@@ -148,7 +148,7 @@ def _mcp_config_path(plat: str) -> Path | None:
         appdata = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
         code_support = appdata / "Code"
         paths = {
-            "opencode": appdata / "opencode" / "opencode.json",
+            "opencode": home / ".config" / "opencode" / "opencode.json",
             "gemini": home / ".gemini" / "settings.json",
             "cursor": home / ".cursor" / "mcp.json",
             "windsurf": appdata / "windsurf" / "mcp_config.json",
