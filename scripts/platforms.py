@@ -41,7 +41,12 @@ PLATFORMS = {
         "tier": 1,
         "binary": "opencode",
         "label": "OpenCode",
-        "skills_dir": "~/.config/opencode/skills",
+        # Windows: OpenCode config lives in %APPDATA%\opencode\, match that location
+        "skills_dir": (
+            str(Path(os.environ.get("APPDATA", "~")) / "opencode" / "skills")
+            if platform.system() == "Windows"
+            else "~/.config/opencode/skills"
+        ),
     },
     "gemini": {
         "tier": 1,
@@ -94,8 +99,34 @@ def _zotpilot_command() -> str:
     if path:
         return path
 
-    # 2. Ask uv where it installs tool binaries
+    # 2. Windows: pip --user installs to %APPDATA%\Python\PythonXYY\Scripts\
+    if _is_windows():
+        appdata = os.environ.get("APPDATA", "")
+        if appdata:
+            py_ver = f"Python{sys.version_info.major}{sys.version_info.minor}"
+            win_pip_dir = Path(appdata) / "Python" / py_ver / "Scripts"
+            for name in ("zotpilot.exe", "zotpilot"):
+                candidate = win_pip_dir / name
+                if candidate.exists():
+                    return str(candidate)
+
+    # 3. Ask uv where it installs tool binaries
     uv = shutil.which("uv")
+    if not uv:
+        # uv may have been installed via pip and not be in PATH on Windows
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "uv", "tool", "dir", "--bin"],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                bin_dir = r.stdout.strip()
+                for name in ("zotpilot", "zotpilot.exe"):
+                    candidate = Path(bin_dir) / name
+                    if candidate.exists():
+                        return str(candidate)
+        except FileNotFoundError:
+            pass
     if uv:
         r = subprocess.run(
             [uv, "tool", "dir", "--bin"],
@@ -108,7 +139,7 @@ def _zotpilot_command() -> str:
                 if candidate.exists():
                     return str(candidate)
 
-    # 3. Last resort
+    # 4. Last resort
     return "zotpilot"
 
 

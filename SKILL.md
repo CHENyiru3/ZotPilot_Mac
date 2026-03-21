@@ -11,9 +11,21 @@ description: Use when user mentions Zotero, academic papers, citations,
 
 > All script paths are relative to this skill's directory.
 
+## Step 0: Verify Zotero is installed
+
+Before anything else, check if Zotero is installed on this machine:
+
+- **macOS**: check if `/Applications/Zotero.app` exists, or if `~/Zotero` or `~/Documents/Zotero` contains a `zotero.sqlite` file
+- **Windows**: check if `C:\Users\<username>\Zotero\zotero.sqlite` exists, or ask the user
+- **Linux**: check if `~/Zotero/zotero.sqlite` exists
+
+**If Zotero is NOT installed:** Tell the user: "ZotPilot requires Zotero to be installed and have been run at least once. Please download Zotero from https://www.zotero.org/download/, install it, add some papers, then come back." Stop here — do not proceed with setup.
+
 ## Step 1: Check readiness
 
-Run: `python3 scripts/run.py status --json`
+**Python command:** Use `python3` on Linux/macOS. On Windows, use `python` (Windows typically does not have `python3` in PATH).
+
+Run: `python3 scripts/run.py status --json`  (Windows: `python scripts/run.py status --json`)
 
 This auto-installs the ZotPilot CLI if not present. Parse the JSON output and follow the FIRST matching branch:
 
@@ -28,8 +40,12 @@ If any errors or unexpected behavior: run `python3 scripts/run.py doctor` for de
 ## Prerequisites (if run.py fails)
 
 The user needs:
-1. **Python 3.10+**: `python3 --version`
-2. **uv**: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+1. **Python 3.10+**: `python3 --version` (Linux/macOS) or `python --version` (Windows)
+2. **uv** (package manager):
+   - Linux/macOS: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+   - Windows (PowerShell): `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
+   - Any platform: `pip install uv`
+   - After installing on Windows, if `uv` is still not in PATH, that's OK — `run.py` will detect it automatically via `python -m uv`
 
 After installing, retry Step 1.
 
