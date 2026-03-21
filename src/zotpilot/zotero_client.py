@@ -124,7 +124,7 @@ class ZoteroClient:
                     ROW_NUMBER() OVER (
                         PARTITION BY COALESCE(ia.parentItemID, ia.itemID)
                         ORDER BY
-                            CASE WHEN ia.linkMode = 1 THEN 0 ELSE 1 END,  -- prefer imported file (0=URL, 1=imported, 2=linked)
+                            CASE WHEN ia.linkMode = 0 THEN 0 ELSE 1 END,  -- prefer imported file (0=imported_file, 1=imported_url, 2=linked)
                             ia.itemID DESC
                     ) AS rn
                 FROM itemAttachments ia
@@ -438,7 +438,7 @@ class ZoteroClient:
                     ROW_NUMBER() OVER (
                         PARTITION BY COALESCE(ia.parentItemID, ia.itemID)
                         ORDER BY
-                            CASE WHEN ia.linkMode = 1 THEN 0 ELSE 1 END,  -- prefer imported file (0=URL, 1=imported, 2=linked)
+                            CASE WHEN ia.linkMode = 0 THEN 0 ELSE 1 END,  -- prefer imported file (0=imported_file, 1=imported_url, 2=linked)
                             ia.itemID DESC
                     ) AS rn
                 FROM itemAttachments ia

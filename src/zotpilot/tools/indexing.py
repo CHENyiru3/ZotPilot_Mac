@@ -18,7 +18,7 @@ def index_library(
     item_key: Annotated[str | None, Field(description="Index only this specific item key")] = None,
     title_pattern: Annotated[str | None, Field(description="Regex to filter items by title (case-insensitive)")] = None,
     no_vision: Annotated[bool, Field(description="Disable vision-based table extraction")] = False,
-    batch_size: Annotated[int, Field(description="Items per batch (default 20). Set 0 for all at once. Call repeatedly until has_more=false.")] = 20,
+    batch_size: Annotated[int, Field(description="Items per batch (default 20). Set 0 for all at once. Call repeatedly until has_more=false. Vision extraction is auto-disabled in batch mode; use batch_size=0 for vision.")] = 20,
     max_pages: Annotated[int | None, Field(description="Skip PDFs over N pages. None uses config default (40). 0=no limit.")] = None,
 ) -> dict:
     """Index Zotero PDFs into the vector store. Incremental by default; processes batch_size items per call. Repeat until has_more=false to index all."""

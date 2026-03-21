@@ -283,10 +283,7 @@ def extract_document(
                     for i, chunk in enumerate(page_chunks)
                 ]
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(
-                f"OCR fallback failed for {pdf_path.name}: {e}"
-            )
+            logger.warning(f"OCR fallback failed for {pdf_path.name}: {e}")
 
     # Build pages and full markdown
     pages: list[PageExtraction] = []
