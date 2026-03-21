@@ -95,13 +95,17 @@ pip install zotpilot  # 或 uv tool install zotpilot
 
 <img src="assets/zotero-api-key.png" alt="Zotero API Key 页面" width="100%">
 
-注册时附上凭证（否则只有搜索功能，无法写入 Zotero）：
+拿到后直接告诉 agent：
+
+> 帮我启用 ZotPilot 写操作，我的 Zotero API Key 是 `xxxxx`，User ID 是 `12345`。
+
+或者手动注册：
 
 ```bash
 python3 scripts/run.py register --zotero-api-key <key> --zotero-user-id <numeric-id>
 ```
 
-只搜索不写入的话跳过这步。
+不配也行，搜索和引用照常用，只有标签和集合管理需要。
 
 **2. 注册 MCP 服务器：**
 
