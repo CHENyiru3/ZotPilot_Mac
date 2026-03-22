@@ -162,7 +162,7 @@ When you say "search my Zotero" the first time, the Skill walks through setup:
 | Provider | API Key | Quality | Offline | Default Dimensions |
 |----------|:---:|------|:---:|------|
 | Gemini [`gemini-embedding-001`](https://ai.google.dev/gemini-api/docs/embeddings) | Yes ([free tier](https://aistudio.google.com/apikey)) | [MTEB 68.32](https://huggingface.co/spaces/mteb/leaderboard) | No | 768 |
-| DashScope [`text-embedding-v4`](https://help.aliyun.com/zh/model-studio/embedding) | Yes ([free tier](https://bailian.console.aliyun.com/)) | [MTEB 68.36 / C-MTEB 70.14](https://help.aliyun.com/zh/model-studio/embedding) | No | 1024 |
+| DashScope [`text-embedding-v4`](https://help.aliyun.com/zh/model-studio/embedding) | Yes ([free tier](https://bailian.console.aliyun.com/)) | [MTEB 68.36 / C-MTEB 70.14](https://huggingface.co/spaces/mteb/leaderboard) | No | 1024 |
 | Local [`all-MiniLM-L6-v2`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) | Local (free) | [MTEB ~56](https://huggingface.co/spaces/mteb/leaderboard) | Yes | 384 |
 
 Note: this choice is hard to change later. The three providers produce different vector dimensions, so switching requires `zotpilot index --force` to re-index everything. Pick before you index.

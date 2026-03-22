@@ -154,7 +154,7 @@ zotpilot register --gemini-key <gemini密钥> --zotero-api-key <zotero密钥> --
 | 模型 | API Key | 质量 | 离线 | 默认维度 |
 |------|:---:|------|:---:|------|
 | Gemini [`gemini-embedding-001`](https://ai.google.dev/gemini-api/docs/embeddings) | 是（[免费额度](https://aistudio.google.com/apikey)） | [MTEB 68.32](https://huggingface.co/spaces/mteb/leaderboard) | 否 | 768 |
-| DashScope [`text-embedding-v4`](https://help.aliyun.com/zh/model-studio/embedding) | 是（[免费额度](https://bailian.console.aliyun.com/)） | [MTEB 68.36 / C-MTEB 70.14](https://help.aliyun.com/zh/model-studio/embedding) | 否 | 1024 |
+| DashScope [`text-embedding-v4`](https://help.aliyun.com/zh/model-studio/embedding) | 是（[免费额度](https://bailian.console.aliyun.com/)） | [MTEB 68.36 / C-MTEB 70.14](https://huggingface.co/spaces/mteb/leaderboard) | 否 | 1024 |
 | Local [`all-MiniLM-L6-v2`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) | 本地部署（免费） | [MTEB ~56](https://huggingface.co/spaces/mteb/leaderboard) | 是 | 384 |
 
 注意：选了之后不好换。三个模型的向量维度不一样，换模型要 `zotpilot index --force` 全部重新索引。先想好再选。
