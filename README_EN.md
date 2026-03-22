@@ -335,11 +335,13 @@ Search and citation tools work without extra setup. Tagging and collection manag
 <summary>Manual configuration</summary>
 
 ```bash
-# Tier 1 (source checkout):
-python3 scripts/run.py register --zotero-api-key <your-zotero-key> --zotero-user-id <your-user-id>
+# Tier 1 (source checkout) — include ALL existing keys when re-registering:
+python3 scripts/run.py register --gemini-key <your-gemini-key> --zotero-api-key <your-zotero-key> --zotero-user-id <your-user-id>
 # Tier 2 (pip/uv install):
-zotpilot register --zotero-api-key <your-zotero-key> --zotero-user-id <your-user-id>
+zotpilot register --gemini-key <your-gemini-key> --zotero-api-key <your-zotero-key> --zotero-user-id <your-user-id>
 ```
+
+> **Note:** `register` replaces the entire ZotPilot MCP entry. If you previously registered with `--gemini-key`, include it again or it will be removed from the config.
 
 Auto-detects platform and re-registers (removes stale entry first). Supports all platforms. Restart your agent.
 

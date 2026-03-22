@@ -124,11 +124,13 @@ python3 scripts/run.py register --gemini-key <key> --zotero-api-key <key> --zote
 <summary>或者手动配置</summary>
 
 ```bash
-# Tier 1（源码安装）：
-python3 scripts/run.py register --zotero-api-key <zotero密钥> --zotero-user-id <用户ID>
+# Tier 1（源码安装）— 重新注册时带上所有已有的 key，否则会丢失：
+python3 scripts/run.py register --gemini-key <gemini密钥> --zotero-api-key <zotero密钥> --zotero-user-id <用户ID>
 # Tier 2（pip/uv 安装）：
-zotpilot register --zotero-api-key <zotero密钥> --zotero-user-id <用户ID>
+zotpilot register --gemini-key <gemini密钥> --zotero-api-key <zotero密钥> --zotero-user-id <用户ID>
 ```
+
+> **注意**：`register` 会整体替换 MCP 配置中的 ZotPilot 条目。如果之前注册时带了 `--gemini-key`，重新注册时也要带上，否则会丢失嵌入 API 密钥。
 
 自动检测平台并重新注册。重启 agent。
 
