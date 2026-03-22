@@ -1,104 +1,116 @@
 # Changelog
 
-## [0.2.1] - 2026-03-19
+> 如何更新 / How to Update
+>
+> **PyPI 安装（pip/uv）：**
+> ```bash
+> pip install --upgrade zotpilot
+> # 或 / or
+> uv tool upgrade zotpilot
+> ```
+> **Git clone 安装（skills 目录）：**
+> ```bash
+> cd ~/.claude/skills/zotpilot   # 或对应目录 / or your skills directory
+> git pull
+> ```
+
+---
+
+## [0.2.1] - 2026-03-23
+
+### 新功能 / New Features
+- **论文摄取**：新增从 Semantic Scholar 搜索并一键导入 Zotero 的工具，自动获取元数据和开放获取 PDF
+  **Paper Ingestion**: New tools to search Semantic Scholar and import papers directly into Zotero with metadata and open-access PDFs (`search_academic_databases`, `add_paper_by_identifier`, `ingest_papers`)
+- **配置管理命令**：新增 `zotpilot config set/get/list/unset/path` 子命令，无需手动编辑 JSON 文件
+  **Config CLI**: New `zotpilot config set/get/list/unset/path` subcommands — no more manual JSON editing
+- **Semantic Scholar API key 支持**：设置 `S2_API_KEY` 环境变量可提升请求频率限制
+  **Semantic Scholar API key**: Set `S2_API_KEY` env var for higher rate limits
+
+### 修复 / Fixes
+- **API key 优先级修正**：环境变量现在优先于配置文件（更安全，推荐通过环境变量传递 key）
+  **API key priority fix**: Environment variables now take precedence over config file (more secure)
+
+---
+
+## [0.2.1] - 2026-03-19 (pre-release)
 
 ### Added
-- `switch_library` tool — list available libraries (user + groups) or switch active library context. Resets all singletons on switch via `_reset_singletons()`
-- `get_annotations` tool — read highlights and comments via Zotero Web API (requires ZOTERO_API_KEY). Uses new `ZoteroApiReader` (read-only pyzotero client, separate from `ZoteroWriter`)
+- `switch_library` tool — list available libraries (user + groups) or switch active library context
+- `get_annotations` tool — read highlights and comments via Zotero Web API (requires ZOTERO_API_KEY)
 - `_get_api_reader()` singleton in state.py for annotation reads
-- `get_libraries()` method in ZoteroClient (SQLite, includes group libraries)
 - Tool count: 30 → 32
+
+---
 
 ## [0.2.0] - 2026-03-19
 
-### Added
-- **No-RAG mode**: `embedding_provider: "none"` disables semantic search while keeping all metadata-based tools functional (advanced_search, get_notes, list_tags, citations via SQLite DOI fallback, etc.)
+### 新功能 / New Features
+- **No-RAG 模式**：将 `embedding_provider` 设为 `"none"` 可在不配置 embedding 的情况下使用元数据搜索、笔记、标签等基础功能
+  **No-RAG mode**: Set `embedding_provider: "none"` to use metadata search, notes, and tags without configuring an embedding provider
+
+### Added (technical)
 - `_get_store_optional()` pattern in state.py for graceful degradation
 - Citation tools fall back to SQLite for DOI lookup when vector store unavailable
 
-### Changed
-- `config.py` accepts `"none"` as valid embedding_provider, skips API key validation
-- `embeddings/__init__.py` returns `None` for provider "none"
-- `get_index_stats` returns `{mode: "no-rag", total_documents: 0}` in No-RAG mode
-- `get_reranking_config` returns `{enabled: false, mode: "no-rag"}` in No-RAG mode
-- `get_paper_details` and `get_library_overview` show `indexed: false` in No-RAG mode
-- `search_papers`, `search_topic`, `get_passage_context` raise clear ToolError in No-RAG mode
+---
 
 ## [0.1.5] - 2026-03-19
 
 ### Added
-- `get_feeds` tool — list RSS feeds or get feed items (SQLite, no API key needed). Graceful degradation for old Zotero versions without feeds table
+- `get_feeds` tool — list RSS feeds or get feed items (SQLite, no API key needed)
 - Tool count: 29 → 30
+
+---
 
 ## [0.1.4] - 2026-03-19
 
-### Added
-- `get_notes` tool — read and search notes by parent item or content keyword (SQLite, no API key needed)
-- `create_note` tool — create child notes on Zotero items (requires ZOTERO_API_KEY)
-- `advanced_search` tool — multi-condition metadata search by year/author/tag/collection/title/doi/publication. Works without indexing. Tag matching uses direct JOIN to prevent false positives ("ML" won't match "HTML")
+### 新功能 / New Features
+- **笔记工具**：新增读取笔记（`get_notes`）和创建笔记（`create_note`，需要 ZOTERO_API_KEY）
+  **Notes tools**: Added `get_notes` (read) and `create_note` (write, requires ZOTERO_API_KEY)
+- **高级元数据搜索**：新增 `advanced_search`，支持按年份、作者、标签、集合等多条件筛选，无需建索引
+  **Advanced search**: New `advanced_search` tool — filter by year, author, tag, collection, DOI, etc. Works without indexing
+
+### Added (technical)
 - Tool count: 26 → 29
+
+---
 
 ## [0.1.3] - 2026-03-19
 
 ### Changed
-- All tool docstrings slimmed to 1-3 sentences (<500 chars each) — total docstring reduced from 17.5 KB to 2.1 KB (-88%)
-- Parameter documentation migrated from docstrings to `Annotated[type, Field(description="...")]` for structured schema generation
-- 5 batch tools merged into 2: `batch_tags(action="add|set|remove")` and `batch_collections(action="add|remove")` — tool count 29 → 26
+- Batch tools consolidated: `batch_tags(action="add|set|remove")` and `batch_collections(action="add|remove")` — tool count 29 → 26
+- All tool docstrings slimmed significantly for faster LLM context usage
 
-### Removed
-- `batch_add_tags`, `batch_set_tags`, `batch_remove_tags`, `batch_add_to_collection`, `batch_remove_from_collection` (replaced by `batch_tags` and `batch_collections`)
+---
 
 ## [0.1.2] - 2026-03-19
 
-### Added
-- Query embedding cache in `VectorStore` (maxsize=512, FIFO eviction) — avoids repeated embedding API calls for identical queries
-- 5 batch write tools: `batch_add_tags`, `batch_set_tags`, `batch_remove_tags`, `batch_add_to_collection`, `batch_remove_from_collection` (max 100 items, per-item error reporting)
-- `zotpilot doctor` now validates `ZOTERO_USER_ID` is numeric (catches username vs ID confusion)
-- SKILL.md updated with batch tool documentation and workflow chains
+### 新功能 / New Features
+- **查询缓存**：相同查询不再重复调用 embedding API，搜索更快
+  **Query cache**: Identical queries no longer call the embedding API twice — faster search
+- **批量操作工具**：支持批量打标签、批量加入/移出集合（最多 100 条）
+  **Batch write tools**: Bulk tag and collection operations (up to 100 items)
 
 ### Removed
-- Built-in Chinese→English query translation (`translation.py` deleted) — bilingual search is now the Agent's responsibility, not the MCP server's
-- `_contains_chinese` and `_translate_to_english` removed from search pipeline
+- Built-in Chinese→English query translation removed — bilingual search is now the Agent's responsibility
 
-### Changed
-- `VectorStore.search()` uses cached embeddings via `_cached_embed_query()`
-- `index_library()` clears query cache after indexing to ensure new documents are findable
-- Search tool docstrings updated: query accepts any language, Agent should translate if needed
+---
 
 ## [0.1.1] - 2026-03-19
 
-### Fixed
-- Ghost tool name: `index_documents()` references corrected to `index_library()`
-- ReDoS: title_pattern now validates regex and rejects patterns over 200 chars
-- API key exposure: setup wizard no longer prints full Gemini key to terminal
+### 修复 / Fixes
 - Thread safety: all singleton initializers use double-checked locking
-- `search_boolean` bypassed singleton — now uses `_get_zotero()` instead of raw `ZoteroClient()`
-- `get_item()` no longer does a full table scan — dedicated SQL with WHERE clause
-- Collection cache not invalidated after write ops — `create_collection`, `add_to_collection`, `remove_from_collection` now clear cache
+- ReDoS vulnerability in title_pattern regex fixed
+- API key no longer printed to terminal during setup
+- Collection cache now invalidated after write operations
 
-### Changed
-- Split `state.py` (432 lines, 7 responsibilities) into 4 modules: `state.py`, `filters.py`, `translation.py`, `result_utils.py`
-- `_translate_to_english` now uses `_get_config()` (thread-safe) instead of reading global `_config` directly
-- `VectorStore` metadata construction extracted into `_build_base_metadata()` helper
-- `ZoteroClient.get_all_items_with_pdfs()` refactored to reuse `_row_to_item()` helper
-- All search results now include both `doc_id` and `item_key` fields for LLM chain compatibility
-- SKILL.md: installation flow now collects Zotero Web API credentials upfront, clarifies numeric User ID vs username
-
-### Added
-- Tests: `test_tools_search.py`, `test_indexer.py`, `test_journal_ranker.py` (26 new tests)
-- Thread safety test for `_get_config()` concurrent access
-- CI coverage gate (`--cov-fail-under=29`)
+---
 
 ## [0.1.0] - 2026-03-16
 
-### Added
-- Initial release as ZotPilot (repackaged from deep-zotero)
-- 26 MCP tools for search, indexing, citations, and library management
+### 新功能 / New Features
+- **初始版本**：ZotPilot 首次发布，提供 26 个 MCP 工具，支持语义搜索、索引、引用图谱和文献库管理
+  **Initial release**: 26 MCP tools for semantic search, indexing, citations, and library management
 - Gemini and local embedding providers
 - Section-aware reranking with journal quality weighting
 - PDF extraction with table, figure, and OCR support
-- Zotero auto-detection from profiles.ini
-- Setup CLI wizard (`zotpilot setup`)
-- Config migration from deep-zotero
-- Claude Code skill for guided installation and usage
-- GitHub Actions CI (ruff + mypy + pytest)
