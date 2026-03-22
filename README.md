@@ -122,12 +122,35 @@ python3 scripts/run.py register --platform claude-code  # 或: zotpilot register
 
 <img src="assets/zotero-api-key.png" alt="Zotero API Key 页面" width="100%">
 
-4. 告诉 agent：
+4. 保存凭证（**推荐：写入 config 文件，对所有 MCP 客户端生效**）：
 
-> 帮我启用 ZotPilot 写操作，我的 Zotero API Key 是 `xxxxx`，User ID 是 `12345`。
+```bash
+zotpilot config set zotero_user_id 12345678   # 数字 ID，不是用户名
+zotpilot config set zotero_api_key YOUR_KEY
+```
+
+> ⚠️ Key 以明文存储在 `~/.config/zotpilot/config.json`（Windows: `%APPDATA%\zotpilot\config.json`）。
+> 确保该目录不被 git 追踪。
+
+验证配置：
+
+```bash
+zotpilot doctor   # 应显示 [source: config file] ✓
+```
 
 <details>
-<summary>或者手动配置</summary>
+<summary>其他配置方式</summary>
+
+**环境变量（仅对当前 shell session 有效）：**
+
+```bash
+export ZOTERO_USER_ID=12345678
+export ZOTERO_API_KEY=YOUR_KEY
+```
+
+环境变量优先级高于 config 文件。在 `.zshrc` / `.bashrc` 里 export 可持久化，但 IDE 客户端（Cursor/Windsurf）可能读不到 shell 环境变量。
+
+**通过 `register` 注册时写入 MCP 配置（旧方式）：**
 
 ```bash
 # Tier 1（源码安装）— 重新注册时带上所有已有的 key，否则会丢失：
@@ -136,9 +159,7 @@ python3 scripts/run.py register --gemini-key <gemini密钥> --zotero-api-key <zo
 zotpilot register --gemini-key <gemini密钥> --zotero-api-key <zotero密钥> --zotero-user-id <用户ID>
 ```
 
-> **注意**：`register` 会整体替换 MCP 配置中的 ZotPilot 条目。如果之前注册时带了 `--gemini-key`，重新注册时也要带上，否则会丢失嵌入 API 密钥。
-
-自动检测平台并重新注册。重启 agent。
+> **注意**：`register` 会整体替换 MCP 配置中的 ZotPilot 条目。如果之前注册时带了 `--gemini-key`，重新注册时也要带上，否则会丢失嵌入 API 密钥。推荐改用 `config set` 避免此问题。
 
 </details>
 

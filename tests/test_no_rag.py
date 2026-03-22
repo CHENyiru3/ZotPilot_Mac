@@ -54,6 +54,7 @@ class TestConfigValidation:
             zotero_api_key=None,
             zotero_user_id=None,
             zotero_library_type="user",
+            semantic_scholar_api_key=None,
         )
         errors = config.validate()
         # Should have no embedding-related errors
@@ -91,6 +92,7 @@ class TestConfigValidation:
             zotero_api_key=None,
             zotero_user_id=None,
             zotero_library_type="user",
+            semantic_scholar_api_key=None,
         )
         errors = config.validate()
         assert any("invalid_provider" in e.lower() for e in errors)

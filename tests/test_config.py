@@ -193,6 +193,7 @@ class TestConfigValidation:
             zotero_api_key=cfg.zotero_api_key,
             zotero_user_id=cfg.zotero_user_id,
             zotero_library_type=cfg.zotero_library_type,
+            semantic_scholar_api_key=None,
         )
 
         errors = cfg.validate()
@@ -236,3 +237,53 @@ class TestConfigValidation:
 
         assert any("Invalid embedding_provider" in e for e in errors)
         assert any("openai" in e for e in errors)
+
+
+class TestConfigPriorityInversion:
+    """Regression tests: env var must take precedence over config file."""
+
+    def _clear_creds(self, monkeypatch):
+        for var in ("GEMINI_API_KEY", "DASHSCOPE_API_KEY", "ANTHROPIC_API_KEY",
+                    "ZOTERO_API_KEY", "ZOTERO_USER_ID", "S2_API_KEY", "OPENALEX_EMAIL"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_env_wins_over_config_file(self, tmp_path, monkeypatch):
+        """When both env var and config file have a value, env wins."""
+        self._clear_creds(monkeypatch)
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"gemini_api_key": "from-file"}))
+        monkeypatch.setenv("GEMINI_API_KEY", "from-env")
+        cfg = Config.load(path=config_file)
+        assert cfg.gemini_api_key == "from-env"
+
+    def test_config_file_fallback_when_no_env(self, tmp_path, monkeypatch):
+        """When env var is absent, config file value is used."""
+        self._clear_creds(monkeypatch)
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"gemini_api_key": "from-file"}))
+        cfg = Config.load(path=config_file)
+        assert cfg.gemini_api_key == "from-file"
+
+    def test_config_set_persists_but_env_still_wins(self, tmp_path, monkeypatch):
+        """config set writes to file; env var still overrides on load."""
+        self._clear_creds(monkeypatch)
+        from zotpilot.cli import _config_set
+        config_file = tmp_path / "config.json"
+        _config_set("gemini_api_key", "file-key", config_file)
+        monkeypatch.setenv("GEMINI_API_KEY", "env-key")
+        cfg = Config.load(path=config_file)
+        assert cfg.gemini_api_key == "env-key"
+
+    def test_zotero_creds_env_priority(self, tmp_path, monkeypatch):
+        """Zotero creds: env wins over config file."""
+        self._clear_creds(monkeypatch)
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "zotero_api_key": "file-zotkey",
+            "zotero_user_id": "11111111",
+        }))
+        monkeypatch.setenv("ZOTERO_API_KEY", "env-zotkey")
+        monkeypatch.setenv("ZOTERO_USER_ID", "99999999")
+        cfg = Config.load(path=config_file)
+        assert cfg.zotero_api_key == "env-zotkey"
+        assert cfg.zotero_user_id == "99999999"

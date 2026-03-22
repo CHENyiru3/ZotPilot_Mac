@@ -74,6 +74,8 @@ class Config:
     zotero_api_key: str | None
     zotero_user_id: str | None
     zotero_library_type: str  # "user" or "group"
+    # Semantic Scholar API key (optional, increases rate limit)
+    semantic_scholar_api_key: str | None
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "Config":
@@ -117,8 +119,8 @@ class Config:
             embedding_dimensions=data.get("embedding_dimensions", default_dims),
             chunk_size=data.get("chunk_size", 400),
             chunk_overlap=data.get("chunk_overlap", 100),
-            gemini_api_key=data.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY"),
-            dashscope_api_key=data.get("dashscope_api_key") or os.environ.get("DASHSCOPE_API_KEY"),
+            gemini_api_key=os.environ.get("GEMINI_API_KEY") or data.get("gemini_api_key"),
+            dashscope_api_key=os.environ.get("DASHSCOPE_API_KEY") or data.get("dashscope_api_key"),
             embedding_provider=data.get("embedding_provider", "gemini"),
             embedding_timeout=data.get("embedding_timeout", 120.0),
             embedding_max_retries=data.get("embedding_max_retries", 3),
@@ -130,14 +132,15 @@ class Config:
             oversample_topic_factor=data.get("oversample_topic_factor", 5),
             stats_sample_limit=data.get("stats_sample_limit", 10000),
             ocr_language=data.get("ocr_language", "eng"),
-            openalex_email=data.get("openalex_email") or os.environ.get("OPENALEX_EMAIL"),
+            openalex_email=os.environ.get("OPENALEX_EMAIL") or data.get("openalex_email"),
             vision_enabled=data.get("vision_enabled", True),
             vision_model=data.get("vision_model", "claude-haiku-4-5-20251001"),
-            anthropic_api_key=data.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY"),
+            anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY") or data.get("anthropic_api_key"),
             max_pages=data.get("max_pages", 40),
-            zotero_api_key=data.get("zotero_api_key") or os.environ.get("ZOTERO_API_KEY"),
-            zotero_user_id=data.get("zotero_user_id") or os.environ.get("ZOTERO_USER_ID"),
+            zotero_api_key=os.environ.get("ZOTERO_API_KEY") or data.get("zotero_api_key"),
+            zotero_user_id=os.environ.get("ZOTERO_USER_ID") or data.get("zotero_user_id"),
             zotero_library_type=data.get("zotero_library_type", "user"),
+            semantic_scholar_api_key=os.environ.get("S2_API_KEY") or data.get("semantic_scholar_api_key"),
         )
 
     def save(self, path: Path | str | None = None) -> None:

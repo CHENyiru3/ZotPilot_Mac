@@ -100,10 +100,14 @@ def _check_chromadb_index(config) -> CheckResult:
         return CheckResult("chromadb_index", "fail", f"Cannot open index: {exc}")
 
 
-def _check_zotero_web_api() -> CheckResult:
-    """Check Zotero Web API credentials presence."""
-    api_key = os.environ.get("ZOTERO_API_KEY")
-    user_id = os.environ.get("ZOTERO_USER_ID")
+def _check_zotero_web_api(config) -> CheckResult:
+    """Check Zotero Web API credentials presence and source."""
+    api_key = config.zotero_api_key
+    user_id = config.zotero_user_id
+
+    # Determine credential source for display
+    api_key_from_env = bool(os.environ.get("ZOTERO_API_KEY"))
+    user_id_from_env = bool(os.environ.get("ZOTERO_USER_ID"))
 
     if api_key and user_id:
         if not user_id.isdigit():
@@ -112,9 +116,15 @@ def _check_zotero_web_api() -> CheckResult:
                 "fail",
                 f"ZOTERO_USER_ID must be a numeric ID (e.g. '1234567'), "
                 f"not a username (got '{user_id}'). "
-                f"Find your numeric ID at https://www.zotero.org/settings/keys",
+                f"Fix: zotpilot config set zotero_user_id <numeric_id>",
             )
-        return CheckResult("zotero_web_api", "pass", "ZOTERO_API_KEY and ZOTERO_USER_ID are set")
+        key_src = "env" if api_key_from_env else "config file"
+        id_src = "env" if user_id_from_env else "config file"
+        return CheckResult(
+            "zotero_web_api",
+            "pass",
+            f"ZOTERO_API_KEY [source: {key_src}] and ZOTERO_USER_ID [source: {id_src}] are set",
+        )
 
     missing = []
     if not api_key:
@@ -124,14 +134,15 @@ def _check_zotero_web_api() -> CheckResult:
     return CheckResult(
         "zotero_web_api",
         "warn",
-        f"Missing: {', '.join(missing)} (write operations will not work)",
+        f"Missing: {', '.join(missing)} (write operations will not work). "
+        f"Run: zotpilot config set zotero_api_key <key>",
     )
 
 
 def _check_write_connectivity(config) -> CheckResult:
     """Test Zotero Web API connectivity (slow — only with --full)."""
-    api_key = config.zotero_api_key or os.environ.get("ZOTERO_API_KEY")
-    user_id = config.zotero_user_id or os.environ.get("ZOTERO_USER_ID")
+    api_key = config.zotero_api_key
+    user_id = config.zotero_user_id
 
     if not api_key or not user_id:
         return CheckResult("write_connectivity", "fail", "Cannot test: missing ZOTERO_API_KEY or ZOTERO_USER_ID")
@@ -182,7 +193,16 @@ def run_checks(config_path: str | None = None, full: bool = False) -> list[Check
     results.append(_check_chromadb_index(config))
 
     # 6. Zotero Web API credentials
-    results.append(_check_zotero_web_api())
+    results.append(_check_zotero_web_api(config))
+
+    # 7b. Semantic Scholar API key (warn if missing — rate-limited without key)
+    if not config.semantic_scholar_api_key:
+        results.append(CheckResult(
+            "semantic_scholar_key",
+            "warn",
+            "S2_API_KEY not set. Academic search rate-limited to 1 req/sec. "
+            "Set: zotpilot config set semantic_scholar_api_key <key>",
+        ))
 
     # 7. Write connectivity (only with --full)
     if full:

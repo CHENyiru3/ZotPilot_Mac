@@ -488,6 +488,20 @@ def register(
 
     Returns dict of {platform: success}.
     """
+    # Auto-fill from config file if not passed as CLI args
+    if not all([gemini_key, dashscope_key, zotero_api_key, zotero_user_id]):
+        try:
+            from .config import Config
+            cfg = Config.load()
+            gemini_key = gemini_key or cfg.gemini_api_key
+            dashscope_key = dashscope_key or cfg.dashscope_api_key
+            zotero_api_key = zotero_api_key or cfg.zotero_api_key
+            zotero_user_id = zotero_user_id or cfg.zotero_user_id
+            if any([cfg.gemini_api_key, cfg.zotero_api_key]):
+                print("Credentials loaded from config file.")
+        except Exception:
+            pass
+
     env = _build_env(gemini_key, dashscope_key, zotero_api_key, zotero_user_id)
 
     if not platforms:

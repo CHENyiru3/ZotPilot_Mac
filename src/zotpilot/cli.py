@@ -395,6 +395,155 @@ def cmd_doctor(args):
     return 1 if has_fail else 0
 
 
+def _mask_secret(v: str) -> str:
+    return v[:4] + "****" if len(v) > 4 else "****"
+
+
+_SENSITIVE_FIELDS = {
+    "gemini_api_key", "dashscope_api_key", "anthropic_api_key",
+    "zotero_api_key", "semantic_scholar_api_key",
+}
+
+_SCALAR_TYPES = {
+    "chunk_size": int, "chunk_overlap": int, "embedding_timeout": float,
+    "embedding_max_retries": int, "rerank_alpha": float, "rerank_enabled": bool,
+    "oversample_multiplier": int, "oversample_topic_factor": int,
+    "stats_sample_limit": int, "max_pages": int, "vision_enabled": bool,
+    "embedding_dimensions": int,
+}
+
+
+def _coerce_value(key: str, value: str):
+    """Coerce string value to appropriate type for config field."""
+    if key in _SCALAR_TYPES:
+        t = _SCALAR_TYPES[key]
+        if t is bool:
+            if value.lower() in ("true", "1", "yes"):
+                return True
+            if value.lower() in ("false", "0", "no"):
+                return False
+            raise ValueError(f"Expected true/false for {key}, got '{value}'")
+        return t(value)
+    # dict/list fields: try JSON parse
+    if value.startswith("{") or value.startswith("["):
+        return json.loads(value)
+    return value
+
+
+def _config_set(key: str, value: str, config_path: Path) -> None:
+    """Direct JSON read-modify-write for a config field."""
+    import os
+    data: dict = {}
+    if config_path.exists():
+        with open(config_path) as f:
+            data = json.load(f)
+    data[key] = _coerce_value(key, value)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(config_path, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    if sys.platform != "win32":
+        os.chmod(config_path, 0o600)
+
+
+def cmd_config(args):
+    """Manage ZotPilot configuration."""
+    config_path = _default_config_path()
+
+    # Known fields from Config dataclass
+    from .config import Config as _Cfg
+    known_fields = set(_Cfg.__dataclass_fields__.keys())
+
+    subcmd = args.config_subcmd
+
+    if subcmd == "path":
+        print(config_path)
+        return 0
+
+    if subcmd == "set":
+        key, value = args.key, args.value
+        if key not in known_fields:
+            print(f"Error: unknown field '{key}'. Run 'zotpilot config list' to see valid fields.",
+                  file=sys.stderr)
+            return 1
+        if key == "zotero_user_id" and not value.isdigit():
+            print(f"Warning: zotero_user_id should be a numeric ID, not a username (got '{value}').\n"
+                  f"Find your numeric ID at https://www.zotero.org/settings/keys")
+        if key in _SENSITIVE_FIELDS:
+            print(f"Warning: {key} will be stored in plain text at {config_path}")
+            print("If this path is inside a git-tracked dotfiles repo, ensure it is git-ignored.")
+        try:
+            _config_set(key, value, config_path)
+            print(f"✓ Saved to {config_path}")
+        except (ValueError, json.JSONDecodeError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        return 0
+
+    if subcmd == "get":
+        key = args.key
+        if key not in known_fields:
+            print(f"Error: unknown field '{key}'.", file=sys.stderr)
+            return 1
+        cfg = Config.load()
+        val = getattr(cfg, key, None)
+        if val is None:
+            print(f"{key}: (not set)")
+        elif key in _SENSITIVE_FIELDS:
+            print(f"{key}: {_mask_secret(str(val))}")
+        else:
+            print(f"{key}: {val}")
+        return 0
+
+    if subcmd == "list":
+        cfg = Config.load()
+        # Show raw file data too for credential source display
+        raw: dict = {}
+        if config_path.exists():
+            with open(config_path) as f:
+                raw = json.load(f)
+        for field in sorted(known_fields):
+            val = getattr(cfg, field, None)
+            if val is None:
+                continue
+            if field in _SENSITIVE_FIELDS:
+                import os
+                env_map = {
+                    "gemini_api_key": "GEMINI_API_KEY",
+                    "dashscope_api_key": "DASHSCOPE_API_KEY",
+                    "anthropic_api_key": "ANTHROPIC_API_KEY",
+                    "zotero_api_key": "ZOTERO_API_KEY",
+                    "semantic_scholar_api_key": "S2_API_KEY",
+                }
+                src = "env" if os.environ.get(env_map.get(field, "")) else "file"
+                print(f"  {field}: {_mask_secret(str(val))} [{src}]")
+            else:
+                print(f"  {field}: {val}")
+        return 0
+
+    if subcmd == "unset":
+        key = args.key
+        if not config_path.exists():
+            print(f"Config file not found: {config_path}", file=sys.stderr)
+            return 1
+        with open(config_path) as f:
+            data = json.load(f)
+        if key not in data:
+            print(f"Field '{key}' not set in config file.")
+            return 0
+        del data[key]
+        import os
+        with open(config_path, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        if sys.platform != "win32":
+            os.chmod(config_path, 0o600)
+        print(f"✓ Removed '{key}' from {config_path}")
+        return 0
+
+    return 0
+
+
 def cmd_register(args):
     """Register ZotPilot MCP server on AI agent platforms."""
     from ._platforms import register
@@ -459,6 +608,25 @@ def main(argv: list[str] | None = None) -> int:
     sub_doctor.add_argument("--json", action="store_true", help="Output as JSON")
     sub_doctor.add_argument("--full", action="store_true", help="Include slow checks (API connectivity)")
     sub_doctor.set_defaults(func=cmd_doctor)
+
+    # config
+    sub_config = subparsers.add_parser("config", help="Manage ZotPilot configuration")
+    config_sub = sub_config.add_subparsers(dest="config_subcmd")
+
+    cfg_set = config_sub.add_parser("set", help="Set a config value")
+    cfg_set.add_argument("key", help="Config field name")
+    cfg_set.add_argument("value", help="Value to set")
+
+    cfg_get = config_sub.add_parser("get", help="Get a config value")
+    cfg_get.add_argument("key", help="Config field name")
+
+    config_sub.add_parser("list", help="List all config values")
+
+    cfg_unset = config_sub.add_parser("unset", help="Remove a config value")
+    cfg_unset.add_argument("key", help="Config field name")
+
+    config_sub.add_parser("path", help="Print config file path")
+    sub_config.set_defaults(func=cmd_config)
 
     # register
     sub_register = subparsers.add_parser("register", help="Register ZotPilot MCP server")

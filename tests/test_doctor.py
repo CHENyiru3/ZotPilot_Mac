@@ -159,23 +159,30 @@ class TestCheckChromaDbIndex:
 
 
 class TestCheckZoteroWebApi:
+    def _make_config(self, api_key=None, user_id=None):
+        from unittest.mock import MagicMock
+        cfg = MagicMock()
+        cfg.zotero_api_key = api_key
+        cfg.zotero_user_id = user_id
+        return cfg
+
     def test_pass_when_both_set(self, monkeypatch):
         monkeypatch.setenv("ZOTERO_API_KEY", "key123")
         monkeypatch.setenv("ZOTERO_USER_ID", "456")
-        result = _check_zotero_web_api()
+        result = _check_zotero_web_api(self._make_config("key123", "456"))
         assert result.status == "pass"
 
     def test_warn_when_key_missing(self, monkeypatch):
         monkeypatch.delenv("ZOTERO_API_KEY", raising=False)
         monkeypatch.delenv("ZOTERO_USER_ID", raising=False)
-        result = _check_zotero_web_api()
+        result = _check_zotero_web_api(self._make_config(None, None))
         assert result.status == "warn"
         assert "ZOTERO_API_KEY" in result.message
 
     def test_warn_when_partial(self, monkeypatch):
         monkeypatch.setenv("ZOTERO_API_KEY", "key123")
         monkeypatch.delenv("ZOTERO_USER_ID", raising=False)
-        result = _check_zotero_web_api()
+        result = _check_zotero_web_api(self._make_config("key123", None))
         assert result.status == "warn"
         assert "ZOTERO_USER_ID" in result.message
 

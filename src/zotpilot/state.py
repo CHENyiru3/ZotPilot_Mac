@@ -121,14 +121,25 @@ _start_parent_monitor()
 _MCP_INSTRUCTIONS = """\
 ZotPilot — AI-powered Zotero research assistant. Tool selection guide:
 
-| User intent                        | Tool             |
-|------------------------------------|------------------|
-| Find specific passages or claims   | search_papers    |
-| Survey a topic / find papers       | search_topic     |
-| Find paper by exact terms          | search_boolean   |
-| Filter by year/author/tag/etc.     | advanced_search  |
-| Find data tables                   | search_tables    |
-| Find figures or diagrams           | search_figures   |
+| User intent                                             | Tool                        |
+|---------------------------------------------------------|-----------------------------|
+| Find specific passages or claims                        | search_papers               |
+| Survey a topic / find papers                            | search_topic                |
+| Find paper by exact terms                               | search_boolean              |
+| Filter by year/author/tag/etc.                          | advanced_search             |
+| Find data tables                                        | search_tables               |
+| Find figures or diagrams                                | search_figures              |
+| Add a specific paper by DOI/arXiv/URL                   | add_paper_by_identifier     |
+| Search external academic databases (Semantic Scholar)   | search_academic_databases   |
+| Batch add papers from search results to Zotero          | ingest_papers               |
+
+**Note**: `search_topic` searches your LOCAL indexed Zotero library \
+(requires prior `index_library`). `search_academic_databases` queries \
+the EXTERNAL Semantic Scholar API and finds papers not yet in your library.
+
+**Typical literature collection workflow:**
+1. `search_academic_databases` → review candidates
+2. `ingest_papers` with selected papers → added to Zotero with metadata and OA PDF
 
 Start with get_index_stats to check readiness. If doc count is 0, \
 tell the user to run `zotpilot index` first.
@@ -219,6 +230,18 @@ def _get_zotero():
 
 
 _writer = None
+_resolver = None
+
+
+def _get_resolver():
+    """Lazy-initialize IdentifierResolver."""
+    global _resolver
+    if _resolver is None:
+        with _init_lock:
+            if _resolver is None:
+                from .identifier_resolver import IdentifierResolver
+                _resolver = IdentifierResolver()
+    return _resolver
 
 
 def _get_writer():
@@ -296,7 +319,7 @@ _library_override: dict | None = None
 
 def _reset_singletons():
     """Tear down all cached singletons. Called by switch_library."""
-    global _retriever, _store, _reranker, _config, _zotero, _writer, _api_reader
+    global _retriever, _store, _reranker, _config, _zotero, _writer, _api_reader, _resolver
     with _init_lock:
         _retriever = None
         _store = None
@@ -305,6 +328,7 @@ def _reset_singletons():
         _zotero = None
         _writer = None
         _api_reader = None
+        _resolver = None
 
 
 def _set_library_override(library_id: str, library_type: str):
