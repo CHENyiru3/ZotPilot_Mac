@@ -10,7 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write  # 用于 PyPI Trusted Publisher（无需手动配置 token）
+      id-token: write   # 用于 PyPI Trusted Publisher（无需手动配置 token）
+      contents: write   # 用于创建 GitHub Release
 
     steps:
       - uses: actions/checkout@v4
@@ -32,3 +33,8 @@ jobs:
 
       - name: 发布到 PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
