@@ -92,20 +92,19 @@ pip install zotpilot  # 或 uv tool install zotpilot
 
 有两种方式传 API key 给 MCP 服务器：
 
-**方式 A（推荐）：注册时通过 CLI 参数传入。** `register` 会把 key 写进 MCP 客户端的配置文件（如 `settings.local.json`），客户端启动时注入给服务器。所有 MCP 客户端都支持。注意：key 会留在 shell history 和配置文件明文中。
+**方式 A（推荐）：设环境变量。** 在 shell profile 里 `export GEMINI_API_KEY=<key>`，服务器启动时自动读取。key 不进 shell history，不写入配置文件。适合 Claude Code / Codex / Gemini CLI 等从终端启动的客户端。
 
-**方式 B：设系统环境变量。** 在 shell profile 里 `export GEMINI_API_KEY=<key>`，服务器启动时自动读取。适合 Claude Code / Codex / Gemini CLI 等从终端启动的客户端；Cursor / Windsurf 等 IDE 可能不继承 shell 环境变量，用方式 A 更可靠。
+**方式 B（兼容性备选）：注册时通过 CLI 参数传入。** `register` 会把 key 写进 MCP 客户端配置文件，客户端启动时注入给服务器。所有 MCP 客户端都支持（包括 Cursor / Windsurf 等不继承 shell 环境变量的 IDE）。注意：key 会留在 shell history 和配置文件明文中。
 
 ```bash
-# Tier 1（源码安装）— 带 key 注册（推荐，所有客户端都支持）：
-python3 scripts/run.py register --gemini-key <key>
+# 推荐：先设环境变量，再注册
+export GEMINI_API_KEY=<key>
+python3 scripts/run.py register          # Tier 1（源码安装）
+zotpilot register                        # Tier 2（pip/uv 安装）
 
-# Tier 2（pip/uv 安装）：
-zotpilot register --gemini-key <key>
-
-# 不带 key（需要环境变量已设好）：
-python3 scripts/run.py register          # Tier 1
-zotpilot register                        # Tier 2
+# 兼容性备选：通过 CLI 参数传 key（IDE 客户端可能需要）
+python3 scripts/run.py register --gemini-key <key>    # Tier 1
+zotpilot register --gemini-key <key>                  # Tier 2
 
 # 指定平台：
 python3 scripts/run.py register --platform claude-code  # 或: zotpilot register --platform claude-code

@@ -128,20 +128,19 @@ pip install zotpilot  # or: uv tool install zotpilot
 
 Two ways to pass API keys to the MCP server:
 
-**Method A (recommended):** Pass keys via CLI flags during registration. `register` writes them into the MCP client config (e.g. `settings.local.json`), which injects them at server startup. Works with all MCP clients. Note: keys appear in shell history and plaintext config files.
+**Method A (recommended):** Set environment variables (`export GEMINI_API_KEY=<key>` in shell profile). The server reads them at startup. Keys stay out of shell history and config files. Works for terminal-based clients (Claude Code, Codex, Gemini CLI).
 
-**Method B:** Set system environment variables (`export GEMINI_API_KEY=<key>` in shell profile). The server reads them at startup. Works for terminal-based clients (Claude Code, Codex, Gemini CLI); IDE-based clients (Cursor, Windsurf) may not inherit shell env vars — use Method A for those.
+**Method B (compatibility fallback):** Pass keys via CLI flags during registration. `register` writes them into the MCP client config (e.g. `settings.local.json`), which injects them at server startup. Works with all MCP clients, including IDE-based ones (Cursor, Windsurf) that may not inherit shell env vars. Note: keys appear in shell history and plaintext config files.
 
 ```bash
-# Tier 1 (source checkout) — with key (recommended):
-python3 scripts/run.py register --gemini-key <key>
+# Recommended: set env vars, then register
+export GEMINI_API_KEY=<key>
+python3 scripts/run.py register          # Tier 1 (source checkout)
+zotpilot register                        # Tier 2 (pip/uv install)
 
-# Tier 2 (pip/uv install):
-zotpilot register --gemini-key <key>
-
-# Without keys (requires env vars already set):
-python3 scripts/run.py register          # Tier 1
-zotpilot register                        # Tier 2
+# Compatibility fallback: pass keys as CLI flags (IDE clients may need this)
+python3 scripts/run.py register --gemini-key <key>    # Tier 1
+zotpilot register --gemini-key <key>                  # Tier 2
 
 # Specify platform:
 python3 scripts/run.py register --platform claude-code  # or: zotpilot register --platform claude-code
