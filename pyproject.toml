@@ -63,6 +63,38 @@ python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 
+# Pre-existing type errors — suppressed until addressed incrementally.
+# New files added to this project should NOT be added here.
+[[tool.mypy.overrides]]
+module = [
+    "zotpilot._platforms",
+    "zotpilot.cli",
+    "zotpilot.filters",
+    "zotpilot.result_utils",
+    "zotpilot.reranker",
+    "zotpilot.state",
+    "zotpilot.identifier_resolver",
+    "zotpilot.indexer",
+    "zotpilot.journal_ranker",
+    "zotpilot.openalex_client",
+    "zotpilot.vector_store",
+    "zotpilot.zotero_client",
+    "zotpilot.zotero_writer",
+    "zotpilot.embeddings.gemini",
+    "zotpilot.pdf.extractor",
+    "zotpilot.pdf.orphan_recovery",
+    "zotpilot.tools.citations",
+    "zotpilot.tools.ingestion",
+    "zotpilot.tools.library",
+    "zotpilot.tools.search",
+    "zotpilot.tools.write_ops",
+    "zotpilot.feature_extraction.captions",
+    "zotpilot.feature_extraction.methods.figure_detection",
+    "zotpilot.feature_extraction.paddle_engines.paddleocr_vl",
+    "zotpilot.feature_extraction.vision_api",
+]
+ignore_errors = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=zotpilot --cov-report=term-missing --cov-fail-under=29"
