@@ -110,7 +110,7 @@ The agent clones the repo, installs the CLI, configures Zotero, and registers th
 git clone https://github.com/xunhe730/ZotPilot.git ~/.claude/skills/zotpilot
 
 # Codex CLI
-git clone https://github.com/xunhe730/ZotPilot.git ~/.codex/skills/zotpilot
+git clone https://github.com/xunhe730/ZotPilot.git ~/.agents/skills/zotpilot
 
 # OpenCode
 git clone https://github.com/xunhe730/ZotPilot.git ~/.config/opencode/skills/zotpilot
@@ -136,8 +136,10 @@ zotpilot register
 # Specify platform:
 python3 scripts/run.py register --platform claude-code  # or: zotpilot register --platform claude-code
 
-# With credentials:
+# With credentials (Tier 1):
 python3 scripts/run.py register --gemini-key <key> --zotero-api-key <key> --zotero-user-id <id>
+# With credentials (Tier 2):
+zotpilot register --gemini-key <key> --zotero-api-key <key> --zotero-user-id <id>
 ```
 
 Supports: Claude Code, Codex CLI, OpenCode, Gemini CLI, Cursor, Windsurf, Cline, Roo Code.
@@ -297,7 +299,7 @@ Design choices:
 ### File structure
 
 ```
-~/.claude/skills/zotpilot/          # or ~/.codex/skills/zotpilot/ (Codex)
+~/.claude/skills/zotpilot/          # or ~/.agents/skills/zotpilot/ (Codex)
 ├── SKILL.md                        # Decision tree: setup → index → research
 ├── scripts/run.py                  # Bootstrap: auto-installs CLI + delegates
 ├── references/                     # Reference docs
@@ -333,10 +335,10 @@ Search and citation tools work without extra setup. Tagging and collection manag
 <summary>Manual configuration</summary>
 
 ```bash
-python3 scripts/run.py register \
-  --gemini-key <your-gemini-key> \
-  --zotero-api-key <your-zotero-key> \
-  --zotero-user-id <your-user-id>
+# Tier 1 (source checkout):
+python3 scripts/run.py register --zotero-api-key <your-zotero-key> --zotero-user-id <your-user-id>
+# Tier 2 (pip/uv install):
+zotpilot register --zotero-api-key <your-zotero-key> --zotero-user-id <your-user-id>
 ```
 
 Auto-detects platform and re-registers (removes stale entry first). Supports all platforms. Restart your agent.
@@ -440,7 +442,7 @@ Optional feature. Uses Claude Haiku (via Batch API) to re-extract PDF tables, fi
 
 | Problem | Fix |
 |---------|-----|
-| Skill not found | Verify clone target: Claude Code `~/.claude/skills/`, Codex `~/.codex/skills/`, OpenCode `~/.config/opencode/skills/`, Gemini `~/.gemini/skills/` |
+| Skill not found | Verify clone target: Claude Code `~/.claude/skills/`, Codex `~/.agents/skills/`, OpenCode `~/.config/opencode/skills/`, Gemini `~/.gemini/skills/` |
 | `zotpilot: command not found` | `python3 scripts/run.py status` (auto-installs) |
 | MCP tools not showing up | Re-register MCP server and restart |
 | Empty search results | Run `zotpilot index` first, or try a broader query |
