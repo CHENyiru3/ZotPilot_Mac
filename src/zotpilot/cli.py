@@ -327,8 +327,10 @@ def cmd_status(args):
         return 1 if blocking_errors else 0
 
     # Human-readable output
+    from . import __version__
     print("ZotPilot Status")
     print("=" * 40)
+    print(f"  Version:            {__version__}")
     print(f"  Zotero data dir:    {config.zotero_data_dir}")
     print(f"  ChromaDB path:      {config.chroma_db_path}")
     print(f"  Embedding provider: {config.embedding_provider}")
@@ -911,10 +913,12 @@ def cmd_register(args):
 
 
 def main(argv: list[str] | None = None) -> int:
+    from . import __version__
     parser = argparse.ArgumentParser(
         prog="zotpilot",
         description="ZotPilot — AI-powered Zotero research assistant",
     )
+    parser.add_argument("--version", action="version", version=f"zotpilot {__version__}")
     subparsers = parser.add_subparsers(dest="command")
 
     # setup
