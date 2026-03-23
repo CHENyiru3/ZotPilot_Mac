@@ -935,6 +935,27 @@ def cmd_update(args):
     return 1 if errors else 0
 
 
+def cmd_bridge(args):
+    """Run the HTTP bridge for ZotPilot Connector extension."""
+    import time
+
+    from .bridge import BridgeServer
+
+    port = getattr(args, "port", 2619)
+    server = BridgeServer(port=port)
+    server.start()
+    print(f"ZotPilot bridge running on http://127.0.0.1:{port}")
+    print("The ZotPilot Connector extension will poll this endpoint.")
+    print("Press Ctrl+C to stop.")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nStopping bridge...")
+        server.stop()
+    return 0
+
+
 def cmd_register(args):
     """Register ZotPilot MCP server on AI agent platforms."""
     from ._platforms import register
@@ -1032,6 +1053,11 @@ def main(argv: list[str] | None = None) -> int:
     mode_grp.add_argument("--dry-run", action="store_true",
         help="Preview update actions without making changes (skips PyPI)")
     sub_update.set_defaults(func=cmd_update)
+
+    # bridge
+    sub_bridge = subparsers.add_parser("bridge", help="Run HTTP bridge for ZotPilot Connector")
+    sub_bridge.add_argument("--port", type=int, default=2619, help="HTTP port (default: 2619)")
+    sub_bridge.set_defaults(func=cmd_bridge)
 
     # register
     sub_register = subparsers.add_parser("register", help="Register ZotPilot MCP server")

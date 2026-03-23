@@ -206,3 +206,74 @@ def ingest_papers(
         "warning": warning,
         "results": results,
     }
+
+
+@mcp.tool()
+def save_from_url(
+    url: str,
+    collection_key: str | None = None,
+    tags: list[str] | None = None,
+) -> dict:
+    """Save a paper from any publisher URL to Zotero via ZotPilot Connector.
+
+    Opens the URL in the user's real browser (with institutional cookies),
+    runs Zotero translators to extract metadata, downloads PDF, and saves to Zotero.
+
+    Requires: ZotPilot Connector extension installed in Chrome.
+    The bridge is auto-started if not already running.
+
+    Note: collection_key and tags are accepted but not yet applied by the
+    extension in this version — the paper saves to Zotero's default location.
+    """
+    import json
+    import time
+    import urllib.request
+
+    from ..bridge import DEFAULT_PORT, BridgeServer
+
+    bridge_url = f"http://127.0.0.1:{DEFAULT_PORT}"
+
+    # Auto-start bridge if not running
+    if not BridgeServer.is_running(DEFAULT_PORT):
+        try:
+            BridgeServer.auto_start(DEFAULT_PORT)
+        except RuntimeError as e:
+            return {"success": False, "error": str(e)}
+
+    # POST command to bridge's /enqueue endpoint (pure HTTP client)
+    command = {
+        "action": "save",
+        "url": url,
+        "collection_key": collection_key,
+        "tags": tags or [],
+    }
+    try:
+        req = urllib.request.Request(
+            f"{bridge_url}/enqueue",
+            data=json.dumps(command).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=5)
+        request_id = json.loads(resp.read())["request_id"]
+    except Exception as e:
+        return {"success": False, "error": f"Failed to enqueue: {e}"}
+
+    # Poll GET /result/<request_id> until result arrives or timeout
+    deadline = time.monotonic() + 90.0
+    while time.monotonic() < deadline:
+        time.sleep(2)
+        try:
+            resp = urllib.request.urlopen(
+                f"{bridge_url}/result/{request_id}", timeout=5
+            )
+            if resp.status == 200:
+                return json.loads(resp.read())
+        except Exception:
+            pass  # 204 or connection error — keep polling
+
+    return {
+        "success": False,
+        "error": "Timeout (90s) — extension did not respond. "
+                 "Ensure ZotPilot Connector is installed and Chrome is open.",
+    }
