@@ -252,10 +252,10 @@ zotpilot register --gemini-key <gemini密钥> --zotero-api-key <zotero密钥> --
 
 ## 如何更新
 
+**v0.3.0+ 用户**（推荐）：
 ```bash
 zotpilot update
 ```
-
 自动探测你的安装方式（uv / pip / editable），同时更新 CLI 和所有平台的 skill 目录。
 
 | 标志 | 用途 |
@@ -266,6 +266,19 @@ zotpilot update
 | `--skill-only` | 只更新 skill 目录，跳过 CLI |
 
 Skill 目录升级前会自动检查：符号链接、脏工作树、非 ZotPilot 仓库会被跳过并打印警告，不会误操作。
+
+**v0.2 及更早版本用户**（手动升级到最新版）：
+```bash
+# pip / uv 安装
+uv tool upgrade zotpilot
+# 或
+pip install --upgrade zotpilot
+
+# git clone 安装（skill 目录）
+# 进入你的 skill 目录（各平台路径见"快速开始"章节）
+cd <your-skill-dir>/zotpilot
+git pull
+```
 
 ---
 

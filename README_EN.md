@@ -188,6 +188,38 @@ Note: this choice is hard to change later. The three providers produce different
 
 ---
 
+## How to update
+
+**v0.3.0+ users** (recommended):
+```bash
+zotpilot update
+```
+Auto-detects your installer (uv / pip / editable) and updates both the CLI and all platform skill directories.
+
+| Flag | Purpose |
+|------|---------|
+| `--check` | Check for a new version without installing |
+| `--dry-run` | Preview all actions without making changes |
+| `--cli-only` | Update CLI only, skip skill directories |
+| `--skill-only` | Update skill directories only, skip CLI |
+
+Skill directories are checked before updating — symlinks, dirty working trees, and non-ZotPilot repos are skipped automatically.
+
+**v0.2 and earlier** (manual upgrade to latest):
+```bash
+# pip / uv install
+uv tool upgrade zotpilot
+# or
+pip install --upgrade zotpilot
+
+# git clone install (skill directory)
+# navigate to your skill dir (see platform paths in Quick start)
+cd <your-skill-dir>/zotpilot
+git pull
+```
+
+---
+
 ## 32 MCP tools
 
 <details>
