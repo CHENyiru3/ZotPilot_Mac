@@ -353,6 +353,7 @@ git pull
 | 工具 | 说明 |
 |------|------|
 | `index_library` | 索引新论文（增量，支持分批：`batch_size=20`，循环调用直到 `has_more=false`） |
+| `get_index_stats` | 查看索引状态（文档数、分块数） |
 | `switch_library` | 列出/切换文献库（支持群组库） |
 | `get_reranking_config` | 看排序权重 |
 | `get_vision_costs` | 看视觉 API 用量 |
@@ -400,7 +401,7 @@ AI Agent ──→ 32 个 MCP 工具 ──┬── 语义搜索 ──→ Chro
 ├── references/                     # 参考文档
 │   ├── tool-guide.md               # 工具参数详解
 │   ├── troubleshooting.md          # 常见问题
-│   └── install-steps.md            # 手动安装参考
+│   └── setup-guide.md            # 安装配置指南
 └── src/zotpilot/                   # MCP 服务器源码
 ```
 
@@ -514,7 +515,7 @@ AI Agent ──→ 32 个 MCP 工具 ──┬── 语义搜索 ──→ Chro
 | 症状 | 怎么办 |
 |------|------|
 | 找不到 Skill | 确认 clone 到了正确的 skills 目录：Claude Code `~/.claude/skills/`、Codex `~/.agents/skills/`、OpenCode `~/.config/opencode/skills/`、Gemini `~/.gemini/skills/`、Cursor `~/.cursor/skills/`、Windsurf `~/.codeium/windsurf/skills/` |
-| `zotpilot: command not found` | `python3 scripts/run.py status`（会自动装）；Windows 用 `python` |
+| `zotpilot: command not found` | `python3 scripts/run.py status`（会自动装）；Windows 用 `python`。Windows 用户还需将 `%APPDATA%\Python\PythonXYY\Scripts` 加入 PATH |
 | MCP 工具没出来 | 重新注册 MCP 服务器然后重启 |
 | 搜出来是空的 | 先跑 `zotpilot index`，或者换个更宽泛的搜索词 |
 | `GEMINI_API_KEY not set` | 设环境变量，或 `zotpilot setup --non-interactive --provider local` 换本地模型 |

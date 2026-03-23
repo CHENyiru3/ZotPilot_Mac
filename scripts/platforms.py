@@ -60,6 +60,7 @@ PLATFORMS = {
         "label": "Windsurf",
         "skills_dir": "~/.codeium/windsurf/skills",
     },
+    # Tier 2: no skills_dir (MCP config-file registration only)
     "cline": {
         "tier": 2,
         "binary": None,

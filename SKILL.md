@@ -1,127 +1,43 @@
 ---
 name: zotpilot
-description: Use when user mentions Zotero, academic papers, citations,
+description: >-
+  Use when user mentions Zotero, academic papers, citations,
   literature reviews, research libraries, or wants to search/organize their
   paper collection. Also triggers on "find papers about...", "what's in my
   library", "organize my papers", "who cites...", "tag these papers".
   Always use this skill for Zotero-related tasks.
+license: MIT
+compatibility:
+  - Python 3.10+
+  - Zotero desktop (installed and run at least once)
 ---
 
 # ZotPilot
 
 > All script paths are relative to this skill's directory.
 
-## Step 0: Verify Zotero is installed
-
-Before anything else, check if Zotero is installed on this machine:
-
-- **macOS**: check if `/Applications/Zotero.app` exists, or if `~/Zotero` or `~/Documents/Zotero` contains a `zotero.sqlite` file
-- **Windows**: check if `C:\Users\<username>\Zotero\zotero.sqlite` exists, or ask the user
-- **Linux**: check if `~/Zotero/zotero.sqlite` exists
-
-**If Zotero is NOT installed:** Tell the user: "ZotPilot requires Zotero to be installed and have been run at least once. Please download Zotero from https://www.zotero.org/download/, install it, add some papers, then come back." Stop here — do not proceed with setup.
-
 ## Step 1: Check readiness
 
-**Python command:** Use `python3` on Linux/macOS. On Windows, use `python` (Windows typically does not have `python3` in PATH).
+**Python command:** Use `python3` on Linux/macOS. On Windows, use `python`.
 
 Run: `python3 scripts/run.py status --json`  (Windows: `python scripts/run.py status --json`)
 
-This auto-installs the ZotPilot CLI if not present. Parse the JSON output and follow the FIRST matching branch:
+Parse the JSON output and follow the FIRST matching branch:
 
-1. Command fails entirely → go to **Prerequisites**
-2. `config_exists` is false → go to **First-Time Setup**
-3. `errors` is non-empty → go to **First-Time Setup** (note: `warnings` like API key not in env are OK if key was passed to `register` — only `errors` trigger this branch)
-4. `index_ready` is false or `doc_count` is 0 → go to **Index**
+1. Command fails entirely → **Prerequisites** (see `references/setup-guide.md`)
+2. `config_exists` is false → **First-Time Setup** (see `references/setup-guide.md`)
+3. `errors` is non-empty → **First-Time Setup** (note: `warnings` like API key not in env are OK if key was passed to `register`)
+4. `index_ready` is false or `doc_count` is 0 → go to **Index** below
 5. All green → go to **Research**
 
-If any errors or unexpected behavior at any step: run `python3 scripts/run.py doctor` for detailed diagnostics.
-
-## Prerequisites (if run.py fails)
-
-The user needs:
-1. **Python 3.10+**: `python3 --version` (Linux/macOS) or `python --version` (Windows)
-2. **uv** (package manager):
-   - Linux/macOS: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-   - Windows (PowerShell): `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
-   - Any platform: `pip install uv`
-   - After installing on Windows, if `uv` is still not in PATH, that's OK — `run.py` will detect it automatically via `python -m uv`
-
-After installing, retry Step 1.
-
-## First-Time Setup
-
-This section runs once. After setup, the user must restart their AI agent before MCP tools become available.
-
-### 1. Configure Zotero + embedding provider
-
-Ask the user: "Which embedding provider do you prefer? Gemini (recommended), DashScope/Bailian (recommended for China), or fully offline (local)?"
-
-**With Gemini (recommended, higher quality):**
+**Inline fallback** (if agent cannot access references/):
 ```bash
 python3 scripts/run.py setup --non-interactive --provider gemini
-```
-User needs `GEMINI_API_KEY` — get one free at https://aistudio.google.com/apikey
-
-**With DashScope / Bailian (recommended for China):**
-```bash
-python3 scripts/run.py setup --non-interactive --provider dashscope
-```
-User needs `DASHSCOPE_API_KEY` — get one at https://bailian.console.aliyun.com/
-
-**Without API key (fully offline):**
-```bash
-python3 scripts/run.py setup --non-interactive --provider local
-```
-
-If auto-detection of Zotero fails, add `--zotero-dir /path/to/Zotero`.
-
-### 2. Configure Zotero Web API (for write operations)
-
-Ask the user: "Do you want to be able to tag and organize papers from AI? If yes, you'll need a Zotero API key."
-
-If yes:
-1. Go to **https://www.zotero.org/settings/keys**
-2. **User ID**: The numeric ID shown at the top of the page (e.g. `12345678`). This is NOT your username — it's a number.
-3. Click **"Create new private key"**, check "Allow library access" + "Allow write access", save
-4. Copy the generated key
-
-If no, skip — search/read tools will still work without it.
-
-### 3. Register MCP server
-
-**Preferred: set environment variables first** (avoids keys in shell history):
-
-```bash
-export GEMINI_API_KEY=<key>          # or DASHSCOPE_API_KEY for DashScope
-export ZOTERO_API_KEY=<key>          # optional, for write operations
-export ZOTERO_USER_ID=<numeric-id>   # optional, for write operations
-```
-
-Then register without key flags — keys from env are auto-detected:
-
-```bash
 python3 scripts/run.py register
+# Restart your AI agent, then ask again.
 ```
 
-**Alternative: pass keys as CLI flags** (convenient but leaves keys in shell history):
-
-```bash
-python3 scripts/run.py register \
-  --gemini-key <key> \
-  --zotero-api-key <key> \
-  --zotero-user-id <numeric-id>
-```
-
-This auto-detects the user's AI agent platform(s) and registers accordingly. Supports Claude Code, Codex CLI, OpenCode, Gemini CLI, Cursor, and Windsurf.
-
-If auto-detection fails, specify explicitly: `python3 scripts/run.py register --platform claude-code`
-
-### 4. Restart
-
-Tell the user: "Setup complete! Please restart your AI agent to activate ZotPilot's tools. After restarting, ask me again and I'll index your papers."
-
-**IMPORTANT:** Stop here. Do NOT attempt to use MCP tools (search_papers, etc.) until the user restarts. The MCP server is not available until after restart.
+If any errors: run `python3 scripts/run.py doctor` for diagnostics.
 
 ## Index (if doc_count = 0)
 
@@ -131,18 +47,8 @@ MCP tools are now available. Index the user's papers:
 python3 scripts/run.py index
 ```
 
-Indexing takes ~2-5 seconds per paper. Documents longer than 40 pages are automatically skipped (configurable via `--max-pages`).
-
-### Long document handling
-
-After indexing completes, check the output for "Skipped N long documents". If long documents were skipped:
-
-1. Show the user the list of skipped documents (titles and page counts from the output)
-2. Ask: "The following long documents (over 40 pages) were skipped. Would you like to index any of them?"
-3. If user wants specific papers: `python3 scripts/run.py index --item-key KEY`
-4. If user wants all of them: `python3 scripts/run.py index --max-pages 0`
-
-After completion, proceed to the user's original request.
+Indexing takes ~2-5 seconds per paper. Documents over 40 pages are skipped by default.
+After indexing, check for "Skipped N long documents" — offer to index them with `--max-pages 0`.
 
 ## Research (daily use)
 
@@ -161,6 +67,9 @@ After completion, proceed to the user's original request.
 | Who cites this? | `find_citing_papers` | `doc_id` |
 | Tag/organize one paper | `add_item_tags`, `add_to_collection` | `item_key` |
 | Batch tag/organize many papers | `batch_tags`, `batch_collections` | `items` or `item_keys`, `action` |
+| Search external databases for new papers | `search_academic_databases` | `query`, `limit=20` |
+| Add a paper by DOI/arXiv/URL | `add_paper_by_identifier` | `identifier` |
+| Batch add papers from search results | `ingest_papers` | `papers` (from search_academic_databases) |
 
 ### Workflow chains
 
@@ -171,10 +80,19 @@ search_topic → get_paper_details (top 5) → find_references → search_papers
 search_topic(num_papers=20) → report count, year range, key authors, top passages
 
 **Organize by theme (batch):**
-search_topic → create_collection → batch_collections(action="add", item_keys=[...], collection_key) → batch_tags(action="add", items=[{item_key, tags}])
+search_topic → create_collection → batch_collections(action="add", item_keys=[...]) → batch_tags(action="add", items=[...])
 
 **Find specific paper:**
 search_boolean first (exact terms) → fallback to search_papers (semantic) → get_paper_details
+
+**Find and add new papers:**
+search_academic_databases → review candidates with user → ingest_papers → index_library
+
+**Organize library (classification advisor):**
+get_library_overview + list_collections + list_tags → analyze themes via
+search_topic → diagnose issues (uncategorized papers, inconsistent tags,
+oversized collections) → propose collection hierarchy + tag normalization
+→ interview user for confirmation → batch_collections + batch_tags(add/remove) to execute
 
 ### Output formatting
 
@@ -190,27 +108,20 @@ search_boolean first (exact terms) → fallback to search_papers (semantic) → 
 | Error | Fix |
 |---|---|
 | Empty results | Try broader query, or `search_boolean` for exact terms. Check `get_index_stats` |
-| "GEMINI_API_KEY not set" | Appears in `warnings` (not `errors`) — **expected** if key was passed to `register`. Only re-run setup if provider is wrong. |
-| "DASHSCOPE_API_KEY not set" | Same as above — expected if key was passed to `register`. |
-| "ZOTERO_API_KEY not set" | Write ops need Zotero Web API credentials — see below |
+| "GEMINI_API_KEY not set" | Expected if key was passed to `register`. Only re-run setup if provider is wrong |
+| "ZOTERO_API_KEY not set" | Write ops need Zotero Web API credentials — see `references/setup-guide.md` |
 | "Document has no DOI" | Cannot use citation tools for this paper |
 | "No chunks found" | Paper not indexed — run `index_library(item_key="...")` |
 
 ### Write operations (tags, collections)
 
-Write tools require Zotero Web API credentials. If user gets "ZOTERO_API_KEY not set" or "Invalid user ID":
+Write tools require Zotero Web API credentials (`ZOTERO_API_KEY` + `ZOTERO_USER_ID`).
+If missing, see **Configure Zotero Web API** in `references/setup-guide.md`.
 
-Go back to **Step 2** (Configure Zotero Web API) in **First-Time Setup** and re-register the MCP server with all credentials.
+**Single-item:** `add_item_tags`, `set_item_tags`, `remove_item_tags`, `add_to_collection`, `remove_from_collection`, `create_collection`
 
-Common pitfall: `ZOTERO_USER_ID` must be the **numeric ID** (e.g. `12345678`), not the username (e.g. `your_username`). Find it at https://www.zotero.org/settings/keys. Run `zotpilot doctor` to validate.
-
-**Single-item tools:** `add_item_tags`, `set_item_tags`, `remove_item_tags`, `add_to_collection`, `remove_from_collection`, `create_collection`
-
-**Batch tools (max 100 items per call):** `batch_tags(action="add|set|remove")`, `batch_collections(action="add|remove")`
-
-Batch tools accept `items: [{item_key, tags}]` (for tag ops) or `item_keys: [str]` + `collection_key` (for collection ops). Partial failures are reported per-item without rollback.
-
-**When to use batch:** First-time library reorganization, bulk tagging after topic search, migrating tags across papers.
+**Batch (max 100 items):** `batch_tags(action="add|set|remove")`, `batch_collections(action="add|remove")`
+Partial failures are reported per-item without rollback.
 
 For detailed parameter reference, see `references/tool-guide.md`.
 For common issues and fixes, see `references/troubleshooting.md`.

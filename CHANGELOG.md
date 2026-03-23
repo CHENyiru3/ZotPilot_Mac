@@ -31,6 +31,40 @@ git pull
 
 ---
 
+## [0.3.1] - 2026-03-23
+
+### 新功能 / New Features
+- **`status --json` 新增 version 字段**：方便脚本和 agent 获取当前版本号
+  **`status --json` adds version field**: Makes it easy for scripts and agents to check the installed version
+- **`--version` flag**：`zotpilot --version` 输出版本号
+  **`--version` flag**: `zotpilot --version` prints the version
+- **Cursor / Windsurf 升级为 Tier 1**：支持 Skill 目录安装，与 Claude Code / Codex / Gemini CLI 同级
+  **Cursor / Windsurf upgraded to Tier 1**: Skill directory support, on par with Claude Code / Codex / Gemini CLI
+
+### 修复 / Fixes
+- **Windows 升级友好提示**：`zotpilot update` 在 Windows 遇到文件锁定（MCP server 运行中）时，输出清晰的提示而非原始错误
+  **Windows upgrade friendly error**: `zotpilot update` shows a clear message when the executable is locked by a running MCP server
+- **收窄异常类型**：`_detect_cli_installer` 中 `except Exception` 改为 `except (KeyError, TypeError)`
+  **Narrower exception handling**: `_detect_cli_installer` catches specific exceptions instead of bare `Exception`
+- **路径比较安全性**：改用 `Path.is_relative_to()` 替代字符串前缀匹配，避免误判
+  **Safer path comparison**: Uses `Path.is_relative_to()` instead of string prefix matching
+- **文件编码显式指定**：所有 `open()` 调用统一加 `encoding="utf-8"`，修复 Windows 非 UTF-8 locale 问题
+  **Explicit file encoding**: All `open()` calls now specify `encoding="utf-8"` for Windows compatibility
+- **ruff lint 全部修复**，CI green
+  **All ruff lint errors fixed**, CI green
+- **mypy 类型检查通过**（per-module overrides 抑制历史问题）
+  **mypy type checking passes** (per-module overrides suppress legacy issues)
+
+### 文档 / Docs
+- **SKILL.md 重构**：精简主文件至 ~120 行，安装配置内容迁移至 `references/setup-guide.md`；新增 ingestion 工具和文献库分类建议 workflow
+  **SKILL.md refactor**: Concise main file (~120 lines), setup content moved to `references/setup-guide.md`; added ingestion tools and library classification advisor workflow
+- **README 中英文对齐**：统一 Write 工具分组、Admin 工具计数、写操作配置流程、skills 目录表、数据存储路径
+  **README zh/en alignment**: Unified write tool grouping, admin tool count, write ops config flow, skills directory table, data storage paths
+- **Windows PATH 提示**：Troubleshooting 表格新增 Windows PATH 配置说明
+  **Windows PATH hint**: Troubleshooting table adds Windows PATH configuration info
+
+---
+
 ## [0.3.0] - 2026-03-23
 
 ### 新功能 / New Features

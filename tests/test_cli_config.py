@@ -152,3 +152,39 @@ class TestConfigSetLoadRoundTrip:
         _config_set("zotero_user_id", "xunhe730", cfg_path)
         data = json.loads(cfg_path.read_text())
         assert data["zotero_user_id"] == "xunhe730"
+
+
+# ---------------------------------------------------------------------------
+# cmd_status --json version field
+# ---------------------------------------------------------------------------
+
+class TestStatusJsonVersion:
+    def test_status_json_includes_version(self, tmp_path, capsys, monkeypatch):
+        """status --json output includes 'version' matching __version__."""
+        import argparse
+        from unittest.mock import patch
+
+        from zotpilot import __version__
+        from zotpilot.cli import cmd_status
+
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text(json.dumps({
+            "zotero_data_dir": str(tmp_path),
+            "embedding_provider": "none",
+        }))
+
+        args = argparse.Namespace(json=True, config=str(cfg_path))
+        with patch("zotpilot.cli.Config.load") as mock_load:
+            mock_cfg = mock_load.return_value
+            mock_cfg.zotero_data_dir = tmp_path
+            mock_cfg.chroma_db_path = tmp_path / "chroma"
+            mock_cfg.embedding_provider = "none"
+            mock_cfg.gemini_api_key = None
+            mock_cfg.dashscope_api_key = None
+            mock_cfg.validate.return_value = []
+            cmd_status(args)
+
+        out = capsys.readouterr().out
+        data = json.loads(out)
+        assert "version" in data
+        assert data["version"] == __version__

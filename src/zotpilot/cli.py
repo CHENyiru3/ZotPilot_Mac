@@ -157,7 +157,7 @@ def cmd_setup(args):
             if input("  Migrate settings from deep-zotero? [Y/n] ").strip().lower() not in ("n", "no"):
                 with open(old_config, encoding="utf-8") as f:
                     old_data = json.load(f)
-                print(f"  Migrated {len(old_data)} settings from deep-zotero")
+                print(f"  Found {len(old_data)} settings in old config (not auto-migrated)")
                 if old_chroma.exists():
                     print(f"  Found existing ChromaDB index: {old_chroma}")
                     if input("  Reuse existing index? [Y/n] ").strip().lower() not in ("n", "no"):
@@ -176,7 +176,7 @@ def cmd_setup(args):
         "embedding_provider": embedding_provider,
     }
 
-    with open(config_path, "w") as f:
+    with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config_data, f, indent=2)
 
     if non_interactive:
@@ -287,6 +287,7 @@ def cmd_index(args):
 
 def cmd_status(args):
     """Show configuration and index stats."""
+    from . import __version__
     output_json = getattr(args, "json", False)
 
     config = Config.load(args.config)
@@ -295,6 +296,7 @@ def cmd_status(args):
 
     if output_json:
         result = {
+            "version": __version__,
             "zotpilot_installed": True,
             "config_exists": (Path(args.config) if args.config else _default_config_path()).exists(),
             "zotero_dir": str(config.zotero_data_dir),
@@ -443,11 +445,11 @@ def _config_set(key: str, value: str, config_path: Path) -> None:
     import os
     data: dict = {}
     if config_path.exists():
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             data = json.load(f)
     data[key] = _coerce_value(key, value)
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(config_path, "w") as f:
+    with open(config_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
     if sys.platform != "win32":
@@ -529,14 +531,14 @@ def cmd_config(args):
         if not config_path.exists():
             print(f"Config file not found: {config_path}", file=sys.stderr)
             return 1
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             data = json.load(f)
         if key not in data:
             print(f"Field '{key}' not set in config file.")
             return 0
         del data[key]
         import os
-        with open(config_path, "w") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.write("\n")
         if sys.platform != "win32":
@@ -589,24 +591,24 @@ def _detect_cli_installer() -> "tuple[str, list[str] | None]":
         return ("unknown", None)
     except json.JSONDecodeError:
         return ("unknown", None)  # malformed direct_url.json — conservative fallback
-    except Exception:
-        pass
+    except (KeyError, TypeError):
+        pass  # malformed direct_url.json structure
 
     # Step 2: uv detection via shutil.which("uv")
     argv0 = Path(sys.argv[0]).resolve()
     uv_path = shutil.which("uv")
     if uv_path:
         bin_dir = _uv_bin_dir(["uv"])
-        if bin_dir and str(argv0).startswith(str(bin_dir)):
+        if bin_dir and argv0.is_relative_to(bin_dir):
             return ("uv", ["uv"])
         # uv binary found but bin_dir lookup failed — try python -m uv as fallback
         bin_dir = _uv_bin_dir([sys.executable, "-m", "uv"])
-        if bin_dir and str(argv0).startswith(str(bin_dir)):
+        if bin_dir and argv0.is_relative_to(bin_dir):
             return ("uv", [sys.executable, "-m", "uv"])
     else:
         # Try via sys.executable -m uv
         bin_dir = _uv_bin_dir([sys.executable, "-m", "uv"])
-        if bin_dir and str(argv0).startswith(str(bin_dir)):
+        if bin_dir and argv0.is_relative_to(bin_dir):
             return ("uv", [sys.executable, "-m", "uv"])
 
     # Step 4 / default: metadata found but not editable and not uv → pip
@@ -629,16 +631,16 @@ def _is_zotpilot_skill_repo(path: Path) -> bool:
         lines = content.splitlines()
         if not lines or lines[0].strip() != "---":
             return False
-        in_front = False
+        name_matched = False
         for line in lines[1:]:
             if line.strip() == "---":
                 break
             if line.startswith("name:"):
                 name = line[len("name:"):].strip()
                 if name == "zotpilot":
-                    in_front = True
+                    name_matched = True
                     break
-        return in_front
+        return name_matched
     except Exception:
         return False
 
@@ -709,6 +711,25 @@ def _get_skill_dirs() -> list[SkillDir]:
     return result
 
 
+def _is_windows_lock_error(stderr: str) -> bool:
+    """Check if a failed upgrade looks like a Windows file-locking error.
+
+    Known patterns (pip / uv / Windows):
+    - PermissionError — Python's OSError subclass name
+    - WinError — ctypes/Windows native error prefix
+    - Access is denied — Windows shell error message
+    - [Errno 13] — POSIX EACCES, also appears on Windows pip
+    - permission (case-insensitive) — broad fallback
+    """
+    if sys.platform != "win32":
+        return False
+    lower = stderr.lower()
+    return any(kw in lower for kw in [
+        "permissionerror", "winerror", "access is denied",
+        "[errno 13]", "permission",
+    ])
+
+
 def cmd_update(args):
     """Upgrade ZotPilot CLI and skill files."""
     errors: list[str] = []
@@ -758,8 +779,16 @@ def cmd_update(args):
                     manual = " ".join(uv_cmd + ["tool", "upgrade", "zotpilot"])
                     print(f"Command not found ({cmd[0]}) — run manually: {manual}")
                     errors.append(f"{cmd[0]} not found")
+                    return 1
                 except subprocess.CalledProcessError as e:
-                    print(e.stderr)
+                    if _is_windows_lock_error(e.stderr or ""):
+                        print("Update failed — the zotpilot executable appears to be locked "
+                              "by a running process (e.g. MCP server).\n"
+                              "Close all MCP clients (Cursor, VS Code, etc.) and try again.")
+                        if e.stderr:
+                            print(f"\nOriginal error:\n{e.stderr}")
+                    else:
+                        print(e.stderr or "Upgrade failed", file=sys.stderr)
                     errors.append("CLI update failed")
                     return 1
         elif installer == "pip":
@@ -773,8 +802,16 @@ def cmd_update(args):
                 except FileNotFoundError:
                     print(f"Command not found ({cmd[0]}) — run manually: pip install --upgrade zotpilot")
                     errors.append(f"{cmd[0]} not found")
+                    return 1
                 except subprocess.CalledProcessError as e:
-                    print(e.stderr)
+                    if _is_windows_lock_error(e.stderr or ""):
+                        print("Update failed — the zotpilot executable appears to be locked "
+                              "by a running process (e.g. MCP server).\n"
+                              "Close all MCP clients (Cursor, VS Code, etc.) and try again.")
+                        if e.stderr:
+                            print(f"\nOriginal error:\n{e.stderr}")
+                    else:
+                        print(e.stderr or "Upgrade failed", file=sys.stderr)
                     errors.append("CLI update failed")
                     return 1
         else:  # unknown

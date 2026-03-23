@@ -103,6 +103,17 @@ Copy this to your AI agent:
 
 The agent clones the repo, installs the CLI, configures Zotero, and registers the MCP server. Restart once, then you're ready.
 
+**Skills directories (clone targets):**
+
+| Platform | Target path |
+|----------|-------------|
+| Claude Code | `~/.claude/skills/zotpilot` |
+| Codex CLI | `~/.agents/skills/zotpilot` |
+| OpenCode | `~/.config/opencode/skills/zotpilot` |
+| Gemini CLI | `~/.gemini/skills/zotpilot` |
+| Cursor | `~/.cursor/skills/zotpilot` |
+| Windsurf | `~/.codeium/windsurf/skills/zotpilot` |
+
 ### Option 2: Manual install
 
 **1. Clone to your skills directory (Tier 1 platforms with Skill support):**
@@ -258,7 +269,7 @@ git pull
 </details>
 
 <details>
-<summary>Write (6)</summary>
+<summary>Write (7)</summary>
 
 | Tool | What it does |
 |------|-------------|
@@ -267,14 +278,6 @@ git pull
 | `add_to_collection` / `remove_from_collection` | Move in/out of folders |
 | `create_collection` | Create a folder |
 | `create_note` | Add a note to a paper (requires ZOTERO_API_KEY) |
-
-</details>
-
-<details>
-<summary>Batch (2)</summary>
-
-| Tool | What it does |
-|------|-------------|
 | `batch_tags(action="add\|set\|remove")` | Batch tag operations (up to 100 items) |
 | `batch_collections(action="add\|remove")` | Batch folder operations (up to 100 items) |
 
@@ -297,6 +300,7 @@ git pull
 | Tool | What it does |
 |------|-------------|
 | `index_library` | Index new papers (incremental, supports batching: `batch_size=20`, loop until `has_more=false`) |
+| `get_index_stats` | Check index status (doc count, chunk count) |
 | `switch_library` | List/switch libraries (supports group libraries) |
 | `get_reranking_config` | View ranking weights |
 | `get_vision_costs` | Check vision API usage |
@@ -344,15 +348,24 @@ Design choices:
 ├── references/                     # Reference docs
 │   ├── tool-guide.md               # Tool parameter details
 │   ├── troubleshooting.md          # Common issues
-│   └── install-steps.md            # Manual install reference
+│   └── setup-guide.md            # Setup and configuration guide
 └── src/zotpilot/                   # MCP server source
 ```
 
 ### Data storage
 
 ```
-~/.config/zotpilot/config.json      # Configuration (Zotero path, embedding provider)
-~/.local/share/zotpilot/chroma/     # Vector index
+# Linux
+~/.config/zotpilot/config.json
+~/.local/share/zotpilot/chroma/
+
+# macOS
+~/Library/Application Support/zotpilot/config.json
+~/Library/Application Support/zotpilot/chroma/
+
+# Windows
+%APPDATA%\zotpilot\config.json
+%APPDATA%\zotpilot\chroma\
 ```
 
 ---
@@ -361,17 +374,41 @@ Design choices:
 
 Search and citation tools work without extra setup. Tagging and collection management need a Zotero Web API key.
 
-1. Go to [zotero.org/settings/keys](https://www.zotero.org/settings/keys), create a key with "Allow library access" and "Allow write access" checked
-2. Note your User ID (the number on the page, not your username)
+1. Go to [zotero.org/settings/keys](https://www.zotero.org/settings/keys)
+2. Note your **numeric User ID** at the top of the page (e.g. `12345678`, not your username)
+3. Click **"Create new private key"**, check "Allow library access" and "Allow write access", copy the key
 
 <img src="assets/zotero-api-key.png" alt="Zotero API Key page" width="100%">
 
-3. Tell your agent:
+4. Save credentials (**recommended: write to config file, works for all MCP clients**):
 
-> Enable ZotPilot write operations. My Zotero API Key is `xxxxx` and my User ID is `12345`.
+```bash
+zotpilot config set zotero_user_id 12345678   # numeric ID, not username
+zotpilot config set zotero_api_key YOUR_KEY
+```
+
+> ⚠️ Keys are stored in plaintext at `~/.config/zotpilot/config.json` (Windows: `%APPDATA%\zotpilot\config.json`).
+> Make sure this directory is not tracked by git.
+
+Verify configuration:
+
+```bash
+zotpilot doctor   # should show [source: config file] ✓
+```
 
 <details>
-<summary>Manual configuration</summary>
+<summary>Other configuration methods</summary>
+
+**Environment variables (only for current shell session):**
+
+```bash
+export ZOTERO_USER_ID=12345678
+export ZOTERO_API_KEY=YOUR_KEY
+```
+
+Environment variables take priority over config file. Add to `.zshrc` / `.bashrc` for persistence, but IDE clients (Cursor/Windsurf) may not inherit shell env vars.
+
+**Via `register` when registering MCP (legacy method):**
 
 ```bash
 # Tier 1 (source checkout) — include ALL existing keys when re-registering:
@@ -380,9 +417,7 @@ python3 scripts/run.py register --gemini-key <your-gemini-key> --zotero-api-key 
 zotpilot register --gemini-key <your-gemini-key> --zotero-api-key <your-zotero-key> --zotero-user-id <your-user-id>
 ```
 
-> **Note:** `register` replaces the entire ZotPilot MCP entry. If you previously registered with `--gemini-key`, include it again or it will be removed from the config.
-
-Auto-detects platform and re-registers (removes stale entry first). Supports all platforms. Restart your agent.
+> **Note:** `register` replaces the entire ZotPilot MCP entry. If you previously registered with `--gemini-key`, include it again or it will be removed from the config. Recommend using `config set` instead.
 
 </details>
 
@@ -482,7 +517,7 @@ Optional feature. Uses Claude Haiku (via Batch API) to re-extract PDF tables, fi
 | Problem | Fix |
 |---------|-----|
 | Skill not found | Verify clone target: Claude Code `~/.claude/skills/`, Codex `~/.agents/skills/`, OpenCode `~/.config/opencode/skills/`, Gemini `~/.gemini/skills/`, Cursor `~/.cursor/skills/`, Windsurf `~/.codeium/windsurf/skills/` |
-| `zotpilot: command not found` | `python3 scripts/run.py status` (auto-installs) |
+| `zotpilot: command not found` | `python3 scripts/run.py status` (auto-installs); on Windows use `python`. Windows users may also need to add `%APPDATA%\Python\PythonXYY\Scripts` to PATH |
 | MCP tools not showing up | Re-register MCP server and restart |
 | Empty search results | Run `zotpilot index` first, or try a broader query |
 | `GEMINI_API_KEY not set` | Set the env var, or `zotpilot setup --non-interactive --provider local` |

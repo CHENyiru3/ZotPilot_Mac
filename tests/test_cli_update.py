@@ -194,8 +194,8 @@ class TestGetVersion:
         """importlib.metadata.version raises → falls back to __version__."""
         with patch("importlib.metadata.version", side_effect=Exception("not found")):
             version = _get_current_version()
-        # Falls back to zotpilot.__version__ = "0.3.0"
-        assert version == "0.3.0"
+        # Falls back to zotpilot.__version__
+        assert version == "0.3.1"
 
 
 # ---------------------------------------------------------------------------
@@ -612,3 +612,71 @@ class TestCmdUpdate:
         out = capsys.readouterr().out
         assert "target missing" in out
         assert "update the source repo" in out
+
+
+# ---------------------------------------------------------------------------
+# TestWindowsLockError
+# ---------------------------------------------------------------------------
+
+
+class TestWindowsLockError:
+    def test_windows_lock_error_shows_friendly_message(self, capsys):
+        """Windows + PermissionError stderr → friendly message + original error."""
+        args = _make_args(cli_only=True)
+        stderr = "PermissionError: [WinError 32] The process cannot access the file"
+        with patch("zotpilot.cli._get_current_version", return_value="0.2.0"), \
+             patch("zotpilot.cli._get_latest_pypi_version", return_value="0.2.1"), \
+             patch("zotpilot.cli._detect_cli_installer", return_value=("uv", ["uv"])), \
+             patch("zotpilot.cli.subprocess.run",
+                   side_effect=subprocess.CalledProcessError(1, "uv", stderr=stderr)), \
+             patch("zotpilot.cli.sys") as mock_sys:
+            mock_sys.platform = "win32"
+            mock_sys.executable = sys.executable
+            mock_sys.argv = sys.argv
+            mock_sys.stderr = sys.stderr
+            result = cmd_update(args)
+        assert result == 1
+        out = capsys.readouterr().out
+        assert "locked" in out
+        assert "Close all MCP clients" in out
+        assert "PermissionError" in out
+
+    def test_windows_non_lock_error_shows_raw_stderr(self, capsys):
+        """Windows + non-lock stderr → raw stderr only."""
+        args = _make_args(cli_only=True)
+        stderr = "error: package 'zotpilot' is not installed"
+        with patch("zotpilot.cli._get_current_version", return_value="0.2.0"), \
+             patch("zotpilot.cli._get_latest_pypi_version", return_value="0.2.1"), \
+             patch("zotpilot.cli._detect_cli_installer", return_value=("uv", ["uv"])), \
+             patch("zotpilot.cli.subprocess.run",
+                   side_effect=subprocess.CalledProcessError(1, "uv", stderr=stderr)), \
+             patch("zotpilot.cli.sys") as mock_sys:
+            mock_sys.platform = "win32"
+            mock_sys.executable = sys.executable
+            mock_sys.argv = sys.argv
+            mock_sys.stderr = sys.stderr
+            result = cmd_update(args)
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "locked" not in captured.out
+        assert "is not installed" in captured.err
+
+    def test_non_windows_error_shows_raw_stderr(self, capsys):
+        """Linux + PermissionError stderr → raw stderr (no friendly message)."""
+        args = _make_args(cli_only=True)
+        stderr = "PermissionError: [Errno 13] Permission denied"
+        with patch("zotpilot.cli._get_current_version", return_value="0.2.0"), \
+             patch("zotpilot.cli._get_latest_pypi_version", return_value="0.2.1"), \
+             patch("zotpilot.cli._detect_cli_installer", return_value=("uv", ["uv"])), \
+             patch("zotpilot.cli.subprocess.run",
+                   side_effect=subprocess.CalledProcessError(1, "uv", stderr=stderr)), \
+             patch("zotpilot.cli.sys") as mock_sys:
+            mock_sys.platform = "linux"
+            mock_sys.executable = sys.executable
+            mock_sys.argv = sys.argv
+            mock_sys.stderr = sys.stderr
+            result = cmd_update(args)
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "locked" not in captured.out
+        assert "PermissionError" in captured.err
