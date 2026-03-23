@@ -64,6 +64,8 @@ Agent 会 clone 仓库、装 CLI、配好 Zotero、注册 MCP 服务器。重启
 | Codex CLI | `~/.agents/skills/zotpilot` |
 | OpenCode | `~/.config/opencode/skills/zotpilot` |
 | Gemini CLI | `~/.gemini/skills/zotpilot` |
+| Cursor | `~/.cursor/skills/zotpilot` |
+| Windsurf | `~/.codeium/windsurf/skills/zotpilot` |
 
 ### 方式二：手动装
 
@@ -81,11 +83,12 @@ git clone https://github.com/xunhe730/ZotPilot.git ~/.config/opencode/skills/zot
 
 # Gemini CLI
 git clone https://github.com/xunhe730/ZotPilot.git ~/.gemini/skills/zotpilot
-```
 
-Tier 2 平台（Cursor、Windsurf）不需要 clone skill，只需要安装 CLI 和注册 MCP：
-```bash
-pip install zotpilot  # 或 uv tool install zotpilot
+# Cursor
+git clone https://github.com/xunhe730/ZotPilot.git ~/.cursor/skills/zotpilot
+
+# Windsurf
+git clone https://github.com/xunhe730/ZotPilot.git ~/.codeium/windsurf/skills/zotpilot
 ```
 
 **2. 注册 MCP 服务器：**
@@ -438,9 +441,7 @@ AI Agent ──→ 32 个 MCP 工具 ──┬── 语义搜索 ──→ Chro
 <details>
 <summary>支持哪些 agent？</summary>
 
-**Tier 1（Skill + MCP）：** Claude Code、Codex CLI、OpenCode、Gemini CLI — 完整支持，Skill 提供使用指导 + MCP 提供工具。
-
-**Tier 2（MCP only）：** Cursor、Windsurf — MCP 工具可用，无 Skill 使用指导。
+**Tier 1（Skill + MCP）：** Claude Code、Codex CLI、OpenCode、Gemini CLI、Cursor、Windsurf — 完整支持，Skill 提供使用指导 + MCP 提供工具。
 
 只要支持 MCP 协议的 AI agent 都可以接入 ZotPilot 的搜索和管理工具。
 
@@ -512,7 +513,7 @@ AI Agent ──→ 32 个 MCP 工具 ──┬── 语义搜索 ──→ Chro
 
 | 症状 | 怎么办 |
 |------|------|
-| 找不到 Skill | 确认 clone 到了正确的 skills 目录：Claude Code `~/.claude/skills/`、Codex `~/.agents/skills/`、OpenCode `~/.config/opencode/skills/`、Gemini `~/.gemini/skills/` |
+| 找不到 Skill | 确认 clone 到了正确的 skills 目录：Claude Code `~/.claude/skills/`、Codex `~/.agents/skills/`、OpenCode `~/.config/opencode/skills/`、Gemini `~/.gemini/skills/`、Cursor `~/.cursor/skills/`、Windsurf `~/.codeium/windsurf/skills/` |
 | `zotpilot: command not found` | `python3 scripts/run.py status`（会自动装）；Windows 用 `python` |
 | MCP 工具没出来 | 重新注册 MCP 服务器然后重启 |
 | 搜出来是空的 | 先跑 `zotpilot index`，或者换个更宽泛的搜索词 |

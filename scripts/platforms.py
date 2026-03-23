@@ -2,8 +2,8 @@
 """Cross-platform MCP server registration for ZotPilot.
 
 Supports:
-  Tier 1 (Skill + MCP): Claude Code, Codex CLI, OpenCode, Gemini CLI
-  Tier 2 (MCP only):    Cursor, Windsurf, Cline, Roo Code
+  Tier 1 (Skill + MCP): Claude Code, Codex CLI, OpenCode, Gemini CLI, Cursor, Windsurf
+  Tier 2 (MCP only):    Cline, Roo Code
 
 Security note: CLI-based platforms (claude, codex, gemini) require passing
 env vars via -e flags on the command line. This briefly exposes keys in the
@@ -49,14 +49,16 @@ PLATFORMS = {
         "skills_dir": "~/.gemini/skills",
     },
     "cursor": {
-        "tier": 2,
+        "tier": 1,
         "binary": None,
         "label": "Cursor",
+        "skills_dir": "~/.cursor/skills",
     },
     "windsurf": {
-        "tier": 2,
+        "tier": 1,
         "binary": None,
         "label": "Windsurf",
+        "skills_dir": "~/.codeium/windsurf/skills",
     },
     "cline": {
         "tier": 2,

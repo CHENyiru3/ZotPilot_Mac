@@ -119,11 +119,12 @@ git clone https://github.com/xunhe730/ZotPilot.git ~/.config/opencode/skills/zot
 
 # Gemini CLI
 git clone https://github.com/xunhe730/ZotPilot.git ~/.gemini/skills/zotpilot
-```
 
-Tier 2 platforms (Cursor, Windsurf) don't need the skill clone — just install the CLI and register MCP:
-```bash
-pip install zotpilot  # or: uv tool install zotpilot
+# Cursor
+git clone https://github.com/xunhe730/ZotPilot.git ~/.cursor/skills/zotpilot
+
+# Windsurf
+git clone https://github.com/xunhe730/ZotPilot.git ~/.codeium/windsurf/skills/zotpilot
 ```
 
 **2. Register the MCP server:**
@@ -408,9 +409,7 @@ Yes, read-only mode doesn't conflict.
 <details>
 <summary>Which agents are supported?</summary>
 
-**Tier 1 (Skill + MCP):** Claude Code, Codex CLI, OpenCode, Gemini CLI — full support with Skill-guided workflows + MCP tools.
-
-**Tier 2 (MCP only):** Cursor, Windsurf — MCP tools available, no Skill guidance.
+**Tier 1 (Skill + MCP):** Claude Code, Codex CLI, OpenCode, Gemini CLI, Cursor, Windsurf — full support with Skill-guided workflows + MCP tools.
 
 Any AI agent that supports MCP protocol can connect to ZotPilot's search and management tools.
 
@@ -482,7 +481,7 @@ Optional feature. Uses Claude Haiku (via Batch API) to re-extract PDF tables, fi
 
 | Problem | Fix |
 |---------|-----|
-| Skill not found | Verify clone target: Claude Code `~/.claude/skills/`, Codex `~/.agents/skills/`, OpenCode `~/.config/opencode/skills/`, Gemini `~/.gemini/skills/` |
+| Skill not found | Verify clone target: Claude Code `~/.claude/skills/`, Codex `~/.agents/skills/`, OpenCode `~/.config/opencode/skills/`, Gemini `~/.gemini/skills/`, Cursor `~/.cursor/skills/`, Windsurf `~/.codeium/windsurf/skills/` |
 | `zotpilot: command not found` | `python3 scripts/run.py status` (auto-installs) |
 | MCP tools not showing up | Re-register MCP server and restart |
 | Empty search results | Run `zotpilot index` first, or try a broader query |
