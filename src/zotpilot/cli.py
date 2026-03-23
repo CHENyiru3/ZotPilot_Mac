@@ -797,9 +797,12 @@ def cmd_update(args):
                 target = str(sd.path.resolve())
                 tag = " [duplicate]"
             else:
-                target = str(sd.path.resolve())
+                target = None
                 tag = ""
-            print(f"  {sd.path}{tag} → {target}")
+            if target is not None:
+                print(f"  {sd.path}{tag} → {target}")
+            else:
+                print(f"  {sd.path}")
 
         for sd in all_dirs:
             if sd.is_broken_symlink:
