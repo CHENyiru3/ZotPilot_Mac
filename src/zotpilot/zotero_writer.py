@@ -128,6 +128,48 @@ class ZoteroWriter:
     # Ingestion helpers
     # =========================================================
 
+    def find_items_by_url_and_title(
+        self, url: str, title: str, limit: int = 20
+    ) -> list[str]:
+        """Find item keys matching BOTH URL and title.
+
+        Used for post-save item discovery when no item key is known.
+        Returns list of item keys (usually 0 or 1; >1 is ambiguous, caller
+        must not apply routing when ambiguous).
+        """
+        if not title:
+            return []
+        try:
+            items = self._zot.items(q=title, qmode="title", limit=limit)
+        except Exception:
+            return []
+        results: list[str] = []
+        for item in items:
+            item_url = (item.get("data") or {}).get("url", "")
+            if item_url and self._urls_match(url, item_url):
+                results.append(item["data"]["key"])
+        return results
+
+    @staticmethod
+    def _urls_match(a: str, b: str) -> bool:
+        """Loose URL comparison: ignore trailing slash and volatile query params."""
+        import urllib.parse
+
+        def normalize(u: str) -> str:
+            try:
+                parsed = urllib.parse.urlparse(u)
+                # Keep scheme + netloc + path; drop query + fragment
+                return (
+                    parsed.scheme.lower()
+                    + "://"
+                    + parsed.netloc.lower()
+                    + parsed.path.rstrip("/")
+                )
+            except Exception:
+                return u.rstrip("/").lower()
+
+        return normalize(a) == normalize(b)
+
     def check_duplicate_by_doi(self, doi: str) -> str | None:
         """Return item key if DOI already exists in library, else None."""
         doi = doi.strip()

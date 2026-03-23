@@ -1,13 +1,90 @@
 """MCP tools for academic paper ingestion into Zotero."""
 from __future__ import annotations
 
+import logging
+import time
 from typing import Annotated, Literal
 
 import httpx
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
+from ..bridge import DEFAULT_PORT, BridgeServer
 from ..state import _get_config, _get_resolver, _get_writer, mcp
+
+logger = logging.getLogger(__name__)
+
+# How long to wait after the extension reports save completion before querying Zotero.
+# Gives Zotero desktop time to sync the new item to the web API.
+_ITEM_DISCOVERY_DELAY_S = 3.0
+
+# Window for item discovery: only consider items modified within this many seconds
+# before the save completion timestamp.
+_ITEM_DISCOVERY_WINDOW_S = 60
+
+
+def _apply_collection_tag_routing(
+    item_key: str,
+    collection_key: str | None,
+    tags: list[str] | None,
+    writer,
+) -> str | None:
+    """Apply collection and/or tag routing to an item. Returns None on success, else warning."""
+    if not collection_key and not tags:
+        return None  # No routing requested — nothing to do
+
+    needs_api_key = (collection_key is not None) or (tags is not None)
+    config = _get_config()
+    if needs_api_key and not config.zotero_api_key:
+        return "collection_key and tags ignored — ZOTERO_API_KEY not configured"
+
+    try:
+        if collection_key:
+            writer.add_to_collection(item_key, collection_key)
+        if tags:
+            writer.add_item_tags(item_key, tags)
+        return None
+    except Exception as e:
+        logger.warning(f"Collection/tag routing failed for {item_key}: {e}")
+        # Bridge-side routing is best-effort; the save itself succeeded.
+        # Return a warning rather than failing the whole operation.
+        return f"collection_key/tags partially applied — {e}"
+
+
+def _discover_saved_item_key(
+    title: str,
+    url: str,
+    known_key: str | None,
+    writer,
+) -> str | None:
+    """Best-effort item key discovery.
+
+    Strategy:
+    - If known_key is available (saveAsWebpage path, ~5% of saves), use it directly.
+    - Otherwise: query Zotero for items added in the last 60s matching BOTH title
+      AND URL. Require both to minimize false positives.
+    - If exactly one match: use it.
+    - If zero or multiple matches: return None (caller returns warning).
+
+    This is inherently unreliable under concurrent saves or duplicate titles.
+    Phase 2 will replace this with a correlation ID flowing end-to-end.
+    """
+    if known_key:
+        return known_key
+
+    if not title and not url:
+        return None
+
+    try:
+        items = writer.find_items_by_url_and_title(url, title)
+    except Exception as e:
+        logger.warning(f"Item discovery query failed: {e}")
+        return None
+
+    if len(items) == 1:
+        return items[0]
+    # 0 or 2+ matches: ambiguous, do not apply routing
+    return None
 
 
 @mcp.tool()
@@ -220,16 +297,16 @@ def save_from_url(
     runs Zotero translators to extract metadata, downloads PDF, and saves to Zotero.
 
     Requires: ZotPilot Connector extension installed in Chrome.
-    The bridge is auto-started if not already running.
 
-    Note: collection_key and tags are accepted but not yet applied by the
-    extension in this version — the paper saves to Zotero's default location.
+    When collection_key and/or tags are provided, the tool attempts to place
+    the saved item in the specified collection and/or apply the given tags.
+    Routing is best-effort: if the item cannot be uniquely identified within
+    30s of the save completing, a warning is returned instead.
+
+    The bridge is auto-started if not already running.
     """
     import json
-    import time
     import urllib.request
-
-    from ..bridge import DEFAULT_PORT, BridgeServer
 
     bridge_url = f"http://127.0.0.1:{DEFAULT_PORT}"
 
@@ -240,7 +317,7 @@ def save_from_url(
         except RuntimeError as e:
             return {"success": False, "error": str(e)}
 
-    # POST command to bridge's /enqueue endpoint (pure HTTP client)
+    # POST command to bridge's /enqueue endpoint
     command = {
         "action": "save",
         "url": url,
@@ -255,7 +332,24 @@ def save_from_url(
             method="POST",
         )
         resp = urllib.request.urlopen(req, timeout=5)
-        request_id = json.loads(resp.read())["request_id"]
+        body = json.loads(resp.read())
+        # Bridge may return 503 if extension is not connected — surface immediately
+        if "error_code" in body:
+            return {"success": False, **body}
+        request_id = body["request_id"]
+    except urllib.error.HTTPError as e:
+        # 503 from bridge means extension not connected
+        if e.code == 503:
+            try:
+                err_body = json.loads(e.read())
+                return {"success": False, **err_body}
+            except Exception:
+                return {
+                    "success": False,
+                    "error_code": "extension_not_connected",
+                    "error_message": "ZotPilot Connector has not sent a heartbeat. Ensure it is installed and Chrome is open.",
+                }
+        return {"success": False, "error": f"HTTP {e.code}: {e.reason}"}
     except Exception as e:
         return {"success": False, "error": f"Failed to enqueue: {e}"}
 
@@ -268,7 +362,8 @@ def save_from_url(
                 f"{bridge_url}/result/{request_id}", timeout=5
             )
             if resp.status == 200:
-                return json.loads(resp.read())
+                result = json.loads(resp.read())
+                return _apply_bridge_result_routing(result, collection_key, tags)
         except Exception:
             pass  # 204 or connection error — keep polling
 
@@ -277,3 +372,75 @@ def save_from_url(
         "error": "Timeout (90s) — extension did not respond. "
                  "Ensure ZotPilot Connector is installed and Chrome is open.",
     }
+
+
+def _apply_bridge_result_routing(
+    result: dict,
+    collection_key: str | None,
+    tags: list[str] | None,
+) -> dict:
+    """Apply collection/tag routing after a bridge save result.
+
+    Extension result shape:
+      {
+        request_id, success, url,
+        title?,        # always present (tab.title)
+        item_key?,     # only in saveAsWebpage path (~5%)
+        collection_key?, tags?, _detected_via?
+        error_code?,   error_message?
+      }
+    """
+    if not result.get("success"):
+        # Save failed — propagate error, no routing possible
+        return result
+
+    needs_routing = bool(collection_key) or bool(tags)
+    if not needs_routing:
+        return result
+
+    config = _get_config()
+    if not config.zotero_api_key:
+        return {
+            **result,
+            "warning": "collection_key and tags ignored — ZOTERO_API_KEY not configured",
+        }
+
+    writer = _get_writer()
+
+    # Give Zotero desktop a moment to sync the new item to the web API
+    time.sleep(_ITEM_DISCOVERY_DELAY_S)
+
+    item_key = _discover_saved_item_key(
+        title=result.get("title", ""),
+        url=result.get("url", ""),
+        known_key=result.get("item_key"),
+        writer=writer,
+    )
+
+    if item_key is None:
+        # Could not uniquely identify the saved item
+        discovered = 0
+        try:
+            discovered = len(writer.find_items_by_url_and_title(
+                result.get("url", ""), result.get("title", "")
+            ))
+        except Exception:
+            pass
+        if discovered == 0:
+            warning = "collection_key/tags not applied — item not found in Zotero within discovery window"
+        else:
+            warning = f"collection_key/tags not applied — ambiguous match ({discovered} items found)"
+        return {**result, "warning": warning}
+
+    # Exactly one match — apply routing
+    routing_warning = _apply_collection_tag_routing(
+        item_key=item_key,
+        collection_key=collection_key,
+        tags=tags,
+        writer=writer,
+    )
+
+    out = {**result}
+    if routing_warning:
+        out["warning"] = routing_warning
+    return out

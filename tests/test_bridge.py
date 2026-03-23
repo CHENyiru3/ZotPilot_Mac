@@ -38,10 +38,20 @@ class TestBridgeServer:
             bridge.stop()
 
     def test_enqueue_via_http(self):
-        """POST /enqueue accepts commands and returns request_id."""
+        """POST /enqueue accepts commands and returns request_id when extension is connected."""
         bridge = BridgeServer(port=0)
         bridge.start()
         try:
+            # Send a heartbeat so the extension is considered connected
+            heartbeat = json.dumps({"extension_version": "0.1.0", "zotero_connected": True}).encode()
+            hb_req = urllib.request.Request(
+                f"http://127.0.0.1:{bridge.port}/heartbeat",
+                data=heartbeat,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(hb_req)
+
             command = json.dumps({"action": "save", "url": "https://example.com"}).encode()
             req = urllib.request.Request(
                 f"http://127.0.0.1:{bridge.port}/enqueue",
@@ -58,6 +68,28 @@ class TestBridgeServer:
             resp2 = urllib.request.urlopen(req2)
             queued = json.loads(resp2.read())
             assert queued["request_id"] == data["request_id"]
+        finally:
+            bridge.stop()
+
+    def test_enqueue_returns_503_when_extension_disconnected(self):
+        """POST /enqueue returns 503 when no extension heartbeat has been received."""
+        bridge = BridgeServer(port=0)
+        bridge.start()
+        try:
+            command = json.dumps({"action": "save", "url": "https://example.com"}).encode()
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{bridge.port}/enqueue",
+                data=command,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                urllib.request.urlopen(req)
+                assert False, "Expected HTTPError 503"
+            except urllib.error.HTTPError as e:
+                assert e.code == 503
+                body = json.loads(e.read())
+                assert body["error_code"] == "extension_not_connected"
         finally:
             bridge.stop()
 
