@@ -121,7 +121,7 @@ git clone https://github.com/xunhe730/ZotPilot.git ~/.config/opencode/skills/zot
 git clone https://github.com/xunhe730/ZotPilot.git ~/.gemini/skills/zotpilot
 ```
 
-Tier 2 platforms (Cursor, Windsurf, Cline, Roo Code) don't need the skill clone — just install the CLI and register MCP:
+Tier 2 platforms (Cursor, Windsurf) don't need the skill clone — just install the CLI and register MCP:
 ```bash
 pip install zotpilot  # or: uv tool install zotpilot
 ```
@@ -148,7 +148,7 @@ zotpilot register --gemini-key <key>                  # Tier 2
 python3 scripts/run.py register --platform claude-code  # or: zotpilot register --platform claude-code
 ```
 
-Supports: Claude Code, Codex CLI, OpenCode, Gemini CLI, Cursor, Windsurf, Cline, Roo Code.
+Supports: Claude Code, Codex CLI, OpenCode, Gemini CLI, Cursor, Windsurf.
 
 **3. Restart your AI agent.**
 
@@ -410,7 +410,7 @@ Yes, read-only mode doesn't conflict.
 
 **Tier 1 (Skill + MCP):** Claude Code, Codex CLI, OpenCode, Gemini CLI — full support with Skill-guided workflows + MCP tools.
 
-**Tier 2 (MCP only):** Cursor, Windsurf, Cline, Roo Code — MCP tools available, no Skill guidance.
+**Tier 2 (MCP only):** Cursor, Windsurf — MCP tools available, no Skill guidance.
 
 Any AI agent that supports MCP protocol can connect to ZotPilot's search and management tools.
 

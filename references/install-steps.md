@@ -70,7 +70,7 @@ Alternative (key appears in shell history):
 python3 scripts/run.py register --gemini-key <the-users-key>
 ```
 
-This auto-detects the AI agent platform and registers the MCP server. Supports Claude Code, Codex CLI, OpenCode, Gemini CLI, Cursor, Windsurf, Cline, and Roo Code.
+This auto-detects the AI agent platform and registers the MCP server. Supports Claude Code, Codex CLI, OpenCode, Gemini CLI, Cursor, and Windsurf.
 
 If auto-detection fails, specify explicitly: `python3 scripts/run.py register --platform claude-code`
 

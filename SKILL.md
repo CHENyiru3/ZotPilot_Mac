@@ -113,7 +113,7 @@ python3 scripts/run.py register \
   --zotero-user-id <numeric-id>
 ```
 
-This auto-detects the user's AI agent platform(s) and registers accordingly. Supports Claude Code, Codex CLI, OpenCode, Gemini CLI, Cursor, Windsurf, Cline, and Roo Code.
+This auto-detects the user's AI agent platform(s) and registers accordingly. Supports Claude Code, Codex CLI, OpenCode, Gemini CLI, Cursor, and Windsurf.
 
 If auto-detection fails, specify explicitly: `python3 scripts/run.py register --platform claude-code`
 

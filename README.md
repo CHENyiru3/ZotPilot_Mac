@@ -83,7 +83,7 @@ git clone https://github.com/xunhe730/ZotPilot.git ~/.config/opencode/skills/zot
 git clone https://github.com/xunhe730/ZotPilot.git ~/.gemini/skills/zotpilot
 ```
 
-Tier 2 平台（Cursor、Windsurf、Cline、Roo Code）不需要 clone skill，只需要安装 CLI 和注册 MCP：
+Tier 2 平台（Cursor、Windsurf）不需要 clone skill，只需要安装 CLI 和注册 MCP：
 ```bash
 pip install zotpilot  # 或 uv tool install zotpilot
 ```
@@ -112,7 +112,7 @@ zotpilot register --gemini-key <key>                  # Tier 2
 python3 scripts/run.py register --platform claude-code  # 或: zotpilot register --platform claude-code
 ```
 
-支持：Claude Code、Codex CLI、OpenCode、Gemini CLI、Cursor、Windsurf、Cline、Roo Code。
+支持：Claude Code、Codex CLI、OpenCode、Gemini CLI、Cursor、Windsurf。
 
 **3. 重启你的 AI agent。**
 
@@ -440,7 +440,7 @@ AI Agent ──→ 32 个 MCP 工具 ──┬── 语义搜索 ──→ Chro
 
 **Tier 1（Skill + MCP）：** Claude Code、Codex CLI、OpenCode、Gemini CLI — 完整支持，Skill 提供使用指导 + MCP 提供工具。
 
-**Tier 2（MCP only）：** Cursor、Windsurf、Cline、Roo Code — MCP 工具可用，无 Skill 使用指导。
+**Tier 2（MCP only）：** Cursor、Windsurf — MCP 工具可用，无 Skill 使用指导。
 
 只要支持 MCP 协议的 AI agent 都可以接入 ZotPilot 的搜索和管理工具。
 
