@@ -72,6 +72,7 @@ After indexing, check for "Skipped N long documents" — offer to index them wit
 | Batch add papers from search results | `ingest_papers` | `papers` (from search_academic_databases) |
 | Capture a URL to Zotero via browser | `save_from_url` | `url`, `collection_key`, `tags` — **requires ZotPilot Connector** |
 | Batch capture URLs to Zotero via browser | `save_urls` | `urls` (list, max 10), `collection_key`, `tags` — **requires ZotPilot Connector** |
+| Profile the library / generate user research context | `profile_library` | — |
 
 > **`save_from_url` prerequisites:** ZotPilot Connector must be installed in Chrome and Chrome must be open. The bridge (`:2619`) auto-starts. Returns `item_key` when found in Zotero within 3s discovery window. Requires `ZOTERO_API_KEY` for `item_key` discovery and routing — without it, save still works but `item_key` is not returned.
 
@@ -104,17 +105,52 @@ Agent judges routing from context — no mechanical Q&A. Capability reference:
 | URL-only, no DOI/arXiv | `save_from_url(url)` or `save_urls(urls)` | ✅ institutional | ~30s/URL |
 
 Discovery channels (agent picks based on topic):
-- **OpenAlex / Semantic Scholar**: `search_academic_databases(query, year_min=...) `— structured results with abstracts, citation counts, DOIs; S2 tried first, OpenAlex fallback on 429
+- **OpenAlex** (primary): `search_academic_databases(query, year_min=...)` — structured results with abstracts, citation counts, DOIs, OA status, landing URLs; S2 supplemented automatically when `S2_API_KEY` is set
 - **PubMed**: `mcp__claude_ai_PubMed__search_articles` — biomedical focus
 - **arXiv / DOI direct**: `add_paper_by_identifier` — when identifier is known
 - **Real browser search**: Playwright MCP `browser_navigate` + `browser_snapshot` — Google Scholar, any publisher page, no API limits
 
 Step 1 — Discover: `search_academic_databases(X, limit=20)` (add PubMed for biomedical)
-Step 2 — Evaluate: agent ranks by relevance, citations, recency, journal quality; shows user a curated list (5–10 papers) with one-line rationale each; user only confirms or adjusts
-Step 3 — Ingest:
-  - Papers with arxiv_id → `add_paper_by_identifier("arxiv:ID")`
-  - Papers with DOI, PDF needed → `save_urls(["https://doi.org/{doi}", ...])` (batch, max 10)
-  - Papers with DOI, metadata only → `ingest_papers([{doi:...}])`
+Step 2 — Score & rank: For each candidate paper, compute a weighted score (0-10) across 4 dimensions:
+
+| Dimension | Default weight | Description |
+|-----------|---------------|-------------|
+| Query relevance | 40% | How directly the paper answers the user's query (based on abstract) |
+| User context fit | 30% | Alignment with ZOTPILOT.md research focus and discipline (0% when no ZOTPILOT.md) |
+| Quality signal | 20% | Citation count (normalized by year), source type (journal > conference > preprint) |
+| Recency | 10% | Publication year proximity to current year |
+
+**When no ZOTPILOT.md**: redistribute context fit weight → relevance becomes 70%, context 0%.
+
+**Intent-driven weight adjustments** (agent judges from natural language, not keyword matching):
+
+| Intent signal | Relevance | Context | Quality | Recency |
+|---------------|-----------|---------|---------|---------|
+| "最新" / "recent advances" | 35% | 25% | 10% | 30% |
+| "经典" / "foundational work" | 35% | 25% | 30% | 10% |
+| "探索新方向" / "exploring new area" | 60% | 0% | 25% | 15% |
+| "高引" / "high impact" | 35% | 25% | 35% | 5% |
+| "综述" / "survey" | 50% | 30% | 15% | 5% + add `type:review` filter |
+
+Display format (show to user before ingesting):
+```
+1. [9.2] Attention Is All You Need (Vaswani et al., 2017) · 8420引用 · OA
+   "直接奠定你研究的 transformer 基础，与你的 VLM 方向高度契合"
+
+2. [7.8] CLIP (Radford et al., 2021) · 3200引用 · OA
+   "视觉语言对齐的代表工作，补充你库中 contrastive learning 的空白"
+```
+
+Step 3 — Ingest (after user confirms list): route each paper by priority:
+
+| Priority | Condition | Tool | Result |
+|----------|-----------|------|--------|
+| 1 | `arxiv_id` present | `add_paper_by_identifier("arxiv:ID")` | OA PDF, fast |
+| 2 | `doi` + `is_oa=True` + `oa_url` | `add_paper_by_identifier(doi)` | OA PDF direct |
+| 3 | `doi` + `is_oa=False` + `landing_page_url` | `save_urls([landing_page_url])` | Connector, ~30s/URL, requires Chrome+Connector |
+| 4 | `doi` only (no URL) | `ingest_papers([{doi:...}])` | Metadata only, no PDF |
+| 5 | No `doi` | Skip, inform user | (OpenAlex ID support: backlog) |
+
 Step 4 — Post-ingest (per item_key, when available): `index_library` → `get_paper_details` → `create_note` → `batch_tags` / `batch_collections`
 
 Alert user when using `save_from_url` / `save_urls`: ~30s per URL, Chrome + Connector must be running.
@@ -128,6 +164,40 @@ Prerequisites: Chrome open, ZotPilot Connector installed, `ZOTERO_API_KEY` confi
 5. `add_to_collection(item_key, collection_key)` + `add_item_tags(item_key, tags)` → classify
 
 If `item_key` missing from `save_from_url` result: use `advanced_search(title=result["title"])` to locate the item first.
+
+**Library profiling & ZOTPILOT.md** (first-time setup or refresh):
+Prerequisites: Library indexed (`index_library` run at least once)
+1. `profile_library()` → get library stats + existing_profile (existing ZOTPILOT.md contents if any)
+2. Show draft analysis to user: "这是我对你文献库的分析，你觉得准确吗？" — include year range, top topics/tags, coverage gaps
+3. User confirms or corrects the analysis
+4. Interview (one question at a time):
+   a. 你的学科领域是什么？
+   b. 你的身份？(PhD / Master / Researcher / Other)
+   c. 你主要的研究方向？(1-3个)
+   d. 你关注哪些交叉学科？
+5. Write `~/.config/zotpilot/ZOTPILOT.md` with the following structure:
+
+```markdown
+# ZotPilot User Profile
+generated: YYYY-MM-DD
+
+## Identity
+- Role: PhD
+- Discipline: Computer Science
+- Cross-disciplinary interests: Cognitive Science
+
+## Research Focus
+- Primary: Multimodal LLMs, Vision-Language Models
+- Secondary: Efficient inference
+
+## Library Analysis
+- Total indexed: 312 papers
+- Year distribution: 70% 2021-2025, 20% 2016-2020, 10% pre-2016
+- Topic density: LLM (high), CV (medium), Bio (sparse)
+- Gaps: few survey papers, weak on pre-transformer foundations
+```
+
+Trigger: when user says "分析我的文献库", "建立研究档案", "profile my library", or when ZOTPILOT.md does not exist and a research workflow is about to start.
 
 **Organize library (classification advisor):**
 get_library_overview + list_collections + list_tags → analyze themes via
