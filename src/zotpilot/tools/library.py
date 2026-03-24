@@ -149,3 +149,100 @@ def get_annotations(
 ) -> list[dict]:
     """Get highlights and comments. Requires ZOTERO_API_KEY."""
     return _get_api_reader().get_annotations(item_key=item_key, limit=limit)
+
+
+@mcp.tool()
+def profile_library() -> dict:
+    """Analyze the Zotero library to generate a user profile for research context.
+
+    Returns library statistics including year distribution, top tags, collections,
+    and topic density from the vector index (if available).
+
+    Also returns the contents of ~/.config/zotpilot/ZOTPILOT.md if it exists,
+    so agents can see the existing user profile without needing filesystem access.
+
+    Pure read operation — no side effects."""
+    from collections import Counter
+    from pathlib import Path
+
+    zotero = _get_zotero()
+
+    # --- total items (all non-note, non-attachment items, not just those with PDFs) ---
+    all_items = zotero.get_all_items_with_pdfs()
+    total_items = len(all_items)
+
+    # --- year distribution ---
+    year_counter: Counter = Counter()
+    for item in all_items:
+        if item.year:
+            year_counter[str(item.year)] += 1
+    year_distribution = dict(sorted(year_counter.items()))
+
+    # --- top tags (top 20) ---
+    tags = zotero.get_all_tags()
+    top_tags = [t["name"] for t in tags[:20]]
+
+    # --- top collections (top 10 by item count) ---
+    collections = zotero.get_all_collections()
+    collection_counts: dict[str, int] = {}
+    for item in all_items:
+        if item.collections:
+            for col_name in item.collections.split("; "):
+                col_name = col_name.strip()
+                if col_name:
+                    collection_counts[col_name] = collection_counts.get(col_name, 0) + 1
+
+    # Build top_collections list with key lookup
+    name_to_key = {c["name"]: c["key"] for c in collections}
+    top_collections = sorted(
+        [
+            {"name": name, "key": name_to_key.get(name, ""), "count": count}
+            for name, count in collection_counts.items()
+        ],
+        key=lambda x: x["count"],
+        reverse=True,
+    )[:10]
+
+    # --- topic density from vector index ---
+    store = _get_store_optional()
+    if store is None:
+        topic_density = {"indexed": False}
+    else:
+        try:
+            doc_count = len(store.get_indexed_doc_ids())
+            topic_density = {"indexed": True, "doc_count": doc_count}
+        except Exception:
+            topic_density = {"indexed": True, "doc_count": 0}
+
+    # --- gaps analysis ---
+    gaps: list[str] = []
+    if year_distribution:
+        min_year = min(int(y) for y in year_distribution)
+        pre_2015_count = sum(v for k, v in year_distribution.items() if int(k) < 2015)
+        if min_year >= 2015 or (total_items > 0 and pre_2015_count / total_items < 0.05):
+            gaps.append("sparse coverage before 2015")
+    survey_tags = {"review", "survey", "meta-analysis", "systematic review"}
+    tagged_survey = sum(
+        t["count"] for t in tags if t["name"].lower() in survey_tags
+    )
+    if total_items > 0 and tagged_survey / total_items < 0.05:
+        gaps.append("few survey/review papers")
+
+    # --- existing profile ---
+    profile_path = Path("~/.config/zotpilot/ZOTPILOT.md").expanduser()
+    existing_profile: str | None = None
+    if profile_path.exists():
+        try:
+            existing_profile = profile_path.read_text(encoding="utf-8")
+        except Exception:
+            existing_profile = None
+
+    return {
+        "total_items": total_items,
+        "year_distribution": year_distribution,
+        "top_tags": top_tags,
+        "top_collections": top_collections,
+        "topic_density": topic_density,
+        "gaps": gaps,
+        "existing_profile": existing_profile,
+    }
