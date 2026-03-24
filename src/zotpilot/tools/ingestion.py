@@ -213,7 +213,7 @@ def _search_openalex(
         # Extract arxiv_id from ids.doi when it's an arXiv DOI
         ids = p.get("ids") or {}
         ids_doi = ids.get("doi") or ""
-        arxiv_id = ids_doi[len(arxiv_prefix):] if ids_doi.lower().startswith(arxiv_prefix.lower()) else None
+        arxiv_id = ids_doi.lower()[len(arxiv_prefix):] if ids_doi.lower().startswith(arxiv_prefix.lower()) else None
 
         # OA fields
         oa = p.get("open_access") or {}
@@ -291,7 +291,7 @@ def _search_s2(
 
 def _merge_oa_s2(oa_results: list[dict], s2_results: list[dict]) -> list[dict]:
     """Merge OpenAlex and S2 results, deduplicating by doi.lower()."""
-    oa_by_doi = {r["doi"].lower(): r for r in oa_results if r.get("doi")}
+    oa_by_doi = {r["doi"].lower(): dict(r) for r in oa_results if r.get("doi")}
     no_doi_results = [r for r in oa_results if not r.get("doi")]
 
     for s2_paper in s2_results:
@@ -303,10 +303,12 @@ def _merge_oa_s2(oa_results: list[dict], s2_results: list[dict]) -> list[dict]:
                 oa_by_doi[s2_doi]["cited_by_count"] = s2_paper.get("cited_by_count")
         else:
             # S2-only paper: add with OA defaults
-            s2_paper.setdefault("is_oa", False)
-            s2_paper.setdefault("oa_url", None)
-            s2_paper.setdefault("landing_page_url", None)
-            no_doi_results.append(s2_paper)
+            no_doi_results.append({
+                **s2_paper,
+                "is_oa": s2_paper.get("is_oa", False),
+                "oa_url": s2_paper.get("oa_url"),
+                "landing_page_url": s2_paper.get("landing_page_url"),
+            })
 
     return list(oa_by_doi.values()) + no_doi_results
 
@@ -369,11 +371,15 @@ def search_academic_databases(
             api_key=config.semantic_scholar_api_key,
         )
         # Add OA defaults to S2-only results
-        for r in s2_results:
-            r.setdefault("is_oa", False)
-            r.setdefault("oa_url", None)
-            r.setdefault("landing_page_url", None)
-        return s2_results
+        return [
+            {
+                **r,
+                "is_oa": r.get("is_oa", False),
+                "oa_url": r.get("oa_url"),
+                "landing_page_url": r.get("landing_page_url"),
+            }
+            for r in s2_results
+        ]
     except httpx.TimeoutException:
         s2_error = "timeout"
     except httpx.HTTPStatusError as e:
