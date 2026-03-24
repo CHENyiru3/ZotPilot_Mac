@@ -447,7 +447,10 @@ def save_from_url(
                 return {
                     "success": False,
                     "error_code": "extension_not_connected",
-                    "error_message": "ZotPilot Connector has not sent a heartbeat. Ensure it is installed and Chrome is open.",
+                    "error_message": (
+                        "ZotPilot Connector has not sent a heartbeat. "
+                        "Ensure it is installed and Chrome is open."
+                    ),
                 }
         return {"success": False, "error": f"HTTP {e.code}: {e.reason}"}
     except Exception as e:
@@ -464,8 +467,8 @@ def save_from_url(
             if resp.status == 200:
                 result = json.loads(resp.read())
                 return _apply_bridge_result_routing(result, collection_key, tags)
-        except Exception:
-            pass  # 204 or connection error — keep polling
+        except Exception as e:
+            logger.debug("Poll %s: %s", request_id, e)
 
     return {
         "success": False,
@@ -555,8 +558,8 @@ def save_urls(
                     with polled_lock:
                         polled[request_id] = {**final, "url": url}
                     return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Poll %s: %s", request_id, e)
         with polled_lock:
             polled[request_id] = {
                 "url": url,
