@@ -350,6 +350,34 @@ class TestSaveFromUrl:
         assert result["success"] is False
         assert "Failed to enqueue" in result["error"]
 
+    def test_bridge_not_running_auto_start_succeeds(self):
+        """Bridge not running → auto_start called → enqueue + poll succeed."""
+        enqueue_resp = _make_urlopen_response({"request_id": "req-auto"})
+        poll_resp = _make_urlopen_response(
+            {"success": True, "url": "https://example.com", "title": "Auto Paper", "request_id": "req-auto"},
+            status=200,
+        )
+        config = _make_config(api_key=None)
+
+        call_count = [0]
+        def fake_urlopen(req_or_url, timeout=None):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return enqueue_resp
+            return poll_resp
+
+        mock_auto_start = MagicMock()
+        with patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=False), \
+             patch("zotpilot.tools.ingestion.BridgeServer.auto_start", mock_auto_start), \
+             patch("zotpilot.tools.ingestion.time.sleep"), \
+             patch("zotpilot.tools.ingestion._get_config", return_value=config), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            result = save_from_url("https://example.com")
+
+        mock_auto_start.assert_called_once()
+        assert result["success"] is True
+        assert result["title"] == "Auto Paper"
+
     def test_enqueue_returns_success_false_propagated(self):
         enqueue_resp = _make_urlopen_response({"request_id": "req-002"})
         poll_resp = _make_urlopen_response(
@@ -441,9 +469,17 @@ class TestSaveUrls:
         assert len(result["results"]) == 3
 
     def test_mixed_results_enqueue_fail_and_one_success(self):
-        """1 enqueue 503 + 1 poll success → succeeded=1, failed=1, total=2."""
+        """3 URLs: 1 enqueue 503 + 1 poll timeout + 1 poll success.
+
+        URL 1: enqueue raises 503 → immediate enqueue error
+        URL 2: enqueues OK (req-timeout) but all polls raise URLError → per-URL timeout
+        URL 3: enqueues OK (req-success) and polls return success
+
+        Expected: succeeded=1, failed=2, total=3, 3 entries in results.
+        """
         urls = [
             "https://example.com/fail-enqueue",
+            "https://example.com/poll-timeout",
             "https://example.com/success",
         ]
         config = _make_config(api_key=None)
@@ -460,26 +496,38 @@ class TestSaveUrls:
                         "error_code": "extension_not_connected",
                         "error_message": "No heartbeat.",
                     })
+                elif idx == 1:
+                    return _make_urlopen_response({"request_id": "req-timeout"})
                 else:
                     return _make_urlopen_response({"request_id": "req-success"})
-            # Poll path — always return success for req-success
+            # Poll path
             if "req-success" in url_str:
                 return _make_urlopen_response(
-                    {"success": True, "url": urls[1], "title": "Success Paper", "request_id": "req-success"},
+                    {"success": True, "url": urls[2], "title": "Success Paper", "request_id": "req-success"},
                     status=200,
                 )
-            raise urllib.error.URLError("unexpected")
+            # req-timeout: always raise URLError so the per-URL deadline triggers
+            raise urllib.error.URLError("connection refused")
+
+        # time.monotonic controls per-URL deadlines inside _poll_one threads.
+        # We return 0.0 for the first few calls (deadline setup + initial while checks),
+        # then 1000.0 so the req-timeout thread exits its while loop after one failed poll.
+        # req-success succeeds on first urlopen call so its thread returns before the
+        # deadline check matters.
+        mono_values = iter([0.0] * 10 + [1000.0] * 500)
 
         with patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True), \
              patch("zotpilot.tools.ingestion.BridgeServer.auto_start"), \
              patch("zotpilot.tools.ingestion.time.sleep"), \
+             patch("zotpilot.tools.ingestion.time.monotonic", side_effect=mono_values), \
              patch("zotpilot.tools.ingestion._get_config", return_value=config), \
              patch("urllib.request.urlopen", side_effect=fake_urlopen):
             result = save_urls(urls)
 
-        assert result["total"] == 2
+        assert result["total"] == 3
         assert result["succeeded"] == 1
-        assert result["failed"] == 1
+        assert result["failed"] == 2
+        assert len(result["results"]) == 3
         assert any(r.get("error_code") == "extension_not_connected" for r in result["results"])
 
     def test_enqueue_503_url_appears_in_results(self):
