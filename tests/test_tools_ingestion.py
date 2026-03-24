@@ -1,16 +1,15 @@
 """Tests for ingestion MCP tools."""
-import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
+import pytest
 from fastmcp.exceptions import ToolError
 
+from zotpilot.identifier_resolver import PaperMetadata
 from zotpilot.tools.ingestion import (
     add_paper_by_identifier,
-    search_academic_databases,
     ingest_papers,
+    search_academic_databases,
 )
-from zotpilot.identifier_resolver import PaperMetadata
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -177,8 +176,37 @@ S2_RESPONSE = {
     ]
 }
 
+OA_RESPONSE = {
+    "results": [
+        {
+            "id": "https://openalex.org/W1234567890",
+            "doi": "https://doi.org/10.9999/attention",
+            "display_name": "Attention Is All You Need",
+            "authorships": [
+                {"author": {"display_name": "Vaswani"}},
+                {"author": {"display_name": "Shazeer"}},
+            ],
+            "publication_year": 2017,
+            "cited_by_count": 50000,
+            "open_access": {"is_oa": False, "oa_url": None},
+            "abstract_inverted_index": {
+                "We": [0], "propose": [1], "the": [2], "Transformer": [3],
+            },
+            "ids": {"doi": "https://doi.org/10.9999/attention"},
+            "primary_location": {"landing_page_url": "https://example.com/paper"},
+        }
+    ]
+}
+
 
 class TestSearchAcademicDatabases:
+    def _mock_oa_response(self, data=None):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = data or OA_RESPONSE
+        mock_resp.raise_for_status = MagicMock()
+        return mock_resp
+
     def _mock_s2_response(self, data=None):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -189,25 +217,27 @@ class TestSearchAcademicDatabases:
     def test_returns_formatted_list(self):
         with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
              patch("zotpilot.tools.ingestion.httpx.get") as mock_get:
-            mock_get.return_value = self._mock_s2_response()
+            mock_get.return_value = self._mock_oa_response()
             results = search_academic_databases("attention mechanism")
 
         assert len(results) == 1
         r = results[0]
         assert r["title"] == "Attention Is All You Need"
         assert r["doi"] == "10.9999/attention"
-        assert r["arxiv_id"] == "1706.03762"
         assert r["cited_by_count"] == 50000
         assert r["year"] == 2017
         assert isinstance(r["authors"], list)
         assert len(r["authors"]) == 2
 
     def test_abstract_snippet_truncated_at_300(self):
-        long_abstract = "x" * 500
-        data = {"data": [{**S2_RESPONSE["data"][0], "abstract": long_abstract}]}
+        # Build an OA result with a long abstract via inverted index
+        long_word = "x"
+        long_inverted = {long_word: list(range(500))}
+        oa_result = {**OA_RESPONSE["results"][0], "abstract_inverted_index": long_inverted}
+        data = {"results": [oa_result]}
         with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
              patch("zotpilot.tools.ingestion.httpx.get") as mock_get:
-            mock_get.return_value = self._mock_s2_response(data)
+            mock_get.return_value = self._mock_oa_response(data)
             results = search_academic_databases("test")
 
         assert len(results[0]["abstract_snippet"]) == 300
@@ -215,32 +245,37 @@ class TestSearchAcademicDatabases:
     def test_with_api_key_sets_header(self):
         with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(api_key="MY_KEY")), \
              patch("zotpilot.tools.ingestion.httpx.get") as mock_get:
-            mock_get.return_value = self._mock_s2_response()
+            # First call (OA) returns empty; second call (S2) returns S2_RESPONSE
+            mock_get.side_effect = [self._mock_oa_response({"results": []}), self._mock_s2_response()]
             search_academic_databases("test")
 
+        # Last call is S2 — check its header
         _, kwargs = mock_get.call_args
         assert kwargs.get("headers", {}).get("x-api-key") == "MY_KEY"
 
     def test_without_api_key_no_header(self):
         with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(api_key=None)), \
              patch("zotpilot.tools.ingestion.httpx.get") as mock_get:
-            mock_get.return_value = self._mock_s2_response()
+            mock_get.return_value = self._mock_oa_response()
             search_academic_databases("test")
 
+        # Only one call (OA) — no x-api-key header
         _, kwargs = mock_get.call_args
         assert "x-api-key" not in kwargs.get("headers", {})
 
     def test_year_min_max_sets_param(self):
         with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
              patch("zotpilot.tools.ingestion.httpx.get") as mock_get:
-            mock_get.return_value = self._mock_s2_response()
+            mock_get.return_value = self._mock_oa_response()
             search_academic_databases("test", year_min=2020, year_max=2023)
 
+        # OA uses filter param with publication_year range (year_min-1 / year_max+1)
         _, kwargs = mock_get.call_args
         params = kwargs.get("params", {})
-        assert "publicationDateOrYear" in params
-        assert "2020" in params["publicationDateOrYear"]
-        assert "2023" in params["publicationDateOrYear"]
+        assert "filter" in params
+        assert "publication_year" in params["filter"]
+        assert "2019" in params["filter"]  # year_min - 1
+        assert "2024" in params["filter"]  # year_max + 1
 
     def test_timeout_raises_tool_error(self):
         import httpx as _httpx
@@ -263,11 +298,12 @@ class TestSearchAcademicDatabases:
                 search_academic_databases("test")
 
     def test_authors_capped_at_five(self):
-        many_authors = [{"name": f"Author{i}"} for i in range(10)]
-        data = {"data": [{**S2_RESPONSE["data"][0], "authors": many_authors}]}
+        many_authors = [{"author": {"display_name": f"Author{i}"}} for i in range(10)]
+        oa_result = {**OA_RESPONSE["results"][0], "authorships": many_authors}
+        data = {"results": [oa_result]}
         with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
              patch("zotpilot.tools.ingestion.httpx.get") as mock_get:
-            mock_get.return_value = self._mock_s2_response(data)
+            mock_get.return_value = self._mock_oa_response(data)
             results = search_academic_databases("test")
 
         assert len(results[0]["authors"]) == 5
@@ -417,3 +453,165 @@ class TestIngestPapers:
         assert result["total"] == 0
         assert result["ingested"] == 0
         assert result["failed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# search_academic_databases v2 — OpenAlex-primary control flow
+# ---------------------------------------------------------------------------
+
+def _make_config_v2(s2_key=None, openalex_email=None):
+    config = MagicMock()
+    config.semantic_scholar_api_key = s2_key
+    config.openalex_email = openalex_email
+    return config
+
+
+def _make_oa_http_response(data=None):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = data or OA_RESPONSE
+    return mock_resp
+
+
+def _make_s2_http_response(data=None):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = data or S2_RESPONSE
+    return mock_resp
+
+
+OA_PAPER = {
+    "id": "https://openalex.org/W111",
+    "doi": "https://doi.org/10.1234/abc",
+    "display_name": "OA Paper",
+    "authorships": [{"author": {"display_name": "Alice"}}],
+    "publication_year": 2022,
+    "cited_by_count": 10,
+    "open_access": {"is_oa": True, "oa_url": "https://oa.example.com/paper.pdf"},
+    "abstract_inverted_index": {"Hello": [0], "world": [1]},
+    "ids": {"doi": "https://doi.org/10.1234/abc"},
+    "primary_location": {"landing_page_url": "https://publisher.example.com/paper"},
+}
+
+S2_PAPER = {
+    "paperId": "s2abc",
+    "title": "OA Paper",
+    "authors": [{"name": "Alice"}],
+    "year": 2022,
+    "externalIds": {"DOI": "10.1234/ABC"},
+    "citationCount": 42,
+    "abstract": "A great paper.",
+}
+
+
+class TestSearchAcademicDatabasesV2:
+    def test_openalex_only_no_s2_key(self):
+        """OA succeeds, no S2 key → returns OA results with OA fields."""
+        config = _make_config_v2(s2_key=None)
+        with patch("zotpilot.tools.ingestion._get_config", return_value=config), \
+             patch("zotpilot.tools.ingestion.httpx.get") as mock_get:
+            mock_get.return_value = _make_oa_http_response({"results": [OA_PAPER]})
+            results = search_academic_databases("test")
+
+        assert len(results) == 1
+        r = results[0]
+        assert r["is_oa"] is True
+        assert r["oa_url"] == "https://oa.example.com/paper.pdf"
+        assert r["landing_page_url"] == "https://publisher.example.com/paper"
+        assert r["_source"] == "openalex"
+
+    def test_openalex_with_s2_merge_same_doi(self):
+        """OA and S2 both succeed with same DOI (different case) → single deduped result."""
+        config = _make_config_v2(s2_key="KEY")
+        oa_resp = _make_oa_http_response({"results": [OA_PAPER]})
+        s2_resp = _make_s2_http_response({"data": [S2_PAPER]})
+        with patch("zotpilot.tools.ingestion._get_config", return_value=config), \
+             patch("zotpilot.tools.ingestion.httpx.get") as mock_get:
+            mock_get.side_effect = [oa_resp, s2_resp]
+            results = search_academic_databases("test")
+
+        assert len(results) == 1
+        r = results[0]
+        assert r["s2_id"] == "s2abc"
+        assert r["oa_url"] == "https://oa.example.com/paper.pdf"
+        assert r["_source"] == "openalex"
+
+    def test_openalex_with_s2_merge_doi_case_insensitive(self):
+        """DOI matching is case-insensitive: '10.1234/TEST' and '10.1234/test' are same paper."""
+        oa_paper = {**OA_PAPER, "doi": "https://doi.org/10.1234/TEST",
+                    "ids": {"doi": "https://doi.org/10.1234/TEST"}}
+        s2_paper = {**S2_PAPER, "externalIds": {"DOI": "10.1234/test"}}
+        config = _make_config_v2(s2_key="KEY")
+        oa_resp = _make_oa_http_response({"results": [oa_paper]})
+        s2_resp = _make_s2_http_response({"data": [s2_paper]})
+        with patch("zotpilot.tools.ingestion._get_config", return_value=config), \
+             patch("zotpilot.tools.ingestion.httpx.get") as mock_get:
+            mock_get.side_effect = [oa_resp, s2_resp]
+            results = search_academic_databases("test")
+
+        assert len(results) == 1
+        assert results[0]["s2_id"] == "s2abc"
+
+    def test_openalex_fails_s2_fallback_succeeds(self):
+        """OA raises HTTPStatusError, S2 succeeds → S2 results with OA defaults."""
+        import httpx as _httpx
+        config = _make_config_v2(s2_key="KEY")
+        mock_oa_resp = MagicMock()
+        mock_oa_resp.status_code = 503
+        with patch("zotpilot.tools.ingestion._get_config", return_value=config), \
+             patch("zotpilot.tools.ingestion.httpx.get") as mock_get:
+            mock_get.side_effect = [
+                _httpx.HTTPStatusError("service unavailable", request=MagicMock(), response=mock_oa_resp),
+                _make_s2_http_response(),
+            ]
+            results = search_academic_databases("test")
+
+        assert len(results) == 1
+        r = results[0]
+        assert r["_source"] == "semantic_scholar"
+        assert r["is_oa"] is False
+        assert r["oa_url"] is None
+        assert r["landing_page_url"] is None
+
+    def test_both_fail_raises_tool_error(self):
+        """Both OA and S2 fail → ToolError with both error messages."""
+        import httpx as _httpx
+        config = _make_config_v2(s2_key="KEY")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        with patch("zotpilot.tools.ingestion._get_config", return_value=config), \
+             patch("zotpilot.tools.ingestion.httpx.get") as mock_get:
+            mock_get.side_effect = [
+                _httpx.HTTPStatusError("OA error", request=MagicMock(), response=mock_resp),
+                _httpx.HTTPStatusError("S2 error", request=MagicMock(), response=mock_resp),
+            ]
+            with pytest.raises(ToolError):
+                search_academic_databases("test")
+
+    def test_oa_fields_present_in_results(self):
+        """OA result with open_access fields → is_oa, oa_url appear in returned dict."""
+        config = _make_config_v2(s2_key=None)
+        with patch("zotpilot.tools.ingestion._get_config", return_value=config), \
+             patch("zotpilot.tools.ingestion.httpx.get") as mock_get:
+            mock_get.return_value = _make_oa_http_response({"results": [OA_PAPER]})
+            results = search_academic_databases("test")
+
+        r = results[0]
+        assert "is_oa" in r
+        assert "oa_url" in r
+        assert "landing_page_url" in r
+        assert r["is_oa"] is True
+        assert r["oa_url"] == "https://oa.example.com/paper.pdf"
+
+    def test_openalex_email_config_used_as_mailto(self):
+        """config.openalex_email is passed as mailto param in the OA request."""
+        config = _make_config_v2(s2_key=None, openalex_email="myemail@institution.edu")
+        with patch("zotpilot.tools.ingestion._get_config", return_value=config), \
+             patch("zotpilot.tools.ingestion.httpx.get") as mock_get:
+            mock_get.return_value = _make_oa_http_response({"results": []})
+            search_academic_databases("test")
+
+        _, kwargs = mock_get.call_args
+        assert kwargs.get("params", {}).get("mailto") == "myemail@institution.edu"

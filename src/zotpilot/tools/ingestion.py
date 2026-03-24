@@ -164,6 +164,7 @@ def _search_openalex(
     year_min: int | None,
     year_max: int | None,
     sort_by: str,
+    mailto: str = "zotpilot@example.com",
 ) -> list[dict]:
     """Search OpenAlex API. Returns papers in the same format as S2 results."""
     sort_map = {
@@ -175,8 +176,11 @@ def _search_openalex(
         "search": query,
         "per-page": min(limit, 200),
         "sort": sort_map.get(sort_by, "relevance_score:desc"),
-        "select": "id,doi,display_name,authorships,publication_year,cited_by_count,open_access,abstract_inverted_index",
-        "mailto": "zotpilot@example.com",
+        "select": (
+            "id,doi,display_name,authorships,publication_year,"
+            "cited_by_count,open_access,abstract_inverted_index,ids,primary_location"
+        ),
+        "mailto": mailto,
     }
     filters: list[str] = []
     if year_min:
@@ -193,6 +197,7 @@ def _search_openalex(
     )
     resp.raise_for_status()
 
+    arxiv_prefix = "https://doi.org/10.48550/arxiv."
     results = []
     for p in resp.json().get("results", []):
         doi_raw = p.get("doi") or ""
@@ -204,18 +209,106 @@ def _search_openalex(
             if a.get("author", {}).get("display_name")
         ]
         abstract = _reconstruct_abstract(p.get("abstract_inverted_index"))
+
+        # Extract arxiv_id from ids.doi when it's an arXiv DOI
+        ids = p.get("ids") or {}
+        ids_doi = ids.get("doi") or ""
+        arxiv_id = ids_doi[len(arxiv_prefix):] if ids_doi.lower().startswith(arxiv_prefix.lower()) else None
+
+        # OA fields
+        oa = p.get("open_access") or {}
+        is_oa = oa.get("is_oa", False)
+        oa_url = oa.get("oa_url")
+
+        # Landing page
+        primary = p.get("primary_location") or {}
+        landing_page_url = primary.get("landing_page_url")
+
         results.append({
             "title": p.get("display_name"),
             "authors": authors,
             "year": p.get("publication_year"),
             "doi": doi,
-            "arxiv_id": None,
+            "arxiv_id": arxiv_id,
             "openalex_id": oa_id,
             "cited_by_count": p.get("cited_by_count"),
             "abstract_snippet": abstract[:300],
+            "is_oa": is_oa,
+            "oa_url": oa_url,
+            "landing_page_url": landing_page_url,
             "_source": "openalex",
         })
     return results
+
+
+def _search_s2(
+    query: str,
+    limit: int,
+    year_min: int | None,
+    year_max: int | None,
+    sort_by: str,
+    api_key: str | None,
+) -> list[dict]:
+    """Search Semantic Scholar API. Raises on failure."""
+    params: dict = {
+        "query": query,
+        "limit": limit,
+        "fields": "title,authors,year,externalIds,citationCount,abstract",
+        "sort": sort_by,
+    }
+    if year_min or year_max:
+        lo = str(year_min) if year_min else ""
+        hi = str(year_max) if year_max else ""
+        params["publicationDateOrYear"] = f"{lo}-{hi}"
+
+    headers = {}
+    if api_key:
+        headers["x-api-key"] = api_key
+
+    resp = httpx.get(
+        "https://api.semanticscholar.org/graph/v1/paper/search",
+        params=params,
+        headers=headers,
+        timeout=15.0,
+    )
+    resp.raise_for_status()
+    papers = resp.json().get("data", [])
+    return [
+        {
+            "title": p.get("title"),
+            "authors": [a.get("name") for a in (p.get("authors") or [])[:5]],
+            "year": p.get("year"),
+            "doi": (p.get("externalIds") or {}).get("DOI"),
+            "arxiv_id": (p.get("externalIds") or {}).get("ArXiv"),
+            "s2_id": p.get("paperId"),
+            "cited_by_count": p.get("citationCount"),
+            "abstract_snippet": (p.get("abstract") or "")[:300],
+            "_source": "semantic_scholar",
+        }
+        for p in papers
+    ]
+
+
+def _merge_oa_s2(oa_results: list[dict], s2_results: list[dict]) -> list[dict]:
+    """Merge OpenAlex and S2 results, deduplicating by doi.lower()."""
+    oa_by_doi = {r["doi"].lower(): r for r in oa_results if r.get("doi")}
+    no_doi_results = [r for r in oa_results if not r.get("doi")]
+
+    for s2_paper in s2_results:
+        s2_doi = (s2_paper.get("doi") or "").lower()
+        if s2_doi and s2_doi in oa_by_doi:
+            # Enrich OpenAlex result with S2-specific fields
+            oa_by_doi[s2_doi]["s2_id"] = s2_paper.get("s2_id")
+            if not oa_by_doi[s2_doi].get("cited_by_count"):
+                oa_by_doi[s2_doi]["cited_by_count"] = s2_paper.get("cited_by_count")
+        else:
+            # S2-only paper: add with OA defaults
+            s2_paper.setdefault("is_oa", False)
+            s2_paper.setdefault("oa_url", None)
+            s2_paper.setdefault("landing_page_url", None)
+            no_doi_results.append(s2_paper)
+
+    return list(oa_by_doi.values()) + no_doi_results
 
 
 @mcp.tool()
@@ -232,76 +325,65 @@ def search_academic_databases(
     """Search academic databases for papers. Does NOT add to Zotero.
     Use ingest_papers to add selected results to your library.
 
-    Tries Semantic Scholar first; falls back to OpenAlex automatically on rate-limit (429)
-    or timeout. Both return the same result shape."""
+    Uses OpenAlex as primary source; Semantic Scholar as supplement when S2_API_KEY is set."""
     config = _get_config()
+    mailto = config.openalex_email or "zotpilot@example.com"
 
-    # --- Semantic Scholar ---
-    params: dict = {
-        "query": query,
-        "limit": limit,
-        "fields": "title,authors,year,externalIds,citationCount,abstract",
-        "sort": sort_by,
-    }
-    if year_min or year_max:
-        lo = str(year_min) if year_min else ""
-        hi = str(year_max) if year_max else ""
-        params["publicationDateOrYear"] = f"{lo}-{hi}"
+    # --- OpenAlex (primary) ---
+    oa_error: str | None = None
+    oa_results: list[dict] = []
+    try:
+        oa_results = _search_openalex(query, limit, year_min, year_max, sort_by, mailto=mailto)
+    except httpx.TimeoutException:
+        oa_error = "timeout"
+    except httpx.HTTPStatusError as e:
+        oa_error = f"http_{e.response.status_code}"
+    except Exception as e:
+        oa_error = str(e)
 
-    headers = {}
-    if config.semantic_scholar_api_key:
-        headers["x-api-key"] = config.semantic_scholar_api_key
+    if oa_error is None:
+        # OpenAlex succeeded — optionally supplement with S2
+        if config.semantic_scholar_api_key:
+            try:
+                s2_results = _search_s2(
+                    query, limit, year_min, year_max, sort_by,
+                    api_key=config.semantic_scholar_api_key,
+                )
+                return _merge_oa_s2(oa_results, s2_results)
+            except Exception as e:
+                logger.warning(f"S2 supplement failed ({e}), returning OpenAlex-only results")
+        return oa_results
+
+    # --- OpenAlex failed — try S2 as fallback ---
+    logger.info(f"OpenAlex unavailable ({oa_error}), falling back to Semantic Scholar")
+    if not config.semantic_scholar_api_key:
+        raise ToolError(
+            f"Academic search failed: OpenAlex ({oa_error}). "
+            "No S2_API_KEY configured for fallback."
+        )
 
     s2_error: str | None = None
     try:
-        resp = httpx.get(
-            "https://api.semanticscholar.org/graph/v1/paper/search",
-            params=params,
-            headers=headers,
-            timeout=15.0,
+        s2_results = _search_s2(
+            query, limit, year_min, year_max, sort_by,
+            api_key=config.semantic_scholar_api_key,
         )
-        if resp.status_code == 429:
-            s2_error = "rate_limited"
-        else:
-            resp.raise_for_status()
-            papers = resp.json().get("data", [])
-            return [
-                {
-                    "title": p.get("title"),
-                    "authors": [a.get("name") for a in (p.get("authors") or [])[:5]],
-                    "year": p.get("year"),
-                    "doi": (p.get("externalIds") or {}).get("DOI"),
-                    "arxiv_id": (p.get("externalIds") or {}).get("ArXiv"),
-                    "s2_id": p.get("paperId"),
-                    "cited_by_count": p.get("citationCount"),
-                    "abstract_snippet": (p.get("abstract") or "")[:300],
-                    "_source": "semantic_scholar",
-                }
-                for p in papers
-            ]
+        # Add OA defaults to S2-only results
+        for r in s2_results:
+            r.setdefault("is_oa", False)
+            r.setdefault("oa_url", None)
+            r.setdefault("landing_page_url", None)
+        return s2_results
     except httpx.TimeoutException:
         s2_error = "timeout"
     except httpx.HTTPStatusError as e:
         s2_error = f"http_{e.response.status_code}"
-
-    # --- OpenAlex fallback ---
-    logger.info(f"S2 unavailable ({s2_error}), falling back to OpenAlex")
-    try:
-        return _search_openalex(query, limit, year_min, year_max, sort_by)
-    except httpx.TimeoutException:
-        raise ToolError(
-            f"Academic search failed: Semantic Scholar ({s2_error}), OpenAlex (timeout). "
-            "Try again later."
-        )
-    except httpx.HTTPStatusError as e:
-        raise ToolError(
-            f"Academic search failed: Semantic Scholar ({s2_error}), "
-            f"OpenAlex (HTTP {e.response.status_code})."
-        )
     except Exception as e:
-        raise ToolError(
-            f"Academic search failed: Semantic Scholar ({s2_error}), OpenAlex ({e})."
-        )
+        s2_error = str(e)
+
+    raise ToolError(
+        f"Academic search failed: OpenAlex ({oa_error}), Semantic Scholar ({s2_error})."
+    )
 
 
 @mcp.tool()
@@ -325,9 +407,8 @@ def ingest_papers(
     warning = None
     if not config.semantic_scholar_api_key and len(papers) > 5:
         warning = (
-            f"No S2_API_KEY configured. Estimated latency for {len(papers)} papers: "
-            f"~{len(papers)}s (1 req/sec rate limit). "
-            "Set S2_API_KEY environment variable for higher throughput."
+            f"Processing {len(papers)} papers — this may take a moment. "
+            "Set S2_API_KEY environment variable for Semantic Scholar enrichment."
         )
 
     results = []

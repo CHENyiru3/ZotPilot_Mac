@@ -138,12 +138,13 @@ ZotPilot — AI-powered Zotero research assistant. Tool selection guide:
 | Find data tables                                        | search_tables               |
 | Find figures or diagrams                                | search_figures              |
 | Add a specific paper by DOI/arXiv/URL                   | add_paper_by_identifier     |
-| Search external academic databases (Semantic Scholar)   | search_academic_databases   |
+| Search external academic databases (OpenAlex/S2)        | search_academic_databases   |
 | Batch add papers from search results to Zotero          | ingest_papers               |
 
 **Note**: `search_topic` searches your LOCAL indexed Zotero library \
 (requires prior `index_library`). `search_academic_databases` queries \
-the EXTERNAL Semantic Scholar API and finds papers not yet in your library.
+EXTERNAL databases (OpenAlex primary, Semantic Scholar supplement when S2_API_KEY is set) \
+and finds papers not yet in your library.
 
 **Typical literature collection workflow:**
 1. `search_academic_databases` → review candidates
