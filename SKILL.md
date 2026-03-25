@@ -151,19 +151,34 @@ Step 3 — Ingest (after user confirms list): route each paper by priority:
 | 4 | `doi` only (no URL) | `ingest_papers([{doi:...}])` | Metadata only, no PDF |
 | 5 | No `doi` | Skip, inform user | (OpenAlex ID support: backlog) |
 
-Step 4 — Post-ingest (per item_key, when available): `index_library` → `get_paper_details` → `create_note` → `batch_tags` / `batch_collections`
+Step 4 — Post-ingest (per item_key): index → analyze → classify
+
+For each successfully saved item with an `item_key`:
+1. `index_library(item_key=...)` — incremental index, only this paper
+2. `get_paper_details(item_key)` — read abstract, methods, key findings
+3. Based on the content and ZOTPILOT.md context, make judgments:
+   - Which collection(s) does this paper belong to? (check existing collections via `list_collections`)
+   - What tags best describe it? (use existing tag vocabulary from `list_tags` where possible)
+   - Is there anything worth noting — a key method, finding, or connection to the user's work?
+4. `add_to_collection(item_key, collection_key)` + `add_item_tags(item_key, tags)` — classify
+5. `create_note(item_key, content)` — only if the paper is highly relevant; write a concise structured note: what it does, key method, main finding, relevance to user's research
+
+Do NOT create notes for every paper — reserve them for papers the user is likely to read closely. Use ZOTPILOT.md to judge relevance.
+
+If `item_key` missing from result: `advanced_search(title=...)` to locate the item first.
 
 Alert user when using `save_from_url` / `save_urls`: ~30s per URL, Chrome + Connector must be running.
 
-**Agent research ingest** (via ZotPilot Connector):
+**Agent research ingest** (single paper, deep read):
 Prerequisites: Chrome open, ZotPilot Connector installed, `ZOTERO_API_KEY` configured
 1. `save_from_url(url)` → get `item_key` from result
-2. `index_library(item_key=...)` → incremental index (only this paper)
+2. `index_library(item_key=...)` → incremental index
 3. `get_paper_details(item_key)` → read abstract, methods, conclusions
-4. `create_note(item_key, content)` → write structured reading note
-5. `add_to_collection(item_key, collection_key)` + `add_item_tags(item_key, tags)` → classify
+4. Judge: relevant collection, appropriate tags, worth a structured note?
+5. `add_to_collection` + `add_item_tags` → classify
+6. `create_note(item_key, content)` → structured reading note if highly relevant
 
-If `item_key` missing from `save_from_url` result: use `advanced_search(title=result["title"])` to locate the item first.
+If `item_key` missing: use `advanced_search(title=result["title"])` to locate first.
 
 **Library profiling & ZOTPILOT.md** (first-time setup or refresh):
 Prerequisites: Library indexed (`index_library` run at least once)
