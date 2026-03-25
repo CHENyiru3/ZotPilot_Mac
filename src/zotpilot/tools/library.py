@@ -1,9 +1,13 @@
 """Library browsing tools: collections, tags, paper details, overview."""
+import logging
+import sqlite3
 from typing import Annotated
 
 from pydantic import Field
 
 from ..state import ToolError, _get_api_reader, _get_store_optional, _get_zotero, mcp
+
+logger = logging.getLogger(__name__)
 
 
 def _invalidate_collection_cache():
@@ -162,46 +166,64 @@ def profile_library() -> dict:
     so agents can see the existing user profile without needing filesystem access.
 
     Pure read operation — no side effects."""
-    from collections import Counter
     from pathlib import Path
 
     zotero = _get_zotero()
 
-    # --- total items (all non-note, non-attachment items, not just those with PDFs) ---
-    all_items = zotero.get_all_items_with_pdfs()
-    total_items = len(all_items)
+    # --- total items and year distribution: query SQLite directly so all items
+    #     are counted, not just those that happen to have PDF attachments ---
+    conn = sqlite3.connect(str(zotero.db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        total_row = conn.execute("""
+            SELECT COUNT(*) as cnt
+            FROM items i
+            JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+            WHERE i.libraryID = ?
+              AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+              AND it.typeName NOT IN ('note', 'attachment')
+        """, (zotero.library_id,)).fetchone()
+        total_items = total_row["cnt"] if total_row else 0
 
-    # --- year distribution ---
-    year_counter: Counter = Counter()
-    for item in all_items:
-        if item.year:
-            year_counter[str(item.year)] += 1
-    year_distribution = dict(sorted(year_counter.items()))
+        year_rows = conn.execute("""
+            SELECT idv.value AS year, COUNT(*) AS cnt
+            FROM items i
+            JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+            JOIN itemData id ON i.itemID = id.itemID
+            JOIN itemDataValues idv ON id.valueID = idv.valueID
+            JOIN fields f ON id.fieldID = f.fieldID
+            WHERE i.libraryID = ?
+              AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+              AND it.typeName NOT IN ('note', 'attachment')
+              AND f.fieldName = 'year'
+              AND idv.value != ''
+            GROUP BY idv.value
+            ORDER BY idv.value DESC
+        """, (zotero.library_id,)).fetchall()
+        year_distribution = {r["year"]: r["cnt"] for r in year_rows}
+
+        col_rows = conn.execute("""
+            SELECT c.key, c.collectionName, COUNT(ci.itemID) AS cnt
+            FROM collections c
+            JOIN collectionItems ci ON c.collectionID = ci.collectionID
+            JOIN items i ON ci.itemID = i.itemID
+            JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+            WHERE c.libraryID = ?
+              AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+              AND it.typeName NOT IN ('note', 'attachment')
+            GROUP BY c.collectionID, c.key, c.collectionName
+            ORDER BY cnt DESC
+        """, (zotero.library_id,)).fetchall()
+        col_counts = [{"key": r["key"], "name": r["collectionName"], "count": r["cnt"]} for r in col_rows]
+    finally:
+        conn.close()
 
     # --- top tags (top 20) ---
     tags = zotero.get_all_tags()
     top_tags = [t["name"] for t in tags[:20]]
 
     # --- top collections (top 10 by item count) ---
-    collections = zotero.get_all_collections()
-    collection_counts: dict[str, int] = {}
-    for item in all_items:
-        if item.collections:
-            for col_name in item.collections.split("; "):
-                col_name = col_name.strip()
-                if col_name:
-                    collection_counts[col_name] = collection_counts.get(col_name, 0) + 1
-
-    # Build top_collections list with key lookup
-    name_to_key = {c["name"]: c["key"] for c in collections}
-    top_collections = sorted(
-        [
-            {"name": name, "key": name_to_key.get(name, ""), "count": count}
-            for name, count in collection_counts.items()
-        ],
-        key=lambda x: x["count"],
-        reverse=True,
-    )[:10]
+    top_collections = col_counts[:10]
 
     # --- topic density from vector index ---
     store = _get_store_optional()
@@ -211,7 +233,8 @@ def profile_library() -> dict:
         try:
             doc_count = len(store.get_indexed_doc_ids())
             topic_density = {"indexed": True, "doc_count": doc_count}
-        except Exception:
+        except Exception as e:
+            logger.warning("Could not get index doc count: %s", e)
             topic_density = {"indexed": True, "doc_count": 0}
 
     # --- gaps analysis ---
