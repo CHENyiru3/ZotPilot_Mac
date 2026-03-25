@@ -217,6 +217,24 @@ def profile_library() -> dict:
             ORDER BY cnt DESC
         """, (zotero.library_id,)).fetchall()
         col_counts = [{"key": r["key"], "name": r["collectionName"], "count": r["cnt"]} for r in col_rows]
+
+        journal_rows = conn.execute("""
+            SELECT idv.value AS journal, COUNT(*) AS cnt
+            FROM items i
+            JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+            JOIN itemData id ON i.itemID = id.itemID
+            JOIN itemDataValues idv ON id.valueID = idv.valueID
+            JOIN fields f ON id.fieldID = f.fieldID
+            WHERE i.libraryID = ?
+              AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+              AND it.typeName NOT IN ('note', 'attachment')
+              AND f.fieldName = 'publicationTitle'
+              AND idv.value != ''
+            GROUP BY idv.value
+            ORDER BY cnt DESC
+            LIMIT 20
+        """, (zotero.library_id,)).fetchall()
+        top_journals = [{"name": r["journal"], "count": r["cnt"]} for r in journal_rows]
     finally:
         conn.close()
 
@@ -267,6 +285,7 @@ def profile_library() -> dict:
         "year_distribution": year_distribution,
         "top_tags": top_tags,
         "top_collections": top_collections,
+        "top_journals": top_journals,
         "topic_density": topic_density,
         "gaps": gaps,
         "existing_profile": existing_profile,
