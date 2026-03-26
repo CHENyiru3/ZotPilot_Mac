@@ -8,6 +8,8 @@ from zotpilot.identifier_resolver import PaperMetadata
 from zotpilot.tools.ingestion import (
     add_paper_by_identifier,
     ingest_papers,
+    save_from_url,
+    save_urls,
     search_academic_databases,
 )
 
@@ -48,6 +50,26 @@ def _make_config(api_key=None):
     config = MagicMock()
     config.semantic_scholar_api_key = api_key
     return config
+
+
+def _make_save_urls_success(item_key="NEWKEY1", title="Test Paper"):
+    """Return a save_urls result dict with one successful entry."""
+    return {
+        "total": 1,
+        "succeeded": 1,
+        "failed": 0,
+        "results": [{"success": True, "item_key": item_key, "title": title, "url": "https://example.com"}],
+    }
+
+
+def _make_save_urls_failure(error="connector save failed"):
+    """Return a save_urls result dict with one failed entry."""
+    return {
+        "total": 1,
+        "succeeded": 0,
+        "failed": 1,
+        "results": [{"success": False, "error": error}],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -321,67 +343,63 @@ class TestIngestPapers:
 
     def test_exactly_50_accepted(self):
         papers = [{"doi": f"10.9999/{i}"} for i in range(50)]
-        resolver = _make_resolver()
-        writer = _make_writer()
-        with patch("zotpilot.tools.ingestion._get_resolver", return_value=resolver), \
-             patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
-             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()):
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 5,
+            "accessible": [],
+            "blocked": [],
+            "skipped": [],
+            "errors": [],
+            "all_clear": True,
+        }), patch("zotpilot.tools.ingestion.save_urls", return_value=_make_save_urls_success()):
             result = ingest_papers(papers)
         assert result["total"] == 50
 
-    def test_no_api_key_large_batch_has_warning(self):
-        papers = [{"doi": f"10.9999/{i}"} for i in range(10)]
-        resolver = _make_resolver()
-        writer = _make_writer()
-        with patch("zotpilot.tools.ingestion._get_resolver", return_value=resolver), \
-             patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
-             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(api_key=None)):
-            result = ingest_papers(papers)
-        assert result["warning"] is not None
-        assert "S2_API_KEY" in result["warning"]
-
-    def test_with_api_key_no_warning(self):
-        papers = [{"doi": f"10.9999/{i}"} for i in range(10)]
-        resolver = _make_resolver()
-        writer = _make_writer()
-        with patch("zotpilot.tools.ingestion._get_resolver", return_value=resolver), \
-             patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
-             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(api_key="KEY")):
-            result = ingest_papers(papers)
-        assert result["warning"] is None
-
-    def test_identifier_priority_doi_over_arxiv(self):
-        papers = [{"doi": "10.1038/test", "arxiv_id": "2301.00001", "s2_id": "abc" * 14}]
-        resolver = _make_resolver()
-        writer = _make_writer()
-        with patch("zotpilot.tools.ingestion._get_resolver", return_value=resolver), \
-             patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
-             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()):
-            ingest_papers(papers)
-
-        called_id = resolver.resolve.call_args[0][0]
-        assert called_id == "10.1038/test"
-
-    def test_identifier_priority_arxiv_over_s2(self):
-        papers = [{"arxiv_id": "2301.00001", "s2_id": "a" * 40}]
-        resolver = _make_resolver(_make_metadata(doi=None, arxiv_id="2301.00001"))
-        writer = _make_writer()
-        with patch("zotpilot.tools.ingestion._get_resolver", return_value=resolver), \
-             patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
-             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()):
-            ingest_papers(papers)
-
-        called_id = resolver.resolve.call_args[0][0]
-        assert called_id == "arxiv:2301.00001"
-
     def test_no_identifier_counted_as_failed(self):
         papers = [{"title": "Some paper with no ID"}]
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()):
-            result = ingest_papers(papers)
+        result = ingest_papers(papers)
 
         assert result["failed"] == 1
         assert result["ingested"] == 0
         assert "no usable identifier" in result["results"][0]["error"]
+
+    def test_identifier_priority_arxiv_over_doi(self):
+        """arxiv_id takes priority over doi and landing_page_url."""
+        papers = [{"doi": "10.1038/test", "arxiv_id": "2301.00001", "landing_page_url": "https://pub.example.com/paper"}]
+        save_urls_mock = MagicMock(return_value=_make_save_urls_success())
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 1, "accessible": [{"url": "https://arxiv.org/abs/2301.00001", "title": "", "final_url": ""}],
+            "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion.save_urls", save_urls_mock):
+            ingest_papers(papers)
+
+        called_urls = save_urls_mock.call_args[0][0]
+        assert called_urls == ["https://arxiv.org/abs/2301.00001"]
+
+    def test_identifier_priority_landing_url_over_doi(self):
+        """landing_page_url takes priority over doi when no arxiv_id."""
+        papers = [{"doi": "10.1038/test", "landing_page_url": "https://pub.example.com/paper"}]
+        save_urls_mock = MagicMock(return_value=_make_save_urls_success())
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 1, "accessible": [{"url": "https://pub.example.com/paper", "title": "", "final_url": ""}],
+            "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion.save_urls", save_urls_mock):
+            ingest_papers(papers)
+
+        called_urls = save_urls_mock.call_args[0][0]
+        assert called_urls == ["https://pub.example.com/paper"]
+
+    def test_identifier_doi_fallback(self):
+        """doi used as fallback when no arxiv_id or landing_page_url."""
+        papers = [{"doi": "10.1038/test"}]
+        save_urls_mock = MagicMock(return_value=_make_save_urls_success())
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 1, "accessible": [{"url": "https://doi.org/10.1038/test", "title": "", "final_url": ""}],
+            "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion.save_urls", save_urls_mock):
+            ingest_papers(papers)
+
+        called_urls = save_urls_mock.call_args[0][0]
+        assert called_urls == ["https://doi.org/10.1038/test"]
 
     def test_failure_does_not_abort_batch(self):
         papers = [
@@ -389,70 +407,173 @@ class TestIngestPapers:
             {"doi": "10.1038/bad"},
             {"doi": "10.1038/good2"},
         ]
-        resolver = MagicMock()
-        resolver.resolve.side_effect = [
-            _make_metadata(doi="10.1038/good"),
-            ToolError("DOI not found"),
-            _make_metadata(doi="10.1038/good2"),
-        ]
-        resolver.last_crossref_metadata = None
-        writer = _make_writer()
-
-        with patch("zotpilot.tools.ingestion._get_resolver", return_value=resolver), \
-             patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
-             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()):
+        # New impl calls save_urls once with all URLs in a batch
+        batch_result = {
+            "total": 3, "succeeded": 2, "failed": 1,
+            "results": [
+                {"success": True, "item_key": "KEY1", "title": "Good Paper", "url": "https://doi.org/10.1038/good"},
+                {"success": False, "error": "connector save failed", "url": "https://doi.org/10.1038/bad"},
+                {"success": True, "item_key": "KEY2", "title": "Good Paper 2", "url": "https://doi.org/10.1038/good2"},
+            ],
+        }
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 3, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion.save_urls", return_value=batch_result):
             result = ingest_papers(papers)
 
         assert result["total"] == 3
         assert result["ingested"] == 2
         assert result["failed"] == 1
 
-    def test_skip_duplicates_counted(self):
-        papers = [{"doi": "10.1038/existing"}]
-        resolver = _make_resolver()
-        writer = _make_writer(duplicate_key="EXISTINGKEY")
+    def test_anti_bot_detected_counted_as_failed(self):
+        papers = [{"doi": "10.1038/blocked"}]
+        save_urls_mock = MagicMock(return_value={
+            "total": 1, "succeeded": 0, "failed": 1,
+            "results": [{"success": False, "anti_bot_detected": True, "error": "Anti-bot page detected"}],
+        })
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 1, "accessible": [{"url": "https://doi.org/10.1038/blocked", "title": "", "final_url": ""}],
+            "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion.save_urls", save_urls_mock):
+            result = ingest_papers(papers)
 
-        with patch("zotpilot.tools.ingestion._get_resolver", return_value=resolver), \
-             patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
-             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()):
+        assert result["failed"] == 1
+        assert result["results"][0]["anti_bot_detected"] is True
+
+    def test_translator_fallback_counted_as_failed(self):
+        papers = [{"doi": "10.1038/fallback"}]
+        save_urls_mock = MagicMock(return_value={
+            "total": 1, "succeeded": 0, "failed": 1,
+            "results": [{"success": False, "translator_fallback_detected": True, "error": "Translator fallback"}],
+        })
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 1, "accessible": [{"url": "https://doi.org/10.1038/fallback", "title": "", "final_url": ""}],
+            "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion.save_urls", save_urls_mock):
+            result = ingest_papers(papers)
+
+        assert result["failed"] == 1
+        assert result["results"][0]["translator_fallback_detected"] is True
+
+    def test_skip_duplicates_param_accepted_no_effect(self):
+        """skip_duplicates is accepted but ignored — Zotero handles dedup locally."""
+        papers = [{"doi": "10.1038/existing"}]
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion.save_urls", return_value=_make_save_urls_success()):
             result = ingest_papers(papers, skip_duplicates=True)
 
-        assert result["skipped_duplicates"] == 1
-        assert result["ingested"] == 0
-
-    def test_skip_duplicates_false_counts_as_ingested(self):
-        papers = [{"doi": "10.1038/existing"}]
-        resolver = _make_resolver()
-        writer = _make_writer(duplicate_key="EXISTINGKEY")
-
-        with patch("zotpilot.tools.ingestion._get_resolver", return_value=resolver), \
-             patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
-             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()):
-            result = ingest_papers(papers, skip_duplicates=False)
-
-        # duplicate=True but skip_duplicates=False → counted as ingested
-        assert result["ingested"] == 1
         assert result["skipped_duplicates"] == 0
 
     def test_results_list_has_entry_per_paper(self):
         papers = [{"doi": "10.1038/a"}, {"doi": "10.1038/b"}]
-        resolver = _make_resolver()
-        writer = _make_writer()
-
-        with patch("zotpilot.tools.ingestion._get_resolver", return_value=resolver), \
-             patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
-             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()):
+        batch_result = {
+            "total": 2, "succeeded": 2, "failed": 0,
+            "results": [
+                {"success": True, "item_key": "KEY1", "title": "Paper A", "url": "https://doi.org/10.1038/a"},
+                {"success": True, "item_key": "KEY2", "title": "Paper B", "url": "https://doi.org/10.1038/b"},
+            ],
+        }
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 2, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion.save_urls", return_value=batch_result):
             result = ingest_papers(papers)
 
         assert len(result["results"]) == 2
 
     def test_empty_batch_returns_zeros(self):
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()):
-            result = ingest_papers([])
+        result = ingest_papers([])
 
         assert result["total"] == 0
         assert result["ingested"] == 0
         assert result["failed"] == 0
+
+    def test_preflight_all_clear_proceeds_to_save(self):
+        papers = [{"doi": "10.1038/test"}]
+        preflight_report = {
+            "checked": 1,
+            "accessible": [{"url": "https://doi.org/10.1038/test", "title": "ok", "final_url": "https://doi.org/10.1038/test"}],
+            "blocked": [],
+            "skipped": [],
+            "errors": [],
+            "all_clear": True,
+        }
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value=preflight_report), \
+             patch("zotpilot.tools.ingestion.save_urls", return_value={
+                 "total": 1,
+                 "succeeded": 1,
+                 "failed": 0,
+                 "results": [{
+                     "success": True,
+                     "item_key": "KEY1",
+                     "title": "Test Paper",
+                     "url": "https://doi.org/10.1038/test",
+                 }],
+             }) as save_urls_mock:
+            result = ingest_papers(papers)
+
+        save_urls_mock.assert_called_once()
+        assert result["ingested"] == 1
+        assert result["preflight_report"]["all_clear"] is True
+
+    def test_preflight_blocked_returns_consistent_envelope(self):
+        papers = [{"doi": "10.1038/blocked"}]
+        preflight_report = {
+            "checked": 1,
+            "accessible": [],
+            "blocked": [{"url": "https://doi.org/10.1038/blocked", "title": "Just a moment..."}],
+            "skipped": [],
+            "errors": [],
+            "all_clear": False,
+        }
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value=preflight_report), \
+             patch("zotpilot.tools.ingestion.save_urls") as save_urls_mock:
+            result = ingest_papers(papers)
+
+        save_urls_mock.assert_not_called()
+        assert result["ingested"] == 0
+        assert result["failed"] == 0
+        assert result["results"] == []
+        assert result["preflight_report"]["all_clear"] is False
+        assert "preflight=False" in result["message"]
+
+    def test_preflight_false_skips_preflight(self):
+        papers = [{"doi": "10.1038/test"}]
+        with patch("zotpilot.tools.ingestion._preflight_urls") as preflight_mock, \
+             patch("zotpilot.tools.ingestion.save_urls", return_value={
+                 "total": 1,
+                 "succeeded": 1,
+                 "failed": 0,
+                 "results": [{
+                     "success": True,
+                     "item_key": "KEY1",
+                     "title": "Test Paper",
+                     "url": "https://doi.org/10.1038/test",
+                 }],
+             }) as save_urls_mock:
+            result = ingest_papers(papers, preflight=False)
+
+        preflight_mock.assert_not_called()
+        save_urls_mock.assert_called_once()
+        assert result["preflight_report"] is None
+
+    def test_ingested_key_exists_in_all_paths(self):
+        ok_report = {
+            "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }
+        blocked_report = {
+            "checked": 1, "accessible": [], "blocked": [{"url": "https://doi.org/10.1038/blocked", "title": "blocked"}],
+            "skipped": [], "errors": [], "all_clear": False,
+        }
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value=ok_report), \
+             patch("zotpilot.tools.ingestion.save_urls", return_value=_make_save_urls_success()):
+            success_result = ingest_papers([{"doi": "10.1038/test"}])
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value=blocked_report), \
+             patch("zotpilot.tools.ingestion.save_urls"):
+            blocked_result = ingest_papers([{"doi": "10.1038/blocked"}])
+
+        assert success_result["ingested"] == 1
+        assert blocked_result["ingested"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -636,8 +757,8 @@ class TestEnrichOaUrl:
         assert result == "https://oa.example.com/paper.pdf"
 
     def test_returns_none_on_404(self):
+
         from zotpilot.tools.ingestion import _enrich_oa_url
-        import httpx as _httpx
 
         mock_resp = MagicMock()
         mock_resp.status_code = 404
@@ -647,8 +768,9 @@ class TestEnrichOaUrl:
         assert result is None
 
     def test_returns_none_on_network_error(self):
-        from zotpilot.tools.ingestion import _enrich_oa_url
         import httpx as _httpx
+
+        from zotpilot.tools.ingestion import _enrich_oa_url
 
         with patch("zotpilot.tools.ingestion.httpx.get", side_effect=_httpx.TimeoutException("timeout")):
             result = _enrich_oa_url("10.1234/test")
@@ -674,9 +796,156 @@ class TestEnrichOaUrl:
         resolver = _make_resolver(metadata=metadata)
         writer = _make_writer()
 
+        enrich_rv = "https://enriched.url/paper.pdf"
         with patch("zotpilot.tools.ingestion._get_resolver", return_value=resolver), \
              patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
-             patch("zotpilot.tools.ingestion._enrich_oa_url", return_value="https://enriched.url/paper.pdf") as mock_enrich:
+             patch("zotpilot.tools.ingestion._enrich_oa_url", return_value=enrich_rv) as mock_enrich:
             add_paper_by_identifier("10.1038/test", attach_pdf=True)
 
         mock_enrich.assert_called_once_with("10.1038/test")
+
+
+# ---------------------------------------------------------------------------
+# _apply_bridge_result_routing detection logic
+# ---------------------------------------------------------------------------
+
+class TestBridgeResultDetection:
+    def _route(self, result):
+        from zotpilot.tools.ingestion import _apply_bridge_result_routing
+        config = MagicMock()
+        config.zotero_api_key = None  # no API key → early return, no writer calls
+        with patch("zotpilot.tools.ingestion._get_config", return_value=config):
+            return _apply_bridge_result_routing(result, collection_key=None, tags=None)
+
+    def test_anti_bot_chinese_please_wait(self):
+        """Extension-side anti-bot detection: error_code='anti_bot_detected' propagates through routing."""
+        result = self._route({
+            "success": False,
+            "error_code": "anti_bot_detected",
+            "error_message": "Anti-bot page detected (title: '请稍候…'). Please complete the verification in Chrome, then retry.",
+            "title": "请稍候…",
+            "url": "https://x.com",
+        })
+        # Routing short-circuits on success=False and returns result as-is
+        assert result["success"] is False
+        assert result.get("error_code") == "anti_bot_detected"
+
+    def test_translator_fallback_aip(self):
+        """AIP Publishing suffix triggers translator fallback detection."""
+        result = self._route({"success": True, "title": "Paper Title | AIP Publishing", "url": "https://pubs.aip.org"})
+        assert result["translator_fallback_detected"] is True
+        assert result["success"] is False
+
+
+# ---------------------------------------------------------------------------
+# Parameter coercion (list | str) in MCP tools
+# ---------------------------------------------------------------------------
+
+class TestParameterCoercion:
+    """Tests for Union type parameter coercion (list | str) in MCP tools."""
+
+    def test_ingest_papers_json_string(self):
+        """ingest_papers accepts papers as JSON string."""
+        import json
+        papers_json = json.dumps([{"doi": "10.1038/test"}])
+        save_urls_mock = MagicMock(return_value=_make_save_urls_success())
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion.save_urls", save_urls_mock):
+            result = ingest_papers(papers_json)
+        assert result["total"] == 1
+        assert result["ingested"] == 1
+
+    def test_ingest_papers_native_list(self):
+        """ingest_papers accepts papers as native list."""
+        save_urls_mock = MagicMock(return_value=_make_save_urls_success())
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion.save_urls", save_urls_mock):
+            result = ingest_papers([{"doi": "10.1038/test"}])
+        assert result["total"] == 1
+        assert result["ingested"] == 1
+
+    def test_ingest_papers_invalid_json(self):
+        """ingest_papers raises ToolError on invalid JSON string."""
+        with pytest.raises(ToolError, match="JSON array"):
+            ingest_papers("not valid json")
+
+    def test_save_urls_json_string(self):
+        """save_urls accepts urls as JSON string."""
+        import json
+        urls_json = json.dumps(["https://arxiv.org/abs/2301.00001"])
+        route_rv = {"success": True, "title": "Test"}
+        with patch("zotpilot.tools.ingestion.BridgeServer") as mock_bridge, \
+             patch("urllib.request.urlopen") as mock_urlopen, \
+             patch("urllib.request.Request"):
+            mock_bridge.is_running.return_value = True
+            enqueue_resp = MagicMock()
+            enqueue_resp.read.return_value = json.dumps(
+                {"request_id": "req1"}
+            ).encode()
+            poll_resp = MagicMock()
+            poll_resp.status = 200
+            poll_resp.read.return_value = json.dumps(
+                {"success": True, "title": "Test", "url": "https://x.com"}
+            ).encode()
+            mock_urlopen.side_effect = [enqueue_resp, poll_resp]
+            with patch(
+                "zotpilot.tools.ingestion._apply_bridge_result_routing",
+                return_value=route_rv,
+            ), patch("zotpilot.tools.ingestion.time.sleep"):
+                result = save_urls(urls_json)
+        assert result["total"] == 1
+
+    def test_save_urls_native_list(self):
+        """save_urls accepts urls as native list."""
+        import json
+        route_rv = {"success": True, "title": "Test"}
+        with patch("zotpilot.tools.ingestion.BridgeServer") as mock_bridge, \
+             patch("urllib.request.urlopen") as mock_urlopen, \
+             patch("urllib.request.Request"):
+            mock_bridge.is_running.return_value = True
+            enqueue_resp = MagicMock()
+            enqueue_resp.read.return_value = json.dumps(
+                {"request_id": "req1"}
+            ).encode()
+            poll_resp = MagicMock()
+            poll_resp.status = 200
+            poll_resp.read.return_value = json.dumps(
+                {"success": True, "title": "Test", "url": "https://x.com"}
+            ).encode()
+            mock_urlopen.side_effect = [enqueue_resp, poll_resp]
+            with patch(
+                "zotpilot.tools.ingestion._apply_bridge_result_routing",
+                return_value=route_rv,
+            ), patch("zotpilot.tools.ingestion.time.sleep"):
+                result = save_urls(["https://arxiv.org/abs/2301.00001"])
+        assert result["total"] == 1
+
+    def test_save_from_url_tags_json_string(self):
+        """save_from_url parses tags JSON string into list, not per-char."""
+        import json
+        with patch("zotpilot.tools.ingestion.BridgeServer") as mock_bridge, \
+             patch("urllib.request.urlopen") as mock_urlopen, \
+             patch("urllib.request.Request") as mock_req:
+            mock_bridge.is_running.return_value = True
+            enqueue_resp = MagicMock()
+            enqueue_resp.read.return_value = json.dumps(
+                {"request_id": "req1"}
+            ).encode()
+            poll_resp = MagicMock()
+            poll_resp.status = 200
+            poll_resp.read.return_value = json.dumps(
+                {"success": True, "title": "Test", "url": "https://x.com"}
+            ).encode()
+            mock_urlopen.side_effect = [enqueue_resp, poll_resp]
+            route_rv = {"success": True}
+            with patch(
+                "zotpilot.tools.ingestion._apply_bridge_result_routing",
+                return_value=route_rv,
+            ), patch("zotpilot.tools.ingestion.time.sleep"):
+                save_from_url("https://example.com", tags='["ml","nlp"]')
+            # Extract the enqueue command sent to the bridge
+            call_kwargs = mock_req.call_args
+            data = json.loads(call_kwargs.kwargs.get("data", b"{}"))
+            assert data["tags"] == ["ml", "nlp"]

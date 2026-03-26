@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+from datetime import datetime, timezone
 
 import httpx
 from pyzotero import zotero
@@ -130,18 +131,23 @@ class ZoteroWriter:
     # =========================================================
 
     def find_items_by_url_and_title(
-        self, url: str, title: str, limit: int = 20
+        self, url: str, title: str, limit: int = 20, window_s: int | None = None
     ) -> list[str]:
-        """Find item keys matching BOTH URL and title.
+        """Find item keys matching title (and optionally URL) within a time window.
 
         Used for post-save item discovery when no item key is known.
         Returns list of item keys (usually 0 or 1; >1 is ambiguous, caller
         must not apply routing when ambiguous).
+
+        window_s: if set, only items added within the last window_s seconds are
+        considered. This prevents false positives from older duplicate-title items.
         """
         if not title:
             return []
         try:
-            items = self._zot.items(q=title, qmode="titleCreatorYear", limit=limit)
+            kwargs: dict = {"q": title, "qmode": "titleCreatorYear", "limit": limit,
+                            "sort": "dateAdded", "direction": "desc"}
+            items = self._zot.items(**kwargs)
         except Exception:
             return []
         finally:
@@ -149,12 +155,51 @@ class ZoteroWriter:
             # after a call — clear so search params don't bleed into subsequent
             # item() / update_item() calls on the same singleton instance.
             self._zot.url_params = {}
+        now = datetime.now(timezone.utc)
         results: list[str] = []
         for item in items:
-            item_url = (item.get("data") or {}).get("url", "")
-            if item_url and self._urls_match(url, item_url):
-                results.append(item["data"]["key"])
+            data = item.get("data") or {}
+            # Time-window filter: skip items added before the window
+            if window_s is not None:
+                date_added_str = data.get("dateAdded", "")
+                if date_added_str:
+                    try:
+                        date_added = datetime.fromisoformat(
+                            date_added_str.replace("Z", "+00:00")
+                        )
+                        if (now - date_added).total_seconds() > window_s:
+                            continue
+                    except ValueError:
+                        pass  # unparseable date — don't filter out
+            # URL filter: accept items with no URL (journal articles rarely store it),
+            # only reject items whose URL is present but doesn't match.
+            item_url = data.get("url", "")
+            if not item_url or self._urls_match(url, item_url):
+                results.append(data["key"])
         return results
+
+    def find_items_by_title(
+        self, title: str, limit: int = 10, sort_by: str | None = None
+    ) -> list[str]:
+        """Find item keys matching title.
+
+        Used as a fallback when URL-normalized match fails. When sort_by is
+        "dateAdded", results are sorted descending (most recent first) to prefer
+        newly saved items.
+        """
+        if not title:
+            return []
+        try:
+            kwargs = {"q": title, "qmode": "titleCreatorYear", "limit": limit}
+            if sort_by == "dateAdded":
+                kwargs["sort"] = "dateAdded"
+                kwargs["direction"] = "desc"
+            items = self._zot.items(**kwargs)
+        except Exception:
+            return []
+        finally:
+            self._zot.url_params = {}
+        return [item["data"]["key"] for item in items]
 
     @staticmethod
     def _urls_match(a: str, b: str) -> bool:
@@ -291,6 +336,38 @@ class ZoteroWriter:
         except Exception as e:
             logger.debug(f"Unpaywall lookup failed for {doi}: {e}")
             return None
+
+    def get_item_type(self, item_key: str) -> str | None:
+        """Return the Zotero itemType string for an item (e.g. 'journalArticle', 'webpage').
+        Returns None if item not found or API call fails."""
+        try:
+            item = self._zot.item(item_key)
+            return (item.get("data") or {}).get("itemType")
+        except Exception as e:
+            logger.warning("get_item_type(%s) failed: %s", item_key, e)
+            return None
+
+    def delete_item(self, item_key: str) -> bool:
+        """Move an item to Zotero trash. Returns True on success."""
+        try:
+            item = self._zot.item(item_key)
+            self._zot.delete_item(item)
+            return True
+        except Exception as e:
+            logger.warning("delete_item(%s) failed: %s", item_key, e)
+            return False
+
+    def check_has_pdf(self, item_key: str) -> bool:
+        """Return True if the item has at least one PDF attachment in Zotero."""
+        try:
+            children = self._zot.children(item_key)
+            return any(
+                (c.get("data") or {}).get("contentType") == "application/pdf"
+                for c in children
+            )
+        except Exception as e:
+            logger.debug("check_has_pdf(%s) failed: %s", item_key, e)
+            return False
 
     def _download_and_attach_pdf(self, item_key: str, url: str) -> bool:
         """Download PDF from URL and attach to Zotero item. Returns True on success."""

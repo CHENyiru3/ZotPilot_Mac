@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 
 import httpx
 from fastmcp.exceptions import ToolError
@@ -15,13 +16,48 @@ from ..state import _get_config, _get_resolver, _get_writer, mcp
 
 logger = logging.getLogger(__name__)
 
-# How long to wait after the extension reports save completion before querying Zotero.
-# Gives Zotero desktop time to sync the new item to the web API.
-_ITEM_DISCOVERY_DELAY_S = 3.0
+# Exponential backoff delays (seconds) for item discovery after bridge save.
+_DISCOVERY_BACKOFF_DELAYS = [2.0, 4.0, 8.0]
 
 # Window for item discovery: only consider items modified within this many seconds
 # before the save completion timestamp.
 _ITEM_DISCOVERY_WINDOW_S = 60
+
+# Anti-bot page title patterns (case-insensitive substring match).
+_ANTI_BOT_TITLE_PATTERNS = [
+    "just a moment",
+    "请稍候",
+    "请稍等",
+    "verify you are human",
+    "access denied",
+    "please verify",
+    "robot check",
+    "cloudflare",
+    "security check",
+    "captcha",
+    "checking your browser",
+    "one more step",
+]
+
+# Publisher suffixes that indicate Zotero translator fallback to webpage save.
+_TRANSLATOR_FALLBACK_SUFFIXES = [
+    " | cambridge core",
+    " | springerlink",
+    " | sciencedirect",
+    " | wiley online library",
+    " | taylor & francis",
+    " | oxford academic",
+    " | jstor",
+    " | aip publishing",
+    " | acs publications",
+    " | ieee xplore",
+    " | sage journals",
+    " | mdpi",
+    " | frontiers",
+    " | pnas",
+    " | nature",
+    " | annual reviews",
+]
 
 
 def _apply_collection_tag_routing(
@@ -52,18 +88,204 @@ def _apply_collection_tag_routing(
         return f"collection_key/tags partially applied — {e}"
 
 
+def _extract_publisher_domain(url: str) -> str:
+    """Normalize a URL to a publisher-ish domain for preflight sampling."""
+    hostname = (urlparse(url).hostname or "").lower()
+    if hostname.startswith("www."):
+        hostname = hostname[4:]
+    return hostname or url
+
+
+def _sample_preflight_urls(urls: list[str], sample_size: int) -> tuple[list[str], list[str]]:
+    """Pick up to sample_size URLs, favoring publisher diversity first."""
+    if len(urls) <= sample_size:
+        return list(urls), []
+
+    grouped: dict[str, list[str]] = {}
+    for url in urls:
+        grouped.setdefault(_extract_publisher_domain(url), []).append(url)
+
+    sample: list[str] = []
+    selected: set[str] = set()
+    groups = sorted(grouped.items(), key=lambda item: (-len(item[1]), item[0]))
+
+    for _, group_urls in groups:
+        if len(sample) >= sample_size:
+            break
+        url = group_urls[0]
+        sample.append(url)
+        selected.add(url)
+
+    if len(sample) < sample_size:
+        max_group_size = max(len(group_urls) for _, group_urls in groups)
+        for index in range(1, max_group_size):
+            for _, group_urls in groups:
+                if len(sample) >= sample_size:
+                    break
+                if index < len(group_urls):
+                    url = group_urls[index]
+                    if url not in selected:
+                        sample.append(url)
+                        selected.add(url)
+
+    skipped = [url for url in urls if url not in selected]
+    return sample, skipped
+
+
+def _preflight_urls(urls: list[str], sample_size: int = 5) -> dict:
+    """Probe URL accessibility via connector tabs before attempting saves."""
+    import json
+    import urllib.request
+
+    if not urls:
+        return {
+            "checked": 0,
+            "accessible": [],
+            "blocked": [],
+            "skipped": [],
+            "errors": [],
+            "all_clear": True,
+        }
+
+    sample, skipped_urls = _sample_preflight_urls(urls, sample_size)
+    if skipped_urls:
+        logger.info(
+            "Preflight sampling: checking %s of %s URLs (%s unique publishers)",
+            len(sample),
+            len(urls),
+            len({_extract_publisher_domain(url) for url in urls}),
+        )
+
+    report = {
+        "checked": len(sample),
+        "accessible": [],
+        "blocked": [],
+        "skipped": [{"url": url, "reason": "sampling"} for url in skipped_urls],
+        "errors": [],
+        "all_clear": True,
+    }
+
+    bridge_url = f"http://127.0.0.1:{DEFAULT_PORT}"
+    if not BridgeServer.is_running(DEFAULT_PORT):
+        try:
+            BridgeServer.auto_start(DEFAULT_PORT)
+        except RuntimeError as e:
+            report["errors"] = [{"url": url, "error": str(e)} for url in sample]
+            report["all_clear"] = False
+            return report
+
+    id_to_url: dict[str, str] = {}
+    for url in sample:
+        command = {"action": "preflight", "url": url}
+        try:
+            req = urllib.request.Request(
+                f"{bridge_url}/enqueue",
+                data=json.dumps(command).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            resp = urllib.request.urlopen(req, timeout=5)
+            body = json.loads(resp.read())
+            if "error_code" in body:
+                report["errors"].append({
+                    "url": url,
+                    "error": body.get("error_message") or body["error_code"],
+                    "error_code": body["error_code"],
+                })
+            else:
+                id_to_url[body["request_id"]] = url
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = json.loads(e.read())
+                report["errors"].append({
+                    "url": url,
+                    "error": err_body.get("error_message") or f"HTTP {e.code}",
+                    "error_code": err_body.get("error_code"),
+                })
+            except Exception:
+                report["errors"].append({"url": url, "error": f"HTTP {e.code}"})
+        except Exception as e:
+            report["errors"].append({"url": url, "error": str(e)})
+
+    _PER_URL_TIMEOUT = 30.0
+    _OVERALL_TIMEOUT = 120.0
+
+    polled: dict[str, dict] = {}
+    polled_lock = threading.Lock()
+
+    def _poll_one(request_id: str, url: str) -> None:
+        deadline = time.monotonic() + _PER_URL_TIMEOUT
+        while time.monotonic() < deadline:
+            time.sleep(2)
+            try:
+                resp = urllib.request.urlopen(f"{bridge_url}/result/{request_id}", timeout=5)
+                if resp.status != 200:
+                    continue
+                result = json.loads(resp.read())
+                with polled_lock:
+                    polled[request_id] = result
+                return
+            except Exception as e:
+                logger.debug("Preflight poll %s: %s", request_id, e)
+        with polled_lock:
+            polled[request_id] = {"status": "error", "url": url, "error": "Timeout (30s) — extension did not respond."}
+
+    threads = [
+        threading.Thread(target=_poll_one, args=(request_id, url), daemon=True)
+        for request_id, url in id_to_url.items()
+    ]
+    for thread in threads:
+        thread.start()
+
+    overall_deadline = time.monotonic() + _OVERALL_TIMEOUT
+    for thread in threads:
+        remaining = overall_deadline - time.monotonic()
+        if remaining > 0:
+            thread.join(timeout=remaining)
+
+    for request_id, url in id_to_url.items():
+        result = polled.get(request_id, {
+            "status": "error",
+            "url": url,
+            "error": "Timeout (120s) — preflight did not complete.",
+        })
+        status = result.get("status")
+        if status == "accessible":
+            report["accessible"].append({
+                "url": url,
+                "title": result.get("title", ""),
+                "final_url": result.get("final_url", url),
+            })
+        elif status == "anti_bot_detected":
+            report["blocked"].append({
+                "url": url,
+                "title": result.get("title", ""),
+                "final_url": result.get("final_url", url),
+            })
+        else:
+            error_entry = {"url": url, "error": result.get("error") or result.get("error_message") or "unknown preflight error"}
+            if result.get("title"):
+                error_entry["title"] = result["title"]
+            report["errors"].append(error_entry)
+
+    report["all_clear"] = not report["blocked"] and not report["errors"]
+    return report
+
+
 def _discover_saved_item_key(
     title: str,
     url: str,
     known_key: str | None,
     writer,
+    window_s: int = _ITEM_DISCOVERY_WINDOW_S,
 ) -> str | None:
     """Best-effort item key discovery.
 
     Strategy:
     - If known_key is available (saveAsWebpage path, ~5% of saves), use it directly.
-    - Otherwise: query Zotero for items added in the last 60s matching BOTH title
-      AND URL. Require both to minimize false positives.
+    - Otherwise: query Zotero for items added within window_s seconds matching
+      title. Items with a URL field are additionally filtered by URL match;
+      items with no URL field (most journal articles) are accepted as-is.
     - If exactly one match: use it.
     - If zero or multiple matches: return None (caller returns warning).
 
@@ -77,18 +299,20 @@ def _discover_saved_item_key(
         return None
 
     try:
-        items = writer.find_items_by_url_and_title(url, title)
+        items = writer.find_items_by_url_and_title(url, title, window_s=window_s)
     except Exception as e:
         logger.warning(f"Item discovery query failed: {e}")
         return None
 
     if len(items) == 1:
         return items[0]
-    # 0 or 2+ matches: ambiguous, do not apply routing
+    # Still no results or no title: give up
     return None
 
 
-@mcp.tool()
+# RETIRED as MCP tool (v0.4.1): Connector path (save_urls) provides better PDF acquisition
+# via the browser + Zotero translator. Kept as internal helper for potential future use.
+# To restore as MCP tool, re-add @mcp.tool() decorator.
 def add_paper_by_identifier(
     identifier: Annotated[str, Field(description=(
         "Paper identifier: DOI (e.g. 10.1038/s41586-024...), "
@@ -249,6 +473,7 @@ def _search_openalex(
         # Landing page
         primary = p.get("primary_location") or {}
         landing_page_url = primary.get("landing_page_url")
+        source = primary.get("source") or {}
 
         results.append({
             "title": p.get("display_name"),
@@ -262,6 +487,8 @@ def _search_openalex(
             "is_oa": is_oa,
             "oa_url": oa_url,
             "landing_page_url": landing_page_url,
+            "journal": source.get("display_name"),
+            "publisher": source.get("host_organization_name"),
             "_source": "openalex",
         })
     return results
@@ -420,81 +647,183 @@ def search_academic_databases(
 
 @mcp.tool()
 def ingest_papers(
-    papers: Annotated[list[dict], Field(description=(
-        "List of paper dicts, each with at least one of: doi, arxiv_id, s2_id. "
-        "Typically from search_academic_databases results. Max 50 per call."
+    papers: Annotated[list[dict] | str, Field(description=(
+        "JSON array of paper dicts, each with at least one of: doi, arxiv_id, landing_page_url. "
+        "Typically from search_academic_databases results. Max 50 per call. "
+        "Example: [{\"doi\": \"10.1038/s41586-024-00001-0\", \"landing_page_url\": \"https://doi.org/10.1038/s41586-024-00001-0\"}]"
     ))],
-    collection_key: Annotated[str | None, Field(description="Zotero collection key for all ingested papers")] = None,
-    tags: Annotated[list[str] | None, Field(description="Tags to apply to all ingested papers")] = None,
-    skip_duplicates: Annotated[bool, Field(description="Skip papers already in the library")] = True,
+    collection_key: Annotated[str | None, Field(description=(
+        "Zotero collection key for all ingested papers. Defaults to INBOX."
+    ))] = None,
+    tags: Annotated[list[str] | str | None, Field(description=(
+        'JSON array of tags to apply to all ingested papers, e.g. ["tag1","tag2"]'
+    ))] = None,
+    preflight: Annotated[bool, Field(description=(
+        "Run accessibility preflight before saving. When blocked URLs are found, "
+        "return a preflight report instead of saving. Default: True."
+    ))] = True,
+    skip_duplicates: Annotated[bool, Field(description=(
+        "Ignored when using Connector path — Zotero handles deduplication locally"
+    ))] = True,
 ) -> dict:
-    """Batch add papers to Zotero from search results.
-    Each paper is processed independently — failures don't abort the batch."""
+    """Batch add papers to Zotero via ZotPilot Connector (browser-based save).
+    Each paper is routed to save_urls by priority: arxiv_id > landing_page_url > doi.
+    Papers without any usable identifier are skipped.
+    Without collection_key, papers go to the INBOX collection (auto-created if absent)."""
+    import json as _json
+    if isinstance(papers, str):
+        try:
+            papers = _json.loads(papers)
+        except Exception:
+            raise ToolError("papers must be a JSON array of paper dicts")
+    if isinstance(tags, str):
+        try:
+            tags = _json.loads(tags) if tags else None
+        except Exception:
+            tags = None
     if len(papers) > 50:
         raise ToolError(
             f"Batch size {len(papers)} exceeds maximum of 50. Split into smaller batches."
         )
 
-    config = _get_config()
-    warning = None
-    if not config.semantic_scholar_api_key and len(papers) > 5:
-        warning = (
-            f"Processing {len(papers)} papers — this may take a moment. "
-            "Set S2_API_KEY environment variable for Semantic Scholar enrichment."
-        )
-
+    # Build URL list and identifier map in one pass; collect no-identifier failures eagerly
     results = []
-    ingested = skipped = failed = 0
+    ingested = failed = 0
+    url_to_identifier: dict[str, str] = {}  # url → human-readable identifier for result mapping
+    urls_to_save: list[str] = []
 
     for paper in papers:
-        doi = paper.get("doi")
         arxiv_id = paper.get("arxiv_id")
-        s2_id = paper.get("s2_id")
+        doi = paper.get("doi")
+        landing_url = paper.get("landing_page_url")
 
-        if doi:
-            identifier = doi
-        elif arxiv_id:
-            identifier = f"arxiv:{arxiv_id}"
-        elif s2_id:
-            identifier = s2_id
+        # Priority routing: arxiv_id > landing_page_url > doi
+        if arxiv_id:
+            url = f"https://arxiv.org/abs/{arxiv_id}"
+        elif landing_url:
+            url = landing_url
+        elif doi:
+            url = f"https://doi.org/{doi}"
         else:
-            results.append({"status": "failed", "error": "no usable identifier in paper dict"})
+            results.append({"status": "failed", "error": "no usable identifier"})
             failed += 1
             continue
 
-        try:
-            r = add_paper_by_identifier(identifier, collection_key, tags, attach_pdf=True)
-            if r.get("duplicate") and skip_duplicates:
-                skipped += 1
-                results.append({
-                    "identifier": identifier,
-                    "status": "duplicate",
-                    "existing_key": r.get("existing_key"),
-                    "title": r.get("title"),
-                })
-            else:
+        identifier = arxiv_id or doi or url
+        url_to_identifier[url] = identifier
+        urls_to_save.append(url)
+
+    preflight_report = None
+    if preflight and urls_to_save:
+        preflight_report = _preflight_urls(urls_to_save)
+        if not preflight_report["all_clear"]:
+            blocked = len(preflight_report["blocked"])
+            errors = len(preflight_report["errors"])
+            checked = preflight_report["checked"]
+            issue_count = blocked + errors
+            issue_label = "blocked by anti-bot/access restrictions" if blocked and not errors else "blocked or errored during preflight"
+            return {
+                "total": len(papers),
+                "ingested": 0,
+                "skipped_duplicates": 0,
+                "failed": failed,
+                "results": results,
+                "preflight_report": preflight_report,
+                "message": (
+                    f"{checked - issue_count} of {checked} URLs checked are accessible. "
+                    f"{issue_count} URLs were {issue_label}. "
+                    "Call ingest_papers again with preflight=False to proceed with accessible URLs only, "
+                    "or resolve access issues first."
+                ),
+            }
+
+    # Batch call: save_urls enqueues all URLs concurrently, avoiding the heartbeat
+    # timeout that occurs when serial single-URL calls block the extension for >30s.
+    # save_urls caps at 10 URLs per call — chunk and merge when needed.
+    _CHUNK_SIZE = 10
+    if urls_to_save:
+        merged_results: list[dict] = []
+        for i in range(0, len(urls_to_save), _CHUNK_SIZE):
+            chunk = urls_to_save[i:i + _CHUNK_SIZE]
+            chunk_result = save_urls(chunk, collection_key=collection_key, tags=tags)
+            merged_results.extend(chunk_result.get("results") or [])
+        batch_result = {"results": merged_results}
+        for sub in batch_result.get("results") or []:
+            url = sub.get("url", "")
+            identifier = url_to_identifier.get(url, url)
+            if sub.get("success"):
                 ingested += 1
-                results.append({
+                item_key = sub.get("item_key")
+                # Verify actual PDF status via Zotero Web API — do not trust extension's
+                # pdf_failed flag alone. Zotero-side robot verification (e.g. Elsevier)
+                # completes after extension already reported success, so pdf_failed may be
+                # False even though no PDF was attached.
+                actual_has_pdf = False
+                if item_key:
+                    try:
+                        writer = _get_writer()
+                        actual_has_pdf = writer.check_has_pdf(item_key)
+                    except Exception:
+                        pass
+                pdf_status = "attached" if actual_has_pdf else "none"
+                entry: dict = {
                     "identifier": identifier,
                     "status": "ingested",
-                    "item_key": r.get("item_key"),
-                    "title": r.get("title"),
-                    "pdf": r.get("pdf"),
+                    "item_key": item_key,
+                    "title": sub.get("title"),
+                    "pdf": pdf_status,
+                    "url": url,
+                }
+                if not actual_has_pdf:
+                    entry["warning"] = (
+                        "PDF not attached. If Zotero showed a robot verification, "
+                        "please complete it in Zotero and the PDF will download automatically. "
+                        "Otherwise download the PDF manually and attach it in Zotero."
+                    )
+                results.append(entry)
+            elif sub.get("anti_bot_detected"):
+                failed += 1
+                results.append({
+                    "identifier": identifier,
+                    "status": "failed",
+                    "anti_bot_detected": True,
+                    "error": sub.get("error"),
+                    "url": url,
                 })
-        except ToolError as e:
-            failed += 1
-            results.append({"identifier": identifier, "status": "failed", "error": str(e)})
-        except Exception as e:
-            failed += 1
-            results.append({"identifier": identifier, "status": "failed", "error": str(e)})
+            elif sub.get("status") == "pending":
+                # Batch was short-circuited by anti-bot on another URL; these
+                # should be retried once the user completes Chrome verification.
+                failed += 1
+                results.append({
+                    "identifier": identifier,
+                    "status": "pending",
+                    "error": sub.get("error"),
+                    "url": url,
+                })
+            elif sub.get("translator_fallback_detected") or sub.get("error_code") == "no_translator":
+                failed += 1
+                results.append({
+                    "identifier": identifier,
+                    "status": "failed",
+                    "translator_fallback_detected": True,
+                    "error": sub.get("error") or sub.get("error_message") or "No Zotero translator found. Retry after the page fully loads, or open manually in Chrome.",
+                    "url": url,
+                })
+            else:
+                failed += 1
+                error = sub.get("error") or sub.get("error_message") or "connector save failed"
+                entry: dict = {"identifier": identifier, "status": "failed", "error": error, "url": url}
+                if sub.get("error_code"):
+                    entry["error_code"] = sub["error_code"]
+                results.append(entry)
 
     return {
         "total": len(papers),
         "ingested": ingested,
-        "skipped_duplicates": skipped,
+        "skipped_duplicates": 0,
         "failed": failed,
-        "warning": warning,
         "results": results,
+        "preflight_report": preflight_report,
     }
 
 
@@ -502,7 +831,7 @@ def ingest_papers(
 def save_from_url(
     url: str,
     collection_key: str | None = None,
-    tags: list[str] | None = None,
+    tags: Annotated[list[str] | str | None, Field(description="Tags to apply, as a list or JSON array string")] = None,
 ) -> dict:
     """Save a paper from any publisher URL to Zotero via ZotPilot Connector.
 
@@ -520,6 +849,13 @@ def save_from_url(
     """
     import json
     import urllib.request
+
+    # Coerce tags from JSON string if needed (Claude Code MCP client quirk)
+    if isinstance(tags, str):
+        try:
+            tags = json.loads(tags) if tags else None
+        except Exception:
+            tags = None
 
     bridge_url = f"http://127.0.0.1:{DEFAULT_PORT}"
 
@@ -592,9 +928,9 @@ def save_from_url(
 
 @mcp.tool()
 def save_urls(
-    urls: Annotated[list[str], Field(description="URLs to save. Max 10 per call.")],
+    urls: Annotated[list[str] | str, Field(description="URLs to save. Max 10 per call.")],
     collection_key: Annotated[str | None, Field(description="Zotero collection key for all saved items")] = None,
-    tags: Annotated[list[str] | None, Field(description="Tags to apply to all saved items")] = None,
+    tags: Annotated[list[str] | str | None, Field(description="Tags to apply to all saved items")] = None,
 ) -> dict:
     """Batch save multiple URLs to Zotero via ZotPilot Connector.
 
@@ -607,6 +943,17 @@ def save_urls(
     """
     import json
     import urllib.request
+
+    if isinstance(urls, str):
+        try:
+            urls = json.loads(urls)
+        except Exception:
+            raise ToolError("urls must be a JSON array of strings")
+    if isinstance(tags, str):
+        try:
+            tags = json.loads(tags) if tags else None
+        except Exception:
+            tags = None
 
     if not urls:
         raise ToolError("urls list cannot be empty.")
@@ -649,17 +996,33 @@ def save_urls(
         except Exception as e:
             enqueue_errors.append({"url": url, "success": False, "error": str(e)})
 
-    # Poll all request_ids concurrently using threads
+    # Poll all request_ids concurrently using threads.
     # Per-URL: 90s timeout. Overall hard cap: 300s.
+    # Anti-bot short-circuit: the moment any URL hits an anti-bot page, a
+    # cancel_event is set so all other threads stop immediately. The caller
+    # receives successes so far + the blocking URL flagged as anti_bot_detected,
+    # and remaining URLs as "pending" — ready for retry once the user clears the
+    # verification in Chrome.
     _PER_URL_TIMEOUT = 90.0
     _OVERALL_TIMEOUT = 300.0
 
     polled: dict[str, dict] = {}
     polled_lock = threading.Lock()
+    cancel_event = threading.Event()
 
     def _poll_one(request_id: str, url: str) -> None:
         deadline = time.monotonic() + _PER_URL_TIMEOUT
         while time.monotonic() < deadline:
+            if cancel_event.is_set():
+                # Another URL hit anti-bot; mark this one as pending for retry.
+                with polled_lock:
+                    polled[request_id] = {
+                        "url": url,
+                        "success": False,
+                        "status": "pending",
+                        "error": "Skipped — another URL triggered anti-bot verification. Retry after completing the Chrome verification.",
+                    }
+                return
             time.sleep(2)
             try:
                 resp = urllib.request.urlopen(
@@ -667,6 +1030,26 @@ def save_urls(
                 )
                 if resp.status == 200:
                     result = json.loads(resp.read())
+                    # Anti-bot detected by extension before saving (error_code set,
+                    # no junk item created). Signal other threads to stop immediately.
+                    if result.get("error_code") == "anti_bot_detected":
+                        cancel_event.set()
+                        logger.warning(
+                            "Anti-bot page detected for %s (title: '%s'). "
+                            "Please complete the verification in Chrome, then retry.",
+                            url, result.get("title"),
+                        )
+                        with polled_lock:
+                            polled[request_id] = {
+                                "url": url,
+                                "success": False,
+                                "anti_bot_detected": True,
+                                "error": result.get("error_message") or (
+                                    f"Anti-bot page detected (title: '{result.get('title')}'). "
+                                    "Please complete the verification in Chrome, then retry."
+                                ),
+                            }
+                        return
                     final = _apply_bridge_result_routing(result, collection_key, tags)
                     with polled_lock:
                         polled[request_id] = {**final, "url": url}
@@ -730,7 +1113,22 @@ def _apply_bridge_result_routing(
         # Save failed — propagate error, no routing possible
         return result
 
+    # Translator fallback detection: publisher suffix in title means webpage saved instead of paper.
+    title = (result.get("title") or "").lower()
+    if any(title.endswith(suffix) for suffix in _TRANSLATOR_FALLBACK_SUFFIXES):
+        return {
+            **result,
+            "success": False,
+            "translator_fallback_detected": True,
+            "error": (
+                f"Translator fallback detected (title: '{result.get('title')}'). "
+                "Zotero captured the webpage instead of the paper. "
+                "Retry with a different URL, or manually add the paper in Zotero."
+            ),
+        }
+
     config = _get_config()
+
     if not config.zotero_api_key:
         # No Web API key — cannot discover item_key or apply routing
         if collection_key or tags:
@@ -742,24 +1140,60 @@ def _apply_bridge_result_routing(
 
     writer = _get_writer()
 
-    # Give Zotero desktop a moment to sync the new item to the web API.
-    # Skip the wait when the connector already provided item_key (saveAsWebpage path, ~5%):
-    # the known_key fast-path in _discover_saved_item_key returns immediately without an API call.
+    # Discover item_key with exponential backoff (fast path: connector already provided key).
     if not result.get("item_key"):
-        time.sleep(_ITEM_DISCOVERY_DELAY_S)
-
-    # Always attempt item_key discovery — needed for subsequent pipeline steps
-    # (index_library, create_note, add_to_collection) even when no routing requested.
-    item_key = _discover_saved_item_key(
-        title=result.get("title", ""),
-        url=result.get("url", ""),
-        known_key=result.get("item_key"),
-        writer=writer,
-    )
+        item_key = None
+        for delay in _DISCOVERY_BACKOFF_DELAYS:
+            time.sleep(delay)
+            item_key = _discover_saved_item_key(
+                title=result.get("title", ""),
+                url=result.get("url", ""),
+                known_key=None,
+                writer=writer,
+                window_s=_ITEM_DISCOVERY_WINDOW_S,
+            )
+            if item_key:
+                break
+    else:
+        item_key = _discover_saved_item_key(
+            title=result.get("title", ""),
+            url=result.get("url", ""),
+            known_key=result.get("item_key"),
+            writer=writer,
+            window_s=_ITEM_DISCOVERY_WINDOW_S,
+        )
 
     out = {**result}
     if item_key:
         out["item_key"] = item_key  # surface to caller regardless of routing
+
+    # Closed-loop verification: check actual itemType saved in Zotero.
+    # If Zotero saved a "webpage" instead of a journal article, the translator
+    # failed silently — delete the junk item and report the failure.
+    _ACADEMIC_ITEM_TYPES = {
+        "journalArticle", "conferencePaper", "preprint", "thesis",
+        "book", "bookSection", "report", "magazineArticle", "newspaperArticle",
+    }
+    if item_key:
+        saved_type = writer.get_item_type(item_key)
+        if saved_type and saved_type not in _ACADEMIC_ITEM_TYPES:
+            logger.warning(
+                "Translator fallback confirmed via Zotero: item %s saved as '%s' (expected academic type). "
+                "Deleting junk item.",
+                item_key, saved_type,
+            )
+            writer.delete_item(item_key)
+            return {
+                **result,
+                "success": False,
+                "translator_fallback_detected": True,
+                "saved_item_type": saved_type,
+                "error": (
+                    f"Zotero saved this as '{saved_type}' instead of a journal article — "
+                    "translator did not recognise the page. The item has been deleted. "
+                    "Retry with a different URL, or manually add the paper in Zotero."
+                ),
+            }
 
     needs_routing = bool(collection_key) or bool(tags)
     if not needs_routing:

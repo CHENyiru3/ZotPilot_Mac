@@ -16,6 +16,8 @@ from fastmcp.exceptions import ToolError
 from zotpilot.tools.ingestion import (
     _apply_bridge_result_routing,
     _discover_saved_item_key,
+    _preflight_urls,
+    ingest_papers,
     save_from_url,
     save_urls,
 )
@@ -29,6 +31,9 @@ def _make_writer():
     writer.find_items_by_url_and_title.return_value = []
     writer.add_to_collection.return_value = None
     writer.add_item_tags.return_value = None
+    writer.get_item_type.return_value = "journalArticle"
+    writer.delete_item.return_value = True
+    writer.check_has_pdf.return_value = True  # default: PDF attached
     return writer
 
 
@@ -121,6 +126,22 @@ class TestDiscoverSavedItemKey:
         )
         assert result is None
 
+    def test_window_s_passed_to_writer(self):
+        """window_s is forwarded to find_items_by_url_and_title."""
+        writer = _make_writer()
+        writer.find_items_by_url_and_title.return_value = ["KEY1"]
+        result = _discover_saved_item_key(
+            title="Test Paper",
+            url="https://example.com",
+            known_key=None,
+            writer=writer,
+            window_s=120,
+        )
+        assert result == "KEY1"
+        writer.find_items_by_url_and_title.assert_called_once_with(
+            "https://example.com", "Test Paper", window_s=120
+        )
+
     def test_exception_returns_none_logged(self):
         writer = _make_writer()
         writer.find_items_by_url_and_title.side_effect = Exception("API error")
@@ -177,6 +198,7 @@ class TestApplyBridgeResultRouting:
         }
         writer = _make_writer()
         writer.find_items_by_url_and_title.return_value = []
+        writer.find_items_by_title.return_value = []
         config = _make_config(api_key="KEY")
         with patch("zotpilot.tools.ingestion._get_config", return_value=config), \
              patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
@@ -193,9 +215,10 @@ class TestApplyBridgeResultRouting:
             "title": "Common Title",
         }
         writer = _make_writer()
-        # First call (in _discover_saved_item_key) returns 2 items → None
+        # First call (in _discover_saved_item_key) returns 2 items → title fallback finds 0 → None
         # Second call (in _apply_bridge_result_routing for count) also returns 2 items
         writer.find_items_by_url_and_title.return_value = ["KEY1", "KEY2"]
+        writer.find_items_by_title.return_value = []
         config = _make_config(api_key="KEY")
         with patch("zotpilot.tools.ingestion._get_config", return_value=config), \
              patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
@@ -242,6 +265,49 @@ class TestApplyBridgeResultRouting:
              patch("zotpilot.tools.ingestion.time.sleep") as mock_sleep:
             _apply_bridge_result_routing(result, None, None)
         mock_sleep.assert_not_called()
+
+    def test_webpage_item_deleted_and_reported_as_fallback(self):
+        """Closed-loop: if Zotero saved item as 'webpage', delete it and return failure."""
+        result = {
+            "success": True,
+            "url": "https://pubs.aip.org/aip/pof/article/36/1/015120",
+            "title": "Physics of Fluids",
+            "item_key": "JUNK1",
+        }
+        writer = _make_writer()
+        writer.find_items_by_url_and_title.return_value = ["JUNK1"]
+        writer.get_item_type.return_value = "webpage"
+        config = _make_config(api_key="KEY")
+        with patch("zotpilot.tools.ingestion._get_config", return_value=config), \
+             patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion.time.sleep"):
+            out = _apply_bridge_result_routing(result, "COL1", ["tag1"])
+        assert out["success"] is False
+        assert out["translator_fallback_detected"] is True
+        assert out["saved_item_type"] == "webpage"
+        writer.delete_item.assert_called_once_with("JUNK1")
+        writer.add_to_collection.assert_not_called()
+
+    def test_journal_article_type_passes_verification(self):
+        """Closed-loop: journalArticle type passes verification, routing applied normally."""
+        result = {
+            "success": True,
+            "url": "https://pubs.acs.org/doi/10.1021/example",
+            "title": "Drag Reduction Study",
+            "item_key": "GOOD1",
+        }
+        writer = _make_writer()
+        writer.find_items_by_url_and_title.return_value = ["GOOD1"]
+        writer.get_item_type.return_value = "journalArticle"
+        config = _make_config(api_key="KEY")
+        with patch("zotpilot.tools.ingestion._get_config", return_value=config), \
+             patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion.time.sleep"):
+            out = _apply_bridge_result_routing(result, "COL1", ["tag1"])
+        assert out["success"] is True
+        assert "translator_fallback_detected" not in out
+        writer.delete_item.assert_not_called()
+        writer.add_to_collection.assert_called_once_with("GOOD1", "COL1")
 
 
 # ---------------------------------------------------------------------------
@@ -551,3 +617,239 @@ class TestSaveUrls:
         assert result["failed"] == 1
         assert result["results"][0]["url"] == "https://example.com/only"
         assert result["results"][0]["error_code"] == "extension_not_connected"
+
+
+class TestPreflightUrls:
+    def test_all_urls_accessible(self):
+        urls = ["https://arxiv.org/abs/1", "https://doi.org/10.1/test"]
+        enqueue_counter = [0]
+
+        def fake_urlopen(req_or_url, timeout=None):
+            url_str = req_or_url.full_url if hasattr(req_or_url, "full_url") else str(req_or_url)
+            if "/enqueue" in url_str:
+                body = json.loads(req_or_url.data.decode())
+                assert body["action"] == "preflight"
+                enqueue_counter[0] += 1
+                return _make_urlopen_response({"request_id": f"req-{enqueue_counter[0]}"})
+            if "req-1" in url_str:
+                return _make_urlopen_response({
+                    "request_id": "req-1",
+                    "status": "accessible",
+                    "url": urls[0],
+                    "title": "arXiv",
+                    "final_url": urls[0],
+                })
+            if "req-2" in url_str:
+                return _make_urlopen_response({
+                    "request_id": "req-2",
+                    "status": "accessible",
+                    "url": urls[1],
+                    "title": "DOI",
+                    "final_url": "https://publisher.example/paper",
+                })
+            raise urllib.error.URLError("not found")
+
+        with patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True), \
+             patch("zotpilot.tools.ingestion.BridgeServer.auto_start"), \
+             patch("zotpilot.tools.ingestion.time.sleep"), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            report = _preflight_urls(urls)
+
+        assert report["checked"] == 2
+        assert report["all_clear"] is True
+        assert len(report["accessible"]) == 2
+        assert report["blocked"] == []
+        assert report["errors"] == []
+
+    def test_blocked_url_sets_all_clear_false(self):
+        urls = ["https://www.sciencedirect.com/science/article/pii/S1"]
+        requests = []
+
+        def fake_urlopen(req_or_url, timeout=None):
+            url_str = req_or_url.full_url if hasattr(req_or_url, "full_url") else str(req_or_url)
+            if "/enqueue" in url_str:
+                body = json.loads(req_or_url.data.decode())
+                requests.append(body)
+                return _make_urlopen_response({"request_id": "req-1"})
+            return _make_urlopen_response({
+                "request_id": "req-1",
+                "status": "anti_bot_detected",
+                "url": urls[0],
+                "title": "Just a moment...",
+                "final_url": urls[0],
+            })
+
+        with patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True), \
+             patch("zotpilot.tools.ingestion.BridgeServer.auto_start"), \
+             patch("zotpilot.tools.ingestion.time.sleep"), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            report = _preflight_urls(urls)
+
+        assert requests[0]["action"] == "preflight"
+        assert report["all_clear"] is False
+        assert report["blocked"][0]["title"] == "Just a moment..."
+
+    def test_bridge_autostart_failure_returns_errors(self):
+        urls = ["https://example.com/1", "https://example.com/2"]
+        with patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=False), \
+             patch("zotpilot.tools.ingestion.BridgeServer.auto_start", side_effect=RuntimeError("bridge down")):
+            report = _preflight_urls(urls)
+
+        assert report["all_clear"] is False
+        assert len(report["errors"]) == 2
+        assert all(entry["error"] == "bridge down" for entry in report["errors"])
+
+    def test_timeout_classified_as_error(self):
+        urls = ["https://example.com/timeout"]
+        mono_values = iter([0.0] * 10 + [31.0] * 100)
+
+        def fake_urlopen(req_or_url, timeout=None):
+            url_str = req_or_url.full_url if hasattr(req_or_url, "full_url") else str(req_or_url)
+            if "/enqueue" in url_str:
+                return _make_urlopen_response({"request_id": "req-timeout"})
+            raise urllib.error.URLError("connection refused")
+
+        with patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True), \
+             patch("zotpilot.tools.ingestion.BridgeServer.auto_start"), \
+             patch("zotpilot.tools.ingestion.time.sleep"), \
+             patch("zotpilot.tools.ingestion.time.monotonic", side_effect=mono_values), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            report = _preflight_urls(urls)
+
+        assert report["all_clear"] is False
+        assert "Timeout" in report["errors"][0]["error"]
+
+    def test_sampling_caps_checks_at_five(self):
+        urls = [f"https://publisher{i}.example.com/paper" for i in range(10)]
+        enqueued = []
+
+        def fake_urlopen(req_or_url, timeout=None):
+            url_str = req_or_url.full_url if hasattr(req_or_url, "full_url") else str(req_or_url)
+            if "/enqueue" in url_str:
+                body = json.loads(req_or_url.data.decode())
+                enqueued.append(body["url"])
+                return _make_urlopen_response({"request_id": f"req-{len(enqueued)}"})
+            request_id = url_str.rsplit("/", 1)[-1]
+            index = int(request_id.split("-")[-1]) - 1
+            return _make_urlopen_response({
+                "request_id": request_id,
+                "status": "accessible",
+                "url": enqueued[index],
+                "title": "ok",
+                "final_url": enqueued[index],
+            })
+
+        with patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True), \
+             patch("zotpilot.tools.ingestion.BridgeServer.auto_start"), \
+             patch("zotpilot.tools.ingestion.time.sleep"), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            report = _preflight_urls(urls)
+
+        assert report["checked"] == 5
+        assert len(enqueued) == 5
+        assert len(report["skipped"]) == 5
+
+    def test_sampling_prefers_unique_publishers(self):
+        urls = [
+            "https://a.example.com/1",
+            "https://a.example.com/2",
+            "https://a.example.com/3",
+            "https://b.example.com/1",
+            "https://c.example.com/1",
+            "https://d.example.com/1",
+            "https://e.example.com/1",
+            "https://f.example.com/1",
+        ]
+        enqueued = []
+
+        def fake_urlopen(req_or_url, timeout=None):
+            url_str = req_or_url.full_url if hasattr(req_or_url, "full_url") else str(req_or_url)
+            if "/enqueue" in url_str:
+                body = json.loads(req_or_url.data.decode())
+                enqueued.append(body["url"])
+                return _make_urlopen_response({"request_id": f"req-{len(enqueued)}"})
+            request_id = url_str.rsplit("/", 1)[-1]
+            index = int(request_id.split("-")[-1]) - 1
+            return _make_urlopen_response({
+                "request_id": request_id,
+                "status": "accessible",
+                "url": enqueued[index],
+                "title": "ok",
+                "final_url": enqueued[index],
+            })
+
+        with patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True), \
+             patch("zotpilot.tools.ingestion.BridgeServer.auto_start"), \
+             patch("zotpilot.tools.ingestion.time.sleep"), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            report = _preflight_urls(urls)
+
+        sampled_domains = {url.split("/")[2] for url in enqueued}
+        assert report["checked"] == 5
+        assert len(sampled_domains) == 5
+
+
+# ---------------------------------------------------------------------------
+# TestIngestPapersPdfVerification
+# ---------------------------------------------------------------------------
+
+class TestIngestPapersPdfVerification:
+    """Verify that ingest_papers checks actual PDF status via Zotero API after save."""
+
+    def _fake_save_urls_result(self, url, item_key, title="Paper"):
+        return {
+            "total": 1, "succeeded": 1, "failed": 0,
+            "results": [{"success": True, "url": url, "item_key": item_key, "title": title}],
+        }
+
+    def test_pdf_attached_reported_correctly(self):
+        """When check_has_pdf returns True, pdf field is 'attached' with no warning."""
+        writer = _make_writer()
+        writer.check_has_pdf.return_value = True
+        url = "https://www.sciencedirect.com/science/article/pii/S0000000000000001"
+        with patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True), \
+             patch("zotpilot.tools.ingestion.BridgeServer.auto_start"), \
+             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(api_key=None)), \
+             patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion.save_urls",
+                   return_value=self._fake_save_urls_result(url, "ITEM1")):
+            result = ingest_papers([{"doi": "10.1016/S0000", "landing_page_url": url, "is_oa": False}])
+        entry = result["results"][0]
+        assert entry["status"] == "ingested"
+        assert entry["pdf"] == "attached"
+        assert "warning" not in entry
+
+    def test_pdf_missing_reported_with_warning(self):
+        """When check_has_pdf returns False (e.g. Zotero robot verification pending),
+        pdf field is 'none' and warning instructs user to complete verification."""
+        writer = _make_writer()
+        writer.check_has_pdf.return_value = False
+        url = "https://www.sciencedirect.com/science/article/pii/S0000000000000002"
+        with patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True), \
+             patch("zotpilot.tools.ingestion.BridgeServer.auto_start"), \
+             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(api_key=None)), \
+             patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion.save_urls",
+                   return_value=self._fake_save_urls_result(url, "ITEM2")):
+            result = ingest_papers([{"doi": "10.1016/S0001", "landing_page_url": url, "is_oa": False}])
+        entry = result["results"][0]
+        assert entry["status"] == "ingested"
+        assert entry["pdf"] == "none"
+        assert "warning" in entry
+        assert "robot verification" in entry["warning"].lower() or "pdf not attached" in entry["warning"].lower()
+
+    def test_no_item_key_skips_pdf_check(self):
+        """When item_key is None (routing failed), check_has_pdf is not called."""
+        writer = _make_writer()
+        url = "https://www.sciencedirect.com/science/article/pii/S0000000000000003"
+        with patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True), \
+             patch("zotpilot.tools.ingestion.BridgeServer.auto_start"), \
+             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(api_key=None)), \
+             patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion.save_urls",
+                   return_value=self._fake_save_urls_result(url, None)):
+            result = ingest_papers([{"doi": "10.1016/S0002", "landing_page_url": url, "is_oa": False}])
+        entry = result["results"][0]
+        assert entry["status"] == "ingested"
+        assert entry["pdf"] == "none"
+        writer.check_has_pdf.assert_not_called()
