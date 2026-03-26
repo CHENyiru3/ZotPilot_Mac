@@ -23,7 +23,7 @@ data/
 
 # Plans and ops records (local only)
 .omc/
-docs/superpowers/
+docs/
 
 # IDE
 .idea/

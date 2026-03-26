@@ -1,17 +1,17 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件为 Claude Code 在此仓库中工作时提供指引。
 
-## Commands
+## 常用命令
 
 ```bash
-# Install (editable dev install)
+# 安装（可编辑开发模式）
 uv pip install -e ".[dev]"
 
-# Run MCP server directly
+# 直接运行 MCP 服务器
 uv run zotpilot
 
-# CLI subcommands
+# CLI 子命令
 uv run zotpilot setup --non-interactive --provider gemini
 uv run zotpilot index [--force] [--limit N] [--item-key KEY] [--max-pages N]
 uv run zotpilot status [--json]
@@ -19,95 +19,101 @@ uv run zotpilot doctor [--full]
 uv run zotpilot config set <key> <value>
 uv run zotpilot register [--gemini-key KEY] [--zotero-api-key KEY] [--zotero-user-id ID]
 
-# Tests
-uv run pytest                          # all tests (coverage threshold: 29%)
-uv run pytest tests/test_config.py    # single file
-uv run pytest -k test_name            # single test by name
+# 测试
+uv run pytest                          # 全部测试（覆盖率阈值 29%）
+uv run pytest tests/test_config.py    # 单文件
+uv run pytest -k test_name            # 单个测试
 
-# Lint / type check
+# 代码检查 / 类型检查
 uv run ruff check src tests
 uv run mypy src
 ```
 
-## Internal Docs
+## 内部文档
+
+> `docs/` 目录已加入 `.gitignore`，仅供本地参考，不提交到公开仓库。
 
 - `docs/architecture.md` — 系统架构、组件说明、已知局限
 - `docs/decisions.md` — 关键决策记录（按时间倒序）
 
-## Architecture
+**文档更新规则**：每次架构决策或涉及多个文件的实现变更，必须同步更新相应文档：
+- 新增功能 / 重构 → 更新 `docs/architecture.md`
+- 重要技术决策 → 在 `docs/decisions.md` 新增条目
 
-ZotPilot exposes a **FastMCP server** with 32 tools for semantic search over a local Zotero library. The architecture has four main layers:
+## 架构
 
-### 1. Entry points
-- `cli.py` — argparse CLI with subcommands: `setup`, `index`, `status`, `doctor`, `config`, `register`. With no subcommand, runs the MCP server.
-- `server.py` — thin shim: imports `state.mcp` and the `tools/` package (import side-effects register all tools), then calls `mcp.run()`.
+ZotPilot 是一个 **FastMCP 服务器**，提供 32 个工具用于对本地 Zotero 文献库进行语义搜索。架构分四层：
 
-### 2. MCP state and lazy singletons (`state.py`)
-All shared objects (`VectorStore`, `Retriever`, `Reranker`, `ZoteroClient`, `ZoteroWriter`, `ZoteroApiReader`, `IdentifierResolver`) are lazy singletons protected by a single `threading.Lock`. Tools call `_get_retriever()`, `_get_zotero()`, etc. on each request. `switch_library` calls `_reset_singletons()` to tear them all down. A background thread monitors the parent process PID and calls `os._exit(0)` when it dies (prevents orphaned server processes).
+### 1. 入口点
+- `cli.py` — argparse CLI，子命令：`setup`、`index`、`status`、`doctor`、`config`、`register`。无子命令时启动 MCP 服务器。
+- `server.py` — 薄层 shim：import `state.mcp` 和 `tools/` 包（import 副作用注册所有工具），然后调用 `mcp.run()`。
 
-### 3. Tool modules (`tools/`)
-Eight modules, each imported by `tools/__init__.py` to trigger `@mcp.tool` decorator registration:
+### 2. MCP 状态与懒加载单例（`state.py`）
+所有共享对象（`VectorStore`、`Retriever`、`Reranker`、`ZoteroClient`、`ZoteroWriter`、`ZoteroApiReader`、`IdentifierResolver`）均为懒加载单例，由单一 `threading.Lock` 保护。工具在每次请求时调用 `_get_retriever()`、`_get_zotero()` 等。`switch_library` 调用 `_reset_singletons()` 拆除所有单例。后台线程监控父进程 PID，父进程退出时调用 `os._exit(0)` 防止孤儿服务器进程。
 
-| Module | Responsibility |
-|--------|----------------|
-| `search.py` | `search_papers`, `search_topic`, `search_boolean`, `search_tables`, `search_figures` |
-| `context.py` | `get_passage_context`, `get_paper_details` |
-| `library.py` | `get_library_overview`, `advanced_search`, `get_notes`, `list_tags`, `list_collections`, etc. |
-| `indexing.py` | `index_library`, `get_index_stats` |
-| `citations.py` | `find_references`, `find_citing_papers`, `get_citation_count` |
-| `write_ops.py` | `create_note`, `add_item_tags`, `set_item_tags`, `create_collection`, `add_to_collection`, etc. |
-| `admin.py` | `switch_library`, `get_reranking_config`, `get_vision_costs` |
-| `ingestion.py` | `search_academic_databases`, `add_paper_by_identifier`, `ingest_papers` |
+### 3. 工具模块（`tools/`）
+八个模块，均由 `tools/__init__.py` import 触发 `@mcp.tool` 装饰器注册：
 
-Write operations (`write_ops.py`) require `ZOTERO_API_KEY` + `ZOTERO_USER_ID` env vars; they use `ZoteroWriter` (pyzotero Web API). Read-only tools use `ZoteroClient` (local SQLite).
+| 模块 | 职责 |
+|------|------|
+| `search.py` | `search_papers`、`search_topic`、`search_boolean`、`search_tables`、`search_figures` |
+| `context.py` | `get_passage_context`、`get_paper_details` |
+| `library.py` | `get_library_overview`、`advanced_search`、`get_notes`、`list_tags`、`list_collections` 等 |
+| `indexing.py` | `index_library`、`get_index_stats` |
+| `citations.py` | `find_references`、`find_citing_papers`、`get_citation_count` |
+| `write_ops.py` | `create_note`、`add_item_tags`、`set_item_tags`、`create_collection`、`add_to_collection` 等 |
+| `admin.py` | `switch_library`、`get_reranking_config`、`get_vision_costs` |
+| `ingestion.py` | `search_academic_databases`、`add_paper_by_identifier`、`ingest_papers` |
 
-### 4. RAG pipeline
+写操作（`write_ops.py`）需要 `ZOTERO_API_KEY` + `ZOTERO_USER_ID` 环境变量，使用 `ZoteroWriter`（pyzotero Web API）。只读工具使用 `ZoteroClient`（本地 SQLite）。
+
+### 4. RAG 流水线
 ```
-PDF files
-  └─ pdf/extractor.py          (PyMuPDF text extraction, OCR fallback)
-  └─ feature_extraction/       (vision API for figures/tables, PaddleOCR optional)
-  └─ pdf/chunker.py            (text → chunks with section classification)
-  └─ pdf/section_classifier.py (labels chunks: Abstract, Methods, Results, etc.)
-  └─ embeddings/               (base.py interface; gemini.py, dashscope.py, local.py impls)
-  └─ vector_store.py           (ChromaDB wrapper; stores chunks with metadata)
+PDF 文件
+  └─ pdf/extractor.py          （PyMuPDF 文本提取，OCR 兜底）
+  └─ feature_extraction/       （视觉 API 处理图表，可选 PaddleOCR）
+  └─ pdf/chunker.py            （文本 → 分块，含章节分类）
+  └─ pdf/section_classifier.py （标注分块：摘要、方法、结果等）
+  └─ embeddings/               （base.py 接口；gemini.py、dashscope.py、local.py 实现）
+  └─ vector_store.py           （ChromaDB 封装；存储分块及元数据）
 
-Query path:
-  retriever.py  →  vector_store.py  →  reranker.py  (RRF + section/journal weights)
+查询路径：
+  retriever.py → vector_store.py → reranker.py（RRF + 章节/期刊权重）
 ```
 
-### No-RAG mode
-Setting `embedding_provider = "none"` in config disables the vector index. `_get_store_optional()` returns `None`; tools fall back to SQLite metadata search. `advanced_search`, notes, tags, and collections work without indexing.
+### 无 RAG 模式
+配置 `embedding_provider = "none"` 禁用向量索引。`_get_store_optional()` 返回 `None`，工具降级为 SQLite 元数据搜索。`advanced_search`、notes、tags、collections 在无索引时仍可工作。
 
-## Configuration
+## 配置
 
-Config file: `~/.config/zotpilot/config.json` (Unix) / `%APPDATA%\zotpilot\config.json` (Windows).
-ChromaDB data: `~/.local/share/zotpilot/chroma/` (Unix).
+配置文件：`~/.config/zotpilot/config.json`（Unix）/ `%APPDATA%\zotpilot\config.json`（Windows）。
+ChromaDB 数据：`~/.local/share/zotpilot/chroma/`（Unix）。
 
-API keys are always read from environment first, then config file. `Config.save()` never persists API keys to disk.
+API 密钥始终优先从环境变量读取，其次从配置文件。`Config.save()` 永不将 API 密钥持久化到磁盘。
 
-| Env var | Purpose |
-|---------|---------|
-| `GEMINI_API_KEY` | Embeddings (gemini provider) |
-| `DASHSCOPE_API_KEY` | Embeddings (dashscope provider) |
-| `ANTHROPIC_API_KEY` | Vision extraction (figures/tables) |
-| `ZOTERO_API_KEY` | Write operations |
-| `ZOTERO_USER_ID` | Numeric Zotero user ID |
-| `S2_API_KEY` | Semantic Scholar (optional, higher rate limit) |
+| 环境变量 | 用途 |
+|---------|------|
+| `GEMINI_API_KEY` | 嵌入（gemini 提供商） |
+| `DASHSCOPE_API_KEY` | 嵌入（dashscope 提供商） |
+| `ANTHROPIC_API_KEY` | 视觉提取（图表/表格） |
+| `ZOTERO_API_KEY` | 写操作 |
+| `ZOTERO_USER_ID` | Zotero 数字用户 ID |
+| `S2_API_KEY` | Semantic Scholar（可选，更高速率限制） |
 
-## Git Workflow
+## Git 工作流
 
-### Branch Strategy
+### 分支策略
 
 - **`main`** — 生产分支，仅接受来自 `dev` 的 PR 合并，**禁止直接 push**
 - **`dev`** — 日常开发分支，所有功能和修复都在此分支提交
 
-### Rules
+### 规则
 
-- **NEVER** `git push origin main` 直接推送 main
+- **绝不** 直接 `git push origin main`
 - 所有变更通过 PR 从 `dev` → `main` 合并
-- 发版时：在 `dev` 完成 release checklist → 提 PR → 合并到 `main` → 在 `main` 打 tag
+- 发版时：在 `dev` 完成发版清单 → 提 PR → 合并到 `main` → 在 `main` 打 tag
 
-### Daily workflow
+### 日常工作流
 
 ```bash
 # 确保在 dev 分支
@@ -120,37 +126,37 @@ git push origin dev
 gh pr create --base main --head dev --title "release: vX.Y.Z"
 ```
 
-## Version Management
+## 版本管理
 
-Claude is responsible for version management on this project. When the user says "发版"、"release"、or similar, execute the full flow without asking for sub-confirmations:
+Claude 负责此项目的版本管理。当用户说"发版"、"release"或类似指令时，直接执行完整流程，无需逐步确认：
 
-### Release flow
-1. **Commit** all staged changes with a conventional commit message (`feat:` / `fix:` / `docs:` etc.)
-2. **Tag** `vX.Y.Z` — must match `pyproject.toml` version (CI validates this)
-3. **Push** commit + tag: `git push && git push --tags`
-4. CI (`release.yml`) auto-publishes to PyPI and creates the GitHub Release from CHANGELOG
+### 发版流程
+1. **Commit** 所有暂存变更，使用规范 commit 消息（`feat:` / `fix:` / `docs:` 等）
+2. **Tag** `vX.Y.Z` — 必须与 `pyproject.toml` 版本一致（CI 会校验）
+3. **Push** commit + tag：`git push && git push --tags`
+4. CI（`release.yml`）自动发布到 PyPI 并从 CHANGELOG 创建 GitHub Release
 
-### Version bump rules
-- `patch` (0.x.**Z**): bug fixes, doc updates, test additions
-- `minor` (0.**Y**.0): new user-facing features (new CLI subcommand, new MCP tool)
-- `major` (**X**.0.0): breaking changes to MCP tool signatures or config format
+### 版本号规则
+- `patch`（0.x.**Z**）：bug 修复、文档更新、测试新增
+- `minor`（0.**Y**.0）：新用户功能（新 CLI 子命令、新 MCP 工具）
+- `major`（**X**.0.0）：MCP 工具签名或配置格式的破坏性变更
 
-### Per-release checklist
-- [ ] `pyproject.toml` version bumped
-- [ ] `src/zotpilot/__init__.py` `__version__` in sync
-- [ ] `CHANGELOG.md` has a `## [X.Y.Z] - YYYY-MM-DD` entry at the top
-- [ ] `README.md` reflects any new commands or features
-- [ ] `uv run pytest -q` passes (coverage ≥ 29%)
+### 发版清单
+- [ ] `pyproject.toml` 版本已更新
+- [ ] `src/zotpilot/__init__.py` `__version__` 与之同步
+- [ ] `CHANGELOG.md` 顶部有 `## [X.Y.Z] - YYYY-MM-DD` 条目
+- [ ] `README.md` 已反映新命令或功能
+- [ ] `uv run pytest -q` 通过（覆盖率 ≥ 29%）
 - [ ] commit → tag → push
 
-### CHANGELOG format
-Follow the bilingual (中文 / English) format already established in CHANGELOG.md.
-The CI `awk` extractor reads between the first two `## [` headers — keep that structure intact.
+### CHANGELOG 格式
+遵循 CHANGELOG.md 中已建立的中英双语格式。
+CI 的 `awk` 提取器读取前两个 `## [` 标题之间的内容——保持该结构不变。
 
-## Key design patterns
+## 关键设计模式
 
-- **Singleton pattern with double-checked locking**: all expensive objects initialized once per server process, reset on `switch_library`.
-- **No-RAG fallback**: `embedding_provider="none"` lets metadata-only tools work without ChromaDB or an embedding API.
-- **Embedding provider abstraction**: `embeddings/base.py` defines `Embedder` interface; `embeddings/__init__.py:create_embedder(config)` returns the right impl.
-- **Tool registration via import side-effects**: `server.py` does `from . import tools` which imports all 8 tool modules, each of which calls `@mcp.tool` on their functions.
-- **Filters and result utils are re-exported from `state.py`** for backward compatibility (`filters.py`, `result_utils.py`).
+- **双重检查锁定的单例模式**：所有昂贵对象每个服务器进程初始化一次，`switch_library` 时重置。
+- **无 RAG 降级**：`embedding_provider="none"` 使仅元数据工具在无 ChromaDB 或嵌入 API 时也能工作。
+- **嵌入提供商抽象**：`embeddings/base.py` 定义 `Embedder` 接口；`embeddings/__init__.py:create_embedder(config)` 返回正确实现。
+- **通过 import 副作用注册工具**：`server.py` 执行 `from . import tools`，import 所有 8 个工具模块，每个模块对其函数调用 `@mcp.tool`。
+- **Filter 和 result utils 从 `state.py` 重导出**，向后兼容（`filters.py`、`result_utils.py`）。
