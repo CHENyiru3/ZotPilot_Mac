@@ -90,6 +90,7 @@ def get_paper_details(
         "pdf_available": item.pdf_path is not None and item.pdf_path.exists(),
         "indexed": indexed,
         "quality_grade": quality_grade,
+        "date_added": item.date_added,
     }
 
 

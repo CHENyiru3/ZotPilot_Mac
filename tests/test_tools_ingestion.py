@@ -540,7 +540,7 @@ class TestIngestPapers:
         assert result["preflight_report"]["all_clear"] is False
         assert result["preflight_report"]["accessible_count"] == 0
         assert result["preflight_report"]["skipped_count"] == 0
-        assert "preflight=False" in result["message"]
+        assert "wait for their decision before retrying" in result["message"]
 
     def test_preflight_verbose_includes_full_arrays(self):
         papers = [{"doi": "10.1038/test"}]
@@ -1055,7 +1055,7 @@ class TestBridgeResultDetection:
             "error_code": "anti_bot_detected",
             "error_message": (
                 "Anti-bot page detected (title: '请稍候…'). "
-                "Please complete the verification in Chrome, then retry."
+                "Wait for the user to complete the Chrome verification before continuing."
             ),
             "title": "请稍候…",
             "url": "https://x.com",

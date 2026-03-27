@@ -828,8 +828,8 @@ def ingest_papers(
                 "message": (
                     f"{checked - issue_count} of {checked} URLs checked are accessible. "
                     f"{issue_count} URLs were {issue_label}. "
-                    "Call ingest_papers again with preflight=False to proceed with accessible URLs only, "
-                    "or resolve access issues first."
+                    "Preflight found issues. Show the blocked and error URLs to the user and "
+                    "wait for their decision before retrying."
                 ),
             }
 
@@ -1123,7 +1123,7 @@ def save_urls(
                         "status": "pending",
                         "error": (
                             "Skipped — another URL triggered anti-bot verification. "
-                            "Retry after completing the Chrome verification."
+                            "Wait for the user to complete Chrome verification before continuing."
                         ),
                     }
                 return
@@ -1150,7 +1150,8 @@ def save_urls(
                                 "anti_bot_detected": True,
                                 "error": result.get("error_message") or (
                                     f"Anti-bot page detected (title: '{result.get('title')}'). "
-                                    "Please complete the verification in Chrome, then retry."
+                                    "Wait for the user to complete the Chrome verification "
+                                    "before continuing."
                                 ),
                             }
                         return

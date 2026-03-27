@@ -362,7 +362,7 @@ class ZoteroClient:
     SINGLE_ITEM_SQL = """
     WITH
         base_items AS (
-            SELECT items.itemID, items."key" AS itemKey, items.itemTypeID
+            SELECT items.itemID, items."key" AS itemKey, items.itemTypeID, items.dateAdded
             FROM items
             WHERE items.itemTypeID NOT IN (1, 14)
               AND items.itemID NOT IN (SELECT itemID FROM deletedItems)
@@ -460,7 +460,8 @@ class ZoteroClient:
         COALESCE(item_collections.collection_names, '') AS collections,
         pdfs.attachmentKey,
         pdfs.linkMode,
-        pdfs.path
+        pdfs.path,
+        base_items.dateAdded
     FROM base_items
     LEFT JOIN titles ON base_items.itemID = titles.itemID
     LEFT JOIN years ON base_items.itemID = years.itemID
@@ -522,6 +523,7 @@ class ZoteroClient:
             doi=row["doi"],
             tags=row["tags"],
             collections=row["collections"],
+            date_added=row["dateAdded"] if "dateAdded" in row.keys() else "",
         )
 
     def get_item(self, item_key: str) -> ZoteroItem | None:
