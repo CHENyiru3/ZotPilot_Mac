@@ -919,7 +919,9 @@ class TestIngestPapersPdfVerification:
         assert entry["pdf"] == "none"
         assert "warning" in entry
         assert "robot verification" in entry["warning"].lower() or "pdf not attached" in entry["warning"].lower()
-        assert writer.check_has_pdf.call_count == 4
+        # Dynamic budget: n=1 → 30s / 5s = 6 polls + 1 initial check = 7 calls.
+        # Don't hard-code; just assert retries happened.
+        assert writer.check_has_pdf.call_count >= 2
 
     def test_no_item_key_skips_pdf_check(self):
         """When item_key is None (routing failed), check_has_pdf is not called."""

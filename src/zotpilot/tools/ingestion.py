@@ -29,7 +29,7 @@ _SAVE_RESULT_POLL_TIMEOUT_S = 150.0
 _SAVE_RESULT_POLL_OVERALL_TIMEOUT_S = 300.0
 
 # Post-save PDF verification: Zotero may attach PDFs asynchronously after item creation.
-_PDF_CHECK_DELAYS_S = [5.0, 5.0, 5.0]
+# Delays are computed dynamically based on batch size — see _finalize_pdf_status.
 
 # DOI-based dedup: track recently saved DOIs to prevent double-saves in slow batches.
 # Process-scoped; lost on server restart (singletons reset via _reset_singletons).
@@ -987,6 +987,13 @@ def ingest_papers(
         except Exception:
             writer = None
 
+        # Dynamic poll schedule: each paper needs ~10s for Zotero to download its PDF.
+        # Poll every 5s; total budget = max(30s, n_papers * 10s), capped at 120s.
+        n = len(entries_by_key)
+        total_budget_s = min(max(30.0, n * 10.0), 120.0)
+        poll_interval_s = 5.0
+        n_polls = int(total_budget_s / poll_interval_s)
+
         pdf_status_by_key = {item_key: False for item_key in entries_by_key}
         if writer is not None:
             for item_key in list(pdf_status_by_key):
@@ -994,10 +1001,10 @@ def ingest_papers(
                     pdf_status_by_key[item_key] = writer.check_has_pdf(item_key)
                 except Exception:
                     pass
-            for delay in _PDF_CHECK_DELAYS_S:
+            for _ in range(n_polls):
                 if all(pdf_status_by_key.values()):
                     break
-                time.sleep(delay)
+                time.sleep(poll_interval_s)
                 for item_key, has_pdf in list(pdf_status_by_key.items()):
                     if has_pdf:
                         continue
