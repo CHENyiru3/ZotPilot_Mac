@@ -1,9 +1,11 @@
 """Shared state and lazy singletons for ZotPilot MCP server."""
+
 import logging
 import os
 import sys
 import threading
 import time
+from collections.abc import Callable
 
 from fastmcp import FastMCP
 
@@ -180,6 +182,7 @@ _retriever = None
 _store = None
 _reranker = None
 _config = None
+_reset_callbacks: list[Callable[[], None]] = []
 
 
 def _get_retriever():
@@ -345,6 +348,16 @@ def _reset_singletons():
         _writer = None
         _api_reader = None
         _resolver = None
+    for callback in _reset_callbacks:
+        try:
+            callback()
+        except Exception:
+            pass
+
+
+def register_reset_callback(fn: Callable[[], None]) -> None:
+    """Register a function to be called when cached singletons are reset."""
+    _reset_callbacks.append(fn)
 
 
 def _set_library_override(library_id: str, library_type: str):

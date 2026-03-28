@@ -1,66 +1,86 @@
-# Post-Ingest Guide — Step 4 of Agent Research Discovery
+# Post-Ingest Guide
 
-## PDF Status Check (mandatory before proceeding)
+## Phase 1: 入库完成确认 (Gate)
 
-After `ingest_papers` / `save_urls` completes, check PDF status for every ingested item:
+After every `ingest_papers` or `save_from_url` call:
 
-- Call `get_paper_details(item_key)` **in parallel** for all items that had `pdf: "none"` or `warning` in the ingest result.
-- If `pdf_available: true` for all → proceed to the user prompt below.
-- If any still `pdf_available: false` → inform user which titles are still missing PDF (likely subscription-gated), then proceed to the user prompt for the rest.
+### 1.1 Check `ingest_complete`
 
-**User prompt (always required — do NOT skip):**
+- `ingest_complete: true` → proceed to Phase 2
+- `ingest_complete: false` → read `ingest_blockers` and resolve:
+  - Missing `item_key`: call `advanced_search(conditions=[{"field": "title", "op": "contains", "value": "..."}])`
+  - Unknown PDF status: call `get_paper_details(item_key)` to verify
+  - Preflight blocked: show blocked URLs to user and wait for their decision
+  - After resolving blockers, re-evaluate the gate manually
 
-After confirming PDF status, ask the user:
+### 1.2 Present ingest result to user (mandatory)
 
-> "PDF 已全部就位（或说明哪几篇缺 PDF）。是否需要对这批文章执行以下操作？（可多选）
-> 1. **构建索引** — 向量化全文，支持后续语义搜索
-> 2. **生成笔记** — 为核心文章提炼方法和结论
-> 3. **归类到 Collection** — 按主题整理
-> 4. **细化 tag** — 打更精准的标签"
+Show this table:
 
-Wait for user's explicit selection before executing any of the above.
+| # | Title | PDF | Collection | item_key |
+|---|-------|-----|------------|----------|
+| 1 | ... | attached / none | INBOX | ... |
 
----
+- `attached` — PDF downloaded successfully
+- `none` — metadata saved, PDF missing (no subscription, anti-bot, or paywalled)
 
-## Execution (after user confirms)
+For `pdf: none` items, explain the likely reason.
 
-For each successfully saved item with an `item_key`:
+### 1.3 Ask user once
 
-1. `index_library(item_key=...)` — call for ALL successfully ingested item_keys **in parallel** (up to 5 concurrent calls). Do NOT call them one by one sequentially. Each call is independent and indexes a single paper.
-2. `get_paper_details(item_key)` — read abstract, methods, key findings
-3. Based on the content and ZOTPILOT.md context, make judgments:
-   - Which collection(s) does this paper belong to? (check existing collections via `list_collections`)
-   - If no existing collection clearly matches: tell the user "这篇论文不属于现有任何分类（当前有: X, Y, Z）。建议：[新建分类 'Topic A'] 或 [将现有分类 'Y' 重命名/合并为 'Y+Topic A']。" — wait for user confirmation before executing.
-   - If the paper is in INBOX, move it to the appropriate collection with `add_to_collection` and optionally `remove_from_collection` for INBOX.
-   - What tags best describe it? (use existing tag vocabulary from `list_tags` where possible)
-   - Is there anything worth noting — a key method, finding, or connection to the user's work?
-4. `add_to_collection(item_key, collection_key)` + `add_item_tags(item_key, tags)` — classify
-5. **生成精简笔记（每篇必做）** — 按 `references/note-analysis-prompt.md` Workflow A 执行：
-   - 去重检查 → 元数据召回 → 向量召回（post-retrieval doc_id 验证）→ 填写精简模板 → `create_note` → `add_item_tags(["note-done"])`
-   - 详细规则见 `note-analysis-prompt.md`；模板见 `note-template-brief.md`
+> "入库完成，共 N 篇论文已进入 INBOX（M 篇有 PDF，K 篇仅元数据）。
+> 是否执行后续处理？包括：向量索引 → 生成笔记 → 归类到 Collection → 打标签。
+> （后续处理会消耗较多 token）"
 
-If `item_key` missing from result: `advanced_search(title=...)` to locate the item first.
+- User says yes / 继续 / 好 → proceed to Phase 2
+- User says no / 不用 → stop, papers stay in INBOX for manual handling
+- User says partial (for example "只索引不要笔记") → execute only the requested steps
 
-## Agent research ingest (single paper, deep read)
+## Phase 2: 全自动执行（用户确认后，不再逐步询问）
 
-Prerequisites: Chrome open, ZotPilot Connector installed, `ZOTERO_API_KEY` configured
+Execute all requested steps sequentially for each successfully ingested item with `item_key`.
 
-1. `save_from_url(url)` → get `item_key` from result
-2. `index_library(item_key=...)` → incremental index
-3. `get_paper_details(item_key)` → read abstract, methods, conclusions
-4. Judge: relevant collection, appropriate tags
-5. `add_to_collection` + `add_item_tags` → classify
-6. **生成精简笔记** — 按 `note-analysis-prompt.md` Workflow A 执行
-7. **用户可随时要求深读** — 说"帮我深读这篇"即触发 Workflow B（完整笔记），见 `note-analysis-prompt.md`
+### Step A — Index (always first)
 
-If `item_key` missing: use `advanced_search(title=result["title"])` to locate first.
+Call `index_library(item_key=...)` for all item keys in parallel, up to 5 concurrent calls.
 
----
+### Step B — Read metadata
 
-## 质检清单（每批 post-ingest 完成后）
+Call `get_paper_details(item_key)` in parallel with Step A to gather abstract, methods, and key findings for note generation and classification.
 
-- [ ] 所有成功入库的论文均已生成精简笔记（`note-done` tag 标记）
-- [ ] 笔记标题均以 `[ZotPilot]` 开头，无残留 `{{}}` 占位符
-- [ ] TL;DR 含具体数值或明确判断
-- [ ] Collection 归类已完成（无论文停留在 INBOX 未分类）
-- [ ] 缺 PDF 的论文已告知用户
+### Step C — Generate brief note
+
+For every paper selected for note generation, follow `references/note-analysis-prompt.md` Workflow A:
+
+- 去重检查 → 元数据召回 → 向量召回 → 填写模板 → `create_note` → `add_item_tags(["note-done"])`
+
+### Step D — Classify into Collection
+
+- `list_collections` → find the best matching collection
+- If a match is found → `add_to_collection(item_key, collection_key)` and `remove_from_collection(item_key, inbox_key)`
+- If no match is found → `create_collection(name)` with a reasonable topic name, then add the paper there
+- If classification is uncertain → batch all uncertain papers and ask once at the end with suggested destinations
+
+### Step E — Tag
+
+- `list_tags` → get the existing vocabulary
+- Select from existing tags only
+- `add_item_tags(item_key, selected_tags)`
+- Never invent new tags silently. If none fit, batch those papers and ask once at the end
+
+### Step F — Quality check
+
+- All requested papers indexed
+- All requested notes created (`note-done` present when note generation was requested)
+- No papers remain in INBOX without a target collection unless the user chose a partial workflow
+- All `pdf: none` items were reported in Phase 1
+
+If quality checks fail, report a summary to the user instead of asking step-by-step questions.
+
+## Single-paper flow (`save_from_url`)
+
+1. `save_from_url(url)` → check response has `item_key` and `collection_used`
+2. If no `item_key` → use `advanced_search` to locate the item
+3. Present the result: title, PDF status, collection
+4. Ask once whether to execute post-ingest processing
+5. If the user confirms, run Steps A-E for that paper

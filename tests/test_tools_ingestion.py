@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastmcp.exceptions import ToolError
 
+import zotpilot.tools.ingestion as ingestion_module
 from zotpilot.identifier_resolver import PaperMetadata
 from zotpilot.tools.ingestion import (
     add_paper_by_identifier,
@@ -336,6 +337,134 @@ class TestSearchAcademicDatabases:
 # ---------------------------------------------------------------------------
 
 class TestIngestPapers:
+    def setup_method(self, method):
+        ingestion_module._recently_saved_dois.clear()
+        ingestion_module._clear_inbox_cache()
+        self._writer_patcher = patch(
+            "zotpilot.tools.ingestion._get_writer",
+            side_effect=ToolError("no writer"),
+        )
+        self._writer_patcher.start()
+
+    def teardown_method(self, method):
+        ingestion_module._recently_saved_dois.clear()
+        ingestion_module._clear_inbox_cache()
+        self._writer_patcher.stop()
+
+    def test_ensure_inbox_collection_returns_existing_key(self):
+        writer = MagicMock()
+        writer._zot.collections.return_value = [{"data": {"name": "INBOX", "key": "INBOX1"}}]
+        config = MagicMock()
+        config.zotero_api_key = "KEY"
+
+        with patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion._get_config", return_value=config):
+            result = ingestion_module._ensure_inbox_collection()
+
+        assert result == "INBOX1"
+        writer._zot.create_collections.assert_not_called()
+
+    def test_ensure_inbox_collection_creates_and_caches(self):
+        writer = MagicMock()
+        writer._zot.collections.return_value = []
+        writer._zot.create_collections.return_value = {
+            "successful": {"0": {"key": "INBOX2", "data": {"key": "INBOX2"}}}
+        }
+        config = MagicMock()
+        config.zotero_api_key = "KEY"
+
+        with patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion._get_config", return_value=config):
+            first = ingestion_module._ensure_inbox_collection()
+            second = ingestion_module._ensure_inbox_collection()
+
+        assert first == "INBOX2"
+        assert second == "INBOX2"
+        writer._zot.create_collections.assert_called_once()
+        assert writer._zot.collections.call_count == 1
+
+    def test_ensure_inbox_collection_gracefully_degrades_without_writer(self):
+        with patch("zotpilot.tools.ingestion._get_writer", side_effect=ToolError("missing writer")):
+            result = ingestion_module._ensure_inbox_collection()
+
+        assert result is None
+
+    def test_ingest_defaults_to_inbox_collection(self):
+        papers = [{"doi": "10.1038/new"}]
+        writer = MagicMock()
+        writer.check_duplicate_by_doi.return_value = None
+        writer.check_has_pdf.return_value = True
+
+        with patch("zotpilot.tools.ingestion._ensure_inbox_collection", return_value="INBOX1"), \
+             patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+                 "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+             }), \
+             patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion.save_urls", return_value={
+                 "total": 1,
+                 "succeeded": 1,
+                 "failed": 0,
+                 "results": [{
+                     "success": True,
+                     "item_key": "NEW1",
+                     "title": "Test Paper",
+                     "url": "https://doi.org/10.1038/new",
+                 }],
+             }) as save_urls_mock:
+            result = ingest_papers(papers)
+
+        assert save_urls_mock.call_args.kwargs["collection_key"] == "INBOX1"
+        assert result["collection_used"] == "INBOX1"
+
+    def test_ingest_respects_explicit_collection(self):
+        papers = [{"doi": "10.1038/new"}]
+        writer = MagicMock()
+        writer.check_duplicate_by_doi.return_value = None
+        writer.check_has_pdf.return_value = True
+
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion.save_urls", return_value={
+                 "total": 1,
+                 "succeeded": 1,
+                 "failed": 0,
+                 "results": [{
+                     "success": True,
+                     "item_key": "NEW2",
+                     "title": "Test Paper",
+                     "url": "https://doi.org/10.1038/new",
+                 }],
+             }) as save_urls_mock:
+            result = ingest_papers(papers, collection_key="CUSTOM")
+
+        assert save_urls_mock.call_args.kwargs["collection_key"] == "CUSTOM"
+        assert result["collection_used"] == "CUSTOM"
+
+    def test_ingest_no_api_key_uses_unfiled_items(self):
+        papers = [{"doi": "10.1038/new"}]
+
+        with patch("zotpilot.tools.ingestion._ensure_inbox_collection", return_value=None), \
+             patch("zotpilot.tools.ingestion._get_writer", side_effect=ToolError("no writer")), \
+             patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+                 "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+             }), \
+             patch("zotpilot.tools.ingestion.save_urls", return_value={
+                 "total": 1,
+                 "succeeded": 1,
+                 "failed": 0,
+                 "results": [{
+                     "success": True,
+                     "item_key": None,
+                     "title": "Test Paper",
+                     "url": "https://doi.org/10.1038/new",
+                 }],
+             }) as save_urls_mock:
+            result = ingest_papers(papers)
+
+        assert save_urls_mock.call_args.kwargs["collection_key"] is None
+        assert result["collection_used"] is None
+
     def test_over_50_raises_tool_error(self):
         papers = [{"doi": f"10.9999/{i}"} for i in range(51)]
         with pytest.raises(ToolError, match="50"):
@@ -464,6 +593,224 @@ class TestIngestPapers:
             result = ingest_papers(papers, skip_duplicates=True)
 
         assert result["skipped_duplicates"] == 0
+
+    def test_recent_doi_cache_skips_duplicate_without_save(self):
+        papers = [{"doi": "10.1038/existing", "title": "Existing Paper"}]
+        writer = MagicMock()
+        writer.find_items_by_url_and_title.return_value = ["EXISTING1"]
+        writer.check_has_pdf.return_value = True
+        ingestion_module._recently_saved_dois.clear()
+        ingestion_module._recently_saved_dois["10.1038/existing"] = 9999999999.0
+
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion.save_urls") as save_urls_mock:
+            result = ingest_papers(papers)
+
+        save_urls_mock.assert_not_called()
+        assert result["ingested"] == 0
+        assert result["skipped_duplicates"] == 1
+        assert result["results"][0]["status"] == "already_in_library"
+        assert result["results"][0]["item_key"] == "EXISTING1"
+        assert result["pdf_summary"] == {"attached": 1, "none": 0, "unknown": 0}
+        ingestion_module._recently_saved_dois.clear()
+
+    def test_doi_duplicate_from_writer_counts_as_already_in_library(self):
+        papers = [{"doi": "10.1038/existing", "title": "Existing Paper"}]
+        writer = MagicMock()
+        writer.check_duplicate_by_doi.return_value = "EXISTING2"
+        writer.check_has_pdf.return_value = False
+        ingestion_module._recently_saved_dois.clear()
+
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion.save_urls") as save_urls_mock:
+            result = ingest_papers(papers)
+
+        save_urls_mock.assert_not_called()
+        writer.check_duplicate_by_doi.assert_called_once_with("10.1038/existing")
+        assert result["ingested"] == 0
+        assert result["skipped_duplicates"] == 1
+        assert result["results"][0]["status"] == "already_in_library"
+        assert result["pdf_summary"] == {"attached": 0, "none": 1, "unknown": 0}
+
+    def test_successful_save_populates_recent_doi_cache_and_pdf_summary(self):
+        papers = [{"doi": "10.1038/new"}]
+        writer = MagicMock()
+        writer.check_duplicate_by_doi.return_value = None
+        writer.check_has_pdf.return_value = True
+        ingestion_module._recently_saved_dois.clear()
+
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion.save_urls", return_value={
+                 "total": 1,
+                 "succeeded": 1,
+                 "failed": 0,
+                 "results": [{
+                     "success": True,
+                     "item_key": "NEWKEY1",
+                     "title": "Test Paper",
+                     "url": "https://doi.org/10.1038/new",
+                 }],
+             }):
+            result = ingest_papers(papers)
+
+        assert result["ingested"] == 1
+        assert result["pdf_summary"] == {"attached": 1, "none": 0, "unknown": 0}
+        assert "10.1038/new" in ingestion_module._recently_saved_dois
+        ingestion_module._recently_saved_dois.clear()
+
+    def test_arxiv_id_save_populates_canonical_doi_cache(self):
+        """Successful arxiv_id ingest stores 10.48550/arxiv.{id} in _recently_saved_dois."""
+        arxiv_id = "2401.00001"
+        canonical_doi = f"10.48550/arxiv.{arxiv_id}"
+        papers = [{"arxiv_id": arxiv_id, "title": "Test ArXiv Paper"}]
+        writer = MagicMock()
+        writer.check_duplicate_by_doi.return_value = None
+        writer.check_has_pdf.return_value = False
+        ingestion_module._recently_saved_dois.clear()
+        arxiv_url = f"https://arxiv.org/abs/{arxiv_id}"
+
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion._get_zotero") as mock_zotero, \
+             patch("zotpilot.tools.ingestion.save_urls", return_value={
+                 "total": 1, "succeeded": 1, "failed": 0,
+                 "results": [{"success": True, "item_key": "ARXKEY1", "title": "Test ArXiv Paper", "url": arxiv_url}],
+             }):
+            mock_zotero.return_value.advanced_search.return_value = []
+            result = ingest_papers(papers)
+
+        assert result["ingested"] == 1
+        assert canonical_doi in ingestion_module._recently_saved_dois
+        ingestion_module._recently_saved_dois.clear()
+
+    def test_ingest_complete_true_when_item_keys_and_known_pdf(self):
+        papers = [{"doi": "10.1038/new"}]
+        writer = MagicMock()
+        writer.check_duplicate_by_doi.return_value = None
+        writer.check_has_pdf.return_value = True
+
+        with patch("zotpilot.tools.ingestion._ensure_inbox_collection", return_value="INBOX1"), \
+             patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+                 "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+             }), patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion.save_urls", return_value={
+                 "total": 1,
+                 "succeeded": 1,
+                 "failed": 0,
+                 "results": [{
+                     "success": True,
+                     "item_key": "READY1",
+                     "title": "Ready Paper",
+                     "url": "https://doi.org/10.1038/new",
+                 }],
+             }):
+            result = ingest_papers(papers, tags=["tag1"])
+
+        assert result["ingest_complete"] is True
+        assert "ingest_blockers" not in result
+        assert "tags_advisory" in result
+
+    def test_ingest_complete_false_when_item_key_missing(self):
+        papers = [{"doi": "10.1038/new"}]
+
+        with patch("zotpilot.tools.ingestion._ensure_inbox_collection", return_value=None), \
+             patch("zotpilot.tools.ingestion._get_writer", side_effect=ToolError("no writer")), \
+             patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+                 "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+             }), \
+             patch("zotpilot.tools.ingestion.save_urls", return_value={
+                 "total": 1,
+                 "succeeded": 1,
+                 "failed": 0,
+                 "results": [{
+                     "success": True,
+                     "item_key": None,
+                     "title": "Unresolved Paper",
+                     "url": "https://doi.org/10.1038/new",
+                 }],
+             }):
+            result = ingest_papers(papers)
+
+        assert result["ingest_complete"] is False
+        assert any("advanced_search" in blocker for blocker in result["ingest_blockers"])
+        assert "tags_advisory" not in result
+
+    def test_ingest_complete_false_when_pdf_unknown(self):
+        papers = [{"doi": "10.1038/new"}]
+
+        with patch("zotpilot.tools.ingestion._ensure_inbox_collection", return_value="INBOX1"), \
+             patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+                 "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+             }), \
+             patch("zotpilot.tools.ingestion._get_writer", side_effect=ToolError("no writer")), \
+             patch("zotpilot.tools.ingestion.save_urls", return_value={
+                 "total": 1,
+                 "succeeded": 0,
+                 "failed": 1,
+                 "results": [{
+                     "success": False,
+                     "status": "timeout_likely_saved",
+                     "title": "Slow Paper",
+                     "url": "https://doi.org/10.1038/new",
+                     "error": "Timed out",
+                 }],
+             }):
+            result = ingest_papers(papers)
+
+        assert result["ingest_complete"] is False
+        assert any("get_paper_details" in blocker for blocker in result["ingest_blockers"])
+
+    def test_ingest_complete_false_when_pdf_none(self):
+        """pdf='none' (robot check / no PDF attached) should block ingest_complete."""
+        papers = [{"doi": "10.1038/new"}]
+        writer = MagicMock()
+        writer.check_duplicate_by_doi.return_value = None
+        writer.check_has_pdf.return_value = False  # PDF not attached
+
+        with patch("zotpilot.tools.ingestion._ensure_inbox_collection", return_value="INBOX1"), \
+             patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+                 "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+             }), patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion.save_urls", return_value={
+                 "total": 1,
+                 "succeeded": 1,
+                 "failed": 0,
+                 "results": [{
+                     "success": True,
+                     "item_key": "NOPDF1",
+                     "title": "No PDF Paper",
+                     "url": "https://doi.org/10.1038/new",
+                 }],
+             }):
+            result = ingest_papers(papers)
+
+        assert result["ingest_complete"] is False
+        assert result["pdf_summary"]["none"] == 1
+        assert any("without PDF" in blocker for blocker in result["ingest_blockers"])
+
+    def test_preflight_blocked_marks_ingest_incomplete(self):
+        papers = [{"doi": "10.1038/new"}]
+
+        with patch("zotpilot.tools.ingestion._ensure_inbox_collection", return_value="INBOX1"), \
+             patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+                 "checked": 1,
+                 "accessible": [],
+                 "blocked": [{"url": "https://doi.org/10.1038/new"}],
+                 "skipped": [],
+                 "errors": [],
+                 "all_clear": False,
+             }):
+            result = ingest_papers(papers)
+
+        assert result["ingest_complete"] is False
+        assert result["collection_used"] == "INBOX1"
 
     def test_results_list_has_entry_per_paper(self):
         papers = [{"doi": "10.1038/a"}, {"doi": "10.1038/b"}]
@@ -1078,6 +1425,18 @@ class TestBridgeResultDetection:
 class TestParameterCoercion:
     """Tests for Union type parameter coercion (list | str) in MCP tools."""
 
+    def setup_method(self, method):
+        ingestion_module._recently_saved_dois.clear()
+        self._writer_patcher = patch(
+            "zotpilot.tools.ingestion._get_writer",
+            side_effect=ToolError("no writer"),
+        )
+        self._writer_patcher.start()
+
+    def teardown_method(self, method):
+        ingestion_module._recently_saved_dois.clear()
+        self._writer_patcher.stop()
+
     def test_ingest_papers_json_string(self):
         """ingest_papers accepts papers as JSON string."""
         import json
@@ -1183,3 +1542,54 @@ class TestParameterCoercion:
             call_kwargs = mock_req.call_args
             data = json.loads(call_kwargs.kwargs.get("data", b"{}"))
             assert data["tags"] == ["ml", "nlp"]
+
+
+class TestArxivIdDedup:
+    """R3: arxiv_id route uses 10.48550/arxiv.{id} canonical DOI for de-dup."""
+
+    def test_arxiv_id_dedup_via_canonical_doi(self):
+        """When arxiv_id is provided and already in library via canonical DOI, ingest is skipped."""
+        arxiv_id = "2303.00836"
+        canonical_doi = f"10.48550/arxiv.{arxiv_id}"
+        papers = [{"arxiv_id": arxiv_id, "title": "Test ArXiv Paper"}]
+        writer = MagicMock()
+        writer.check_duplicate_by_doi.return_value = "EXISTING_ARXIV"
+        writer.check_has_pdf.return_value = False
+        ingestion_module._recently_saved_dois.clear()
+
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion.save_urls") as save_urls_mock:
+            result = ingest_papers(papers)
+
+        save_urls_mock.assert_not_called()
+        writer.check_duplicate_by_doi.assert_called_once_with(canonical_doi)
+        assert result["ingested"] == 0
+        assert result["skipped_duplicates"] == 1
+        assert result["results"][0]["status"] == "already_in_library"
+        assert result["results"][0]["item_key"] == "EXISTING_ARXIV"
+
+    def test_arxiv_id_dedup_via_recent_cache(self):
+        """When canonical DOI is already in _recently_saved_dois cache, ingest is skipped without API call."""
+        arxiv_id = "2303.00836"
+        canonical_doi = f"10.48550/arxiv.{arxiv_id}"
+        papers = [{"arxiv_id": arxiv_id, "title": "Test ArXiv Paper"}]
+        writer = MagicMock()
+        writer.find_items_by_url_and_title.return_value = ["CACHED_ARXIV"]
+        writer.check_has_pdf.return_value = True
+        ingestion_module._recently_saved_dois.clear()
+        ingestion_module._recently_saved_dois[canonical_doi] = 9999999999.0
+
+        with patch("zotpilot.tools.ingestion._preflight_urls", return_value={
+            "checked": 1, "accessible": [], "blocked": [], "skipped": [], "errors": [], "all_clear": True,
+        }), patch("zotpilot.tools.ingestion._get_writer", return_value=writer), \
+             patch("zotpilot.tools.ingestion.save_urls") as save_urls_mock:
+            result = ingest_papers(papers)
+
+        save_urls_mock.assert_not_called()
+        writer.check_duplicate_by_doi.assert_not_called()
+        assert result["ingested"] == 0
+        assert result["skipped_duplicates"] == 1
+        assert result["results"][0]["status"] == "already_in_library"
+        ingestion_module._recently_saved_dois.clear()

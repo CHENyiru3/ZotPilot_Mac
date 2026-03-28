@@ -13,7 +13,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from ..bridge import DEFAULT_PORT, BridgeServer
-from ..state import _get_config, _get_resolver, _get_writer, mcp
+from ..state import _get_config, _get_resolver, _get_writer, _get_zotero, mcp, register_reset_callback
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,31 @@ _DISCOVERY_BACKOFF_DELAYS = [2.0, 4.0, 8.0]
 # Window for item discovery: only consider items modified within this many seconds
 # before the save completion timestamp.
 _ITEM_DISCOVERY_WINDOW_S = 60
+
+# Save polling windows: connector save + bridge-side item discovery can exceed 90s.
+_SAVE_RESULT_POLL_TIMEOUT_S = 150.0
+_SAVE_RESULT_POLL_OVERALL_TIMEOUT_S = 300.0
+
+# Post-save PDF verification: Zotero may attach PDFs asynchronously after item creation.
+_PDF_CHECK_DELAYS_S = [5.0, 5.0, 5.0]
+
+# DOI-based dedup: track recently saved DOIs to prevent double-saves in slow batches.
+# Process-scoped; lost on server restart (singletons reset via _reset_singletons).
+_recently_saved_dois: dict[str, float] = {}  # doi (normalised, no prefix) -> save timestamp
+_RECENT_SAVE_DEDUP_WINDOW_S = 300  # extended to cover slow batches
+_writer_lock = threading.Lock()
+_inbox_collection_key: str | None = None
+_inbox_lock = threading.Lock()
+
+register_reset_callback(lambda: _recently_saved_dois.clear())
+
+
+def _clear_inbox_cache() -> None:
+    global _inbox_collection_key
+    _inbox_collection_key = None
+
+
+register_reset_callback(_clear_inbox_cache)
 
 # Anti-bot page title patterns (case-insensitive substring match).
 _ANTI_BOT_TITLE_PATTERNS = [
@@ -38,6 +63,20 @@ _ANTI_BOT_TITLE_PATTERNS = [
     "captcha",
     "checking your browser",
     "one more step",
+    "page not found",
+    "404",
+    "not found",
+]
+
+# Error-page title patterns for post-save detection (startswith match, case-insensitive).
+# More permissive than _ANTI_BOT_TITLE_PATTERNS — only used after a save completes,
+# not during preflight (to avoid blocking legitimate paper titles like "Error Analysis...").
+_ERROR_PAGE_TITLE_PATTERNS = [
+    "page not found",
+    "404 -",
+    "access denied",
+    "subscription required",
+    "unavailable -",
 ]
 
 # Publisher suffixes that indicate Zotero translator fallback to webpage save.
@@ -208,8 +247,8 @@ def _preflight_urls(urls: list[str], sample_size: int = 5) -> dict:
         except Exception as e:
             report["errors"].append({"url": url, "error": str(e)})
 
-    _PER_URL_TIMEOUT = 30.0
-    _OVERALL_TIMEOUT = 120.0
+    _PER_URL_TIMEOUT = 60.0
+    _OVERALL_TIMEOUT = 180.0
 
     polled: dict[str, dict] = {}
     polled_lock = threading.Lock()
@@ -223,13 +262,19 @@ def _preflight_urls(urls: list[str], sample_size: int = 5) -> dict:
                 if resp.status != 200:
                     continue
                 result = json.loads(resp.read())
+                if result.get("status") in {"pending", "queued", "processing"}:
+                    continue
                 with polled_lock:
                     polled[request_id] = result
                 return
             except Exception as e:
                 logger.debug("Preflight poll %s: %s", request_id, e)
         with polled_lock:
-            polled[request_id] = {"status": "error", "url": url, "error": "Timeout (30s) — extension did not respond."}
+            polled[request_id] = {
+                "status": "error",
+                "url": url,
+                "error": "Timeout (60s) — page did not finish loading in time.",
+            }
 
     threads = [
         threading.Thread(target=_poll_one, args=(request_id, url), daemon=True)
@@ -313,8 +358,10 @@ def _discover_saved_item_key(
     - If exactly one match: use it.
     - If zero or multiple matches: return None (caller returns warning).
 
-    This is inherently unreliable under concurrent saves or duplicate titles.
-    Phase 2 will replace this with a correlation ID flowing end-to-end.
+    This is inherently unreliable under concurrent saves or duplicate titles,
+    and may miss real matches when titles differ slightly, multiple candidates
+    exist, or the item falls outside the search window. Phase 2 will replace
+    this with a correlation ID flowing end-to-end.
     """
     if known_key:
         return known_key
@@ -359,7 +406,8 @@ def add_paper_by_identifier(
         metadata.oa_url = _enrich_oa_url(metadata.doi)
 
     if metadata.doi:
-        existing = writer.check_duplicate_by_doi(metadata.doi)
+        with _writer_lock:
+            existing = writer.check_duplicate_by_doi(metadata.doi)
         if existing:
             return {
                 "success": True,
@@ -446,7 +494,61 @@ def _is_doi_query(query: str) -> str | None:
     return cleaned if re.match(r"^10\.\d{4,}/\S+$", cleaned) else None
 
 
+def _normalize_doi(doi: str | None) -> str | None:
+    """Return a normalized DOI without scheme/prefix, or None if invalid."""
+    if not doi:
+        return None
+    return _is_doi_query(doi if doi.lower().startswith(("doi:", "http://", "https://")) else f"doi:{doi}")
+
+
 _OA_ARXIV_PREFIX = "https://doi.org/10.48550/arxiv."
+_INBOX_COLLECTION_NAME = "INBOX"
+
+
+def _ensure_inbox_collection() -> str | None:
+    """Return the INBOX collection key, creating it if absent when possible."""
+    global _inbox_collection_key
+    if _inbox_collection_key is not None:
+        return _inbox_collection_key
+
+    with _inbox_lock:
+        if _inbox_collection_key is not None:
+            return _inbox_collection_key
+
+        try:
+            writer = _get_writer()
+        except Exception:
+            return None
+
+        config = _get_config()
+        if not config.zotero_api_key:
+            return None
+
+        try:
+            collections = writer._zot.collections()
+            for coll in collections:
+                data = coll.get("data", {})
+                if data.get("name") == _INBOX_COLLECTION_NAME:
+                    _inbox_collection_key = data.get("key") or coll.get("key")
+                    return _inbox_collection_key
+
+            resp = writer._zot.create_collections([{"name": _INBOX_COLLECTION_NAME}])
+            if resp and "successful" in resp:
+                for val in resp["successful"].values():
+                    _inbox_collection_key = val.get("key") or val.get("data", {}).get("key")
+                    if _inbox_collection_key:
+                        return _inbox_collection_key
+
+            collections = writer._zot.collections()
+            for coll in collections:
+                data = coll.get("data", {})
+                if data.get("name") == _INBOX_COLLECTION_NAME:
+                    _inbox_collection_key = data.get("key") or coll.get("key")
+                    return _inbox_collection_key
+        except Exception as exc:
+            logger.warning("_ensure_inbox_collection failed: %s", exc)
+
+    return None
 
 
 def _format_openalex_paper(p: dict) -> dict:
@@ -487,6 +589,7 @@ def _format_openalex_paper(p: dict) -> dict:
         "landing_page_url": primary.get("landing_page_url"),
         "journal": source.get("display_name"),
         "publisher": source.get("host_organization_name"),
+        "relevance_score": p.get("relevance_score"),
         "_source": "openalex",
     }
 
@@ -538,11 +641,12 @@ def _search_openalex(
             search_query = ""
 
     params: dict = {
-        "per-page": min(limit, 200),
+        "per-page": min(limit * 2, 200),
         "sort": sort_map.get(sort_by, "relevance_score:desc"),
         "select": (
             "id,doi,display_name,authorships,publication_year,"
-            "cited_by_count,open_access,abstract_inverted_index,ids,primary_location"
+            "cited_by_count,open_access,abstract_inverted_index,ids,primary_location,"
+            "relevance_score"
         ),
         "mailto": mailto,
     }
@@ -566,6 +670,12 @@ def _search_openalex(
     resp.raise_for_status()
 
     results = [_format_openalex_paper(p) for p in resp.json().get("results", [])]
+    # OpenAlex already returns results sorted by relevance_score desc; truncate to limit.
+    # No client-side score threshold: the score scale varies by query (e.g. 17000 for
+    # "machine learning" vs 300 for narrow terms), so a fixed ratio filter would silently
+    # drop relevant papers for niche queries. per_page over-fetch is used only to give
+    # citationCount re-sort a larger pool.
+    results = results[:limit]
     if sort_by == "citationCount":
         # Approximation: re-sorts most-cited within the relevance-ranked pool,
         # not globally most-cited. Over-fetching (e.g., 3x per_page) was not chosen
@@ -777,11 +887,25 @@ def ingest_papers(
             f"Batch size {len(papers)} exceeds maximum of 50. Split into smaller batches."
         )
 
+    if collection_key is None:
+        collection_key = _ensure_inbox_collection()
+    resolved_collection_key = collection_key
+
     # Build URL list and identifier map in one pass; collect no-identifier failures eagerly
     results = []
-    ingested = failed = 0
+    ingested = failed = skipped_duplicates = 0
     url_to_identifier: dict[str, str] = {}  # url → human-readable identifier for result mapping
+    url_to_doi: dict[str, str] = {}  # url → normalized doi for recently-saved cache
     urls_to_save: list[str] = []
+    save_candidates: list[dict[str, str | None]] = []
+
+    now = time.time()
+    stale_dois = [
+        doi for doi, saved_at in _recently_saved_dois.items()
+        if now - saved_at > _RECENT_SAVE_DEDUP_WINDOW_S
+    ]
+    for doi in stale_dois:
+        _recently_saved_dois.pop(doi, None)
 
     for paper in papers:
         arxiv_id = paper.get("arxiv_id")
@@ -789,6 +913,9 @@ def ingest_papers(
         landing_url = paper.get("landing_page_url")
 
         # Priority routing: arxiv_id > landing_page_url > doi
+        # NOTE: Always pass `landing_page_url` from search_academic_databases results.
+        # For ScienceDirect/Elsevier and other publisher pages, doi.org redirects frequently
+        # trigger anti-bot checks. Using the direct landing_page_url avoids this.
         if arxiv_id:
             url = f"https://arxiv.org/abs/{arxiv_id}"
         elif landing_url:
@@ -802,7 +929,19 @@ def ingest_papers(
 
         identifier = arxiv_id or doi or url
         url_to_identifier[url] = identifier
+        normalized_doi = _normalize_doi(doi)
+        if not normalized_doi and arxiv_id:
+            normalized_doi = _normalize_doi(f"10.48550/arxiv.{arxiv_id}")
+        if normalized_doi:
+            url_to_doi[url] = normalized_doi
         urls_to_save.append(url)
+        save_candidates.append({
+            "url": url,
+            "identifier": identifier,
+            "title": paper.get("title"),
+            "doi": paper.get("doi"),
+            "arxiv_id": arxiv_id,
+        })
 
     preflight_report = None
     if preflight and urls_to_save:
@@ -825,6 +964,9 @@ def ingest_papers(
                 "failed": failed,
                 "results": results,
                 "preflight_report": preflight_report,
+                "pdf_summary": {"attached": 0, "none": 0, "unknown": 0},
+                "collection_used": resolved_collection_key,
+                "ingest_complete": False,
                 "message": (
                     f"{checked - issue_count} of {checked} URLs checked are accessible. "
                     f"{issue_count} URLs were {issue_label}. "
@@ -833,14 +975,131 @@ def ingest_papers(
                 ),
             }
 
+    dedup_results: list[dict] = []
+    urls_needing_save: list[str] = []
+    pdf_entries_by_key: dict[str, list[dict]] = {}
+
+    def _finalize_pdf_status(entries_by_key: dict[str, list[dict]]) -> None:
+        if not entries_by_key:
+            return
+        try:
+            writer = _get_writer()
+        except Exception:
+            writer = None
+
+        pdf_status_by_key = {item_key: False for item_key in entries_by_key}
+        if writer is not None:
+            for item_key in list(pdf_status_by_key):
+                try:
+                    pdf_status_by_key[item_key] = writer.check_has_pdf(item_key)
+                except Exception:
+                    pass
+            for delay in _PDF_CHECK_DELAYS_S:
+                if all(pdf_status_by_key.values()):
+                    break
+                time.sleep(delay)
+                for item_key, has_pdf in list(pdf_status_by_key.items()):
+                    if has_pdf:
+                        continue
+                    try:
+                        pdf_status_by_key[item_key] = writer.check_has_pdf(item_key)
+                    except Exception:
+                        pass
+
+        for item_key, entries in entries_by_key.items():
+            actual_has_pdf = pdf_status_by_key.get(item_key, False)
+            for entry in entries:
+                entry["pdf"] = "attached" if actual_has_pdf else "none"
+                if not actual_has_pdf:
+                    entry["warning"] = (
+                        "PDF not attached. If Zotero showed a robot verification, "
+                        "please complete it in Zotero and the PDF will download automatically. "
+                        "Otherwise download the PDF manually and attach it in Zotero."
+                    )
+
+    try:
+        dedup_writer = _get_writer()
+    except Exception:
+        dedup_writer = None
+
+    if dedup_writer is not None:
+        for candidate in save_candidates:
+            url = candidate["url"] or ""
+            identifier = candidate["identifier"] or url
+            normalized_doi = _normalize_doi(candidate.get("doi"))
+            # arxiv_id can also serve as a DOI via 10.48550/arxiv.{id}
+            if not normalized_doi and candidate.get("arxiv_id"):
+                normalized_doi = _normalize_doi(f"10.48550/arxiv.{candidate['arxiv_id']}")
+            existing_item_key = None
+            dedup_hit = False
+            if normalized_doi:
+                dedup_hit = normalized_doi in _recently_saved_dois
+                if dedup_hit:
+                    with _writer_lock:
+                        existing_item_key = _discover_saved_item_key(
+                            title=candidate["title"] or "",
+                            url=url,
+                            known_key=None,
+                            writer=dedup_writer,
+                            window_s=_RECENT_SAVE_DEDUP_WINDOW_S,
+                        )
+                else:
+                    # Try local SQLite first — Zotero Web API q= search does not index DOI field
+                    existing_item_key = None
+                    try:
+                        local_hits = _get_zotero().advanced_search(
+                            [{"field": "doi", "op": "is", "value": normalized_doi}], limit=1
+                        )
+                        if local_hits:
+                            existing_item_key = local_hits[0]["item_key"]
+                    except Exception:
+                        pass
+                    if existing_item_key is None:
+                        with _writer_lock:
+                            existing_item_key = dedup_writer.check_duplicate_by_doi(normalized_doi)
+                    dedup_hit = existing_item_key is not None
+            else:
+                with _writer_lock:
+                    existing_item_key = _discover_saved_item_key(
+                        title=candidate["title"] or "",
+                        url=url,
+                        known_key=None,
+                        writer=dedup_writer,
+                        window_s=_RECENT_SAVE_DEDUP_WINDOW_S,
+                    )
+                dedup_hit = existing_item_key is not None
+            if dedup_hit:
+                logger.warning(
+                    "Dedup hit: skipping %s (item_key=%s, matched within %ds)",
+                    url,
+                    existing_item_key,
+                    _RECENT_SAVE_DEDUP_WINDOW_S,
+                )
+                skipped_duplicates += 1
+                entry = {
+                    "identifier": identifier,
+                    "status": "already_in_library",
+                    "item_key": existing_item_key,
+                    "title": candidate["title"],
+                    "pdf": "unknown" if not existing_item_key else "none",
+                    "url": url,
+                }
+                dedup_results.append(entry)
+                if existing_item_key:
+                    pdf_entries_by_key.setdefault(existing_item_key, []).append(entry)
+            else:
+                urls_needing_save.append(url)
+    else:
+        urls_needing_save = list(urls_to_save)
+
     # Batch call: save_urls enqueues all URLs concurrently, avoiding the heartbeat
     # timeout that occurs when serial single-URL calls block the extension for >30s.
     # save_urls caps at 10 URLs per call — chunk and merge when needed.
     _CHUNK_SIZE = 10
-    if urls_to_save:
+    if urls_needing_save:
         merged_results: list[dict] = []
-        for i in range(0, len(urls_to_save), _CHUNK_SIZE):
-            chunk = urls_to_save[i:i + _CHUNK_SIZE]
+        for i in range(0, len(urls_needing_save), _CHUNK_SIZE):
+            chunk = urls_needing_save[i:i + _CHUNK_SIZE]
             chunk_result = save_urls(chunk, collection_key=collection_key, tags=tags)
             merged_results.extend(chunk_result.get("results") or [])
         batch_result = {"results": merged_results}
@@ -850,32 +1109,19 @@ def ingest_papers(
             if sub.get("success"):
                 ingested += 1
                 item_key = sub.get("item_key")
-                # Verify actual PDF status via Zotero Web API — do not trust extension's
-                # pdf_failed flag alone. Zotero-side robot verification (e.g. Elsevier)
-                # completes after extension already reported success, so pdf_failed may be
-                # False even though no PDF was attached.
-                actual_has_pdf = False
-                if item_key:
-                    try:
-                        writer = _get_writer()
-                        actual_has_pdf = writer.check_has_pdf(item_key)
-                    except Exception:
-                        pass
-                pdf_status = "attached" if actual_has_pdf else "none"
                 entry: dict = {
                     "identifier": identifier,
                     "status": "ingested",
                     "item_key": item_key,
                     "title": sub.get("title"),
-                    "pdf": pdf_status,
+                    "pdf": "none",
                     "url": url,
                 }
-                if not actual_has_pdf:
-                    entry["warning"] = (
-                        "PDF not attached. If Zotero showed a robot verification, "
-                        "please complete it in Zotero and the PDF will download automatically. "
-                        "Otherwise download the PDF manually and attach it in Zotero."
-                    )
+                if item_key:
+                    pdf_entries_by_key.setdefault(item_key, []).append(entry)
+                normalized_doi = url_to_doi.get(url)
+                if normalized_doi:
+                    _recently_saved_dois[normalized_doi] = time.time()
                 results.append(entry)
             elif sub.get("anti_bot_detected"):
                 failed += 1
@@ -896,6 +1142,29 @@ def ingest_papers(
                     "error": sub.get("error"),
                     "url": url,
                 })
+            elif sub.get("status") == "timeout_likely_saved":
+                failed += 1
+                item_key = sub.get("item_key")
+                if not item_key and dedup_writer is not None:
+                    with _writer_lock:
+                        item_key = _discover_saved_item_key(
+                            title=sub.get("title", ""),
+                            url=url,
+                            known_key=None,
+                            writer=dedup_writer,
+                            window_s=int(_SAVE_RESULT_POLL_TIMEOUT_S) + 60,
+                        )
+                entry = {
+                    "identifier": identifier,
+                    "status": "timeout_likely_saved",
+                    "error": sub.get("error") or sub.get("error_message"),
+                    "url": url,
+                    "item_key": item_key,
+                    "pdf": "unknown" if not item_key else "none",
+                }
+                if item_key:
+                    pdf_entries_by_key.setdefault(item_key, []).append(entry)
+                results.append(entry)
             elif sub.get("translator_fallback_detected") or sub.get("error_code") == "no_translator":
                 failed += 1
                 results.append({
@@ -918,14 +1187,62 @@ def ingest_papers(
                     entry["error_code"] = sub["error_code"]
                 results.append(entry)
 
-    return {
+        results.extend(dedup_results)
+        _finalize_pdf_status(pdf_entries_by_key)
+    elif dedup_results:
+        results.extend(dedup_results)
+        _finalize_pdf_status(pdf_entries_by_key)
+
+    pdf_summary = {"attached": 0, "none": 0, "unknown": 0}
+    for entry in results:
+        pdf_status = entry.get("pdf")
+        if pdf_status == "attached":
+            pdf_summary["attached"] += 1
+        elif pdf_status == "none":
+            pdf_summary["none"] += 1
+        else:
+            pdf_summary["unknown"] += 1
+
+    missing_item_keys = [r for r in results if r.get("status") == "ingested" and not r.get("item_key")]
+    has_unknown_pdf = pdf_summary["unknown"] > 0
+    has_missing_pdf = pdf_summary["none"] > 0
+    ingest_complete = ingested > 0 and not missing_item_keys and not has_unknown_pdf and not has_missing_pdf
+
+    result = {
         "total": len(papers),
         "ingested": ingested,
-        "skipped_duplicates": 0,
+        "skipped_duplicates": skipped_duplicates,
         "failed": failed,
         "results": results,
         "preflight_report": preflight_report,
+        "pdf_summary": pdf_summary,
+        "collection_used": resolved_collection_key,
+        "ingest_complete": ingest_complete,
     }
+
+    if not ingest_complete and (missing_item_keys or has_unknown_pdf or has_missing_pdf):
+        blockers = []
+        if missing_item_keys:
+            blockers.append(
+                f"{len(missing_item_keys)} items missing item_key — use advanced_search to locate"
+            )
+        if has_unknown_pdf:
+            blockers.append(
+                f"{pdf_summary['unknown']} items with unknown PDF status — use get_paper_details to verify"
+            )
+        if has_missing_pdf:
+            blockers.append(
+                f"{pdf_summary['none']} items saved without PDF — check robot verification in Zotero or attach PDF manually"
+            )
+        result["ingest_blockers"] = blockers
+
+    if tags:
+        result["tags_advisory"] = (
+            "Tags applied at ingest time. For vocabulary-consistent tagging, "
+            "prefer list_tags -> add_item_tags after indexing."
+        )
+
+    return result
 
 
 @mcp.tool()
@@ -957,6 +1274,10 @@ def save_from_url(
             tags = json.loads(tags) if tags else None
         except Exception:
             tags = None
+
+    if collection_key is None:
+        collection_key = _ensure_inbox_collection()
+    resolved_collection_key = collection_key
 
     bridge_url = f"http://127.0.0.1:{DEFAULT_PORT}"
 
@@ -1007,7 +1328,7 @@ def save_from_url(
         return {"success": False, "error": f"Failed to enqueue: {e}"}
 
     # Poll GET /result/<request_id> until result arrives or timeout
-    deadline = time.monotonic() + 90.0
+    deadline = time.monotonic() + _SAVE_RESULT_POLL_TIMEOUT_S
     while time.monotonic() < deadline:
         time.sleep(2)
         try:
@@ -1016,14 +1337,20 @@ def save_from_url(
             )
             if resp.status == 200:
                 result = json.loads(resp.read())
-                return _apply_bridge_result_routing(result, collection_key, tags)
+                routed = _apply_bridge_result_routing(result, collection_key, tags)
+                routed["collection_used"] = resolved_collection_key
+                return routed
         except Exception as e:
             logger.debug("Poll %s: %s", request_id, e)
 
     return {
         "success": False,
-        "error": "Timeout (90s) — extension did not respond. "
-                 "Ensure ZotPilot Connector is installed and Chrome is open.",
+        "status": "timeout_likely_saved",
+        "collection_used": resolved_collection_key,
+        "error": (
+            f"Timeout ({int(_SAVE_RESULT_POLL_TIMEOUT_S)}s) — the paper was likely saved but "
+            "confirmation was not received in time. Check Zotero before retrying."
+        ),
     }
 
 
@@ -1098,21 +1425,18 @@ def save_urls(
             enqueue_errors.append({"url": url, "success": False, "error": str(e)})
 
     # Poll all request_ids concurrently using threads.
-    # Per-URL: 90s timeout. Overall hard cap: 300s.
+    # Per-URL: 150s timeout. Overall hard cap: 300s.
     # Anti-bot short-circuit: the moment any URL hits an anti-bot page, a
     # cancel_event is set so all other threads stop immediately. The caller
     # receives successes so far + the blocking URL flagged as anti_bot_detected,
     # and remaining URLs as "pending" — ready for retry once the user clears the
     # verification in Chrome.
-    _PER_URL_TIMEOUT = 90.0
-    _OVERALL_TIMEOUT = 300.0
-
     polled: dict[str, dict] = {}
     polled_lock = threading.Lock()
     cancel_event = threading.Event()
 
     def _poll_one(request_id: str, url: str) -> None:
-        deadline = time.monotonic() + _PER_URL_TIMEOUT
+        deadline = time.monotonic() + _SAVE_RESULT_POLL_TIMEOUT_S
         while time.monotonic() < deadline:
             if cancel_event.is_set():
                 # Another URL hit anti-bot; mark this one as pending for retry.
@@ -1165,7 +1489,11 @@ def save_urls(
             polled[request_id] = {
                 "url": url,
                 "success": False,
-                "error": "Timeout (90s) — extension did not respond.",
+                "status": "timeout_likely_saved",
+                "error": (
+                    f"Timeout ({int(_SAVE_RESULT_POLL_TIMEOUT_S)}s) — the paper was likely saved but "
+                    "confirmation was not received in time. Check Zotero before retrying."
+                ),
             }
 
     threads = [
@@ -1175,7 +1503,7 @@ def save_urls(
     for t in threads:
         t.start()
 
-    overall_deadline = time.monotonic() + _OVERALL_TIMEOUT
+    overall_deadline = time.monotonic() + _SAVE_RESULT_POLL_OVERALL_TIMEOUT_S
     for t in threads:
         remaining = overall_deadline - time.monotonic()
         if remaining > 0:
@@ -1218,8 +1546,61 @@ def _apply_bridge_result_routing(
         # Save failed — propagate error, no routing possible
         return result
 
-    # Translator fallback detection: publisher suffix in title means webpage saved instead of paper.
+    # Error-page detection: title starts with known error-page prefix → save was useless.
     title = (result.get("title") or "").lower()
+    if any(title.startswith(pattern) for pattern in _ERROR_PAGE_TITLE_PATTERNS):
+        raw_title = result.get("title", "")
+        item_key = result.get("item_key")
+        try:
+            writer = _get_writer()
+        except Exception:
+            writer = None
+        if item_key:
+            if writer is not None and hasattr(writer, "delete_item"):
+                try:
+                    writer.delete_item(item_key)
+                except Exception:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Failed to delete error-page item %s", item_key
+                    )
+        elif writer is not None:
+            with _writer_lock:
+                discovered_key = _discover_saved_item_key(
+                    title=result.get("title", ""),
+                    url=result.get("url", ""),
+                    known_key=None,
+                    writer=writer,
+                    window_s=60,
+                )
+            if discovered_key:
+                try:
+                    writer.delete_item(discovered_key)
+                except Exception:
+                    logger.warning("Failed to delete discovered error-page item %s", discovered_key)
+            else:
+                logger.warning(
+                    "Error page detected but item deletion could not be confirmed (title=%r, url=%r)",
+                    raw_title,
+                    result.get("url", ""),
+                )
+        else:
+            logger.warning(
+                "Error page detected but writer unavailable for cleanup (title=%r, url=%r)",
+                raw_title,
+                result.get("url", ""),
+            )
+        return {
+            **result,
+            "success": False,
+            "error_code": "error_page_detected",
+            "error": (
+                f"Error page saved instead of paper (title: '{raw_title}'). "
+                "The URL returned an error page. Try a different URL or add the paper manually."
+            ),
+        }
+
+    # Translator fallback detection: publisher suffix in title means webpage saved instead of paper.
     if any(title.endswith(suffix) for suffix in _TRANSLATOR_FALLBACK_SUFFIXES):
         return {
             **result,
@@ -1250,23 +1631,25 @@ def _apply_bridge_result_routing(
         item_key = None
         for delay in _DISCOVERY_BACKOFF_DELAYS:
             time.sleep(delay)
-            item_key = _discover_saved_item_key(
-                title=result.get("title", ""),
-                url=result.get("url", ""),
-                known_key=None,
-                writer=writer,
-                window_s=_ITEM_DISCOVERY_WINDOW_S,
-            )
+            with _writer_lock:
+                item_key = _discover_saved_item_key(
+                    title=result.get("title", ""),
+                    url=result.get("url", ""),
+                    known_key=None,
+                    writer=writer,
+                    window_s=_ITEM_DISCOVERY_WINDOW_S,
+                )
             if item_key:
                 break
     else:
-        item_key = _discover_saved_item_key(
-            title=result.get("title", ""),
-            url=result.get("url", ""),
-            known_key=result.get("item_key"),
-            writer=writer,
-            window_s=_ITEM_DISCOVERY_WINDOW_S,
-        )
+        with _writer_lock:
+            item_key = _discover_saved_item_key(
+                title=result.get("title", ""),
+                url=result.get("url", ""),
+                known_key=result.get("item_key"),
+                writer=writer,
+                window_s=_ITEM_DISCOVERY_WINDOW_S,
+            )
 
     out = {**result}
     if item_key:

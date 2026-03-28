@@ -472,3 +472,32 @@ class TestAdvancedSearchTool:
 
         assert len(results) == 1
         assert results[0]["item_key"] == "ITEM01"
+
+    def test_tool_accepts_json_string_conditions(self, tmp_path):
+        """MCP tool parses conditions passed as a JSON string (FastMCP list param workaround)."""
+        import json
+        from zotpilot.tools.search import advanced_search
+
+        db = _create_search_db(tmp_path)
+        _insert_item(db, 1, "ITEM01", "Neural Network Paper", 2022, [("A", "Smith")])
+
+        mock_client = _make_client(tmp_path)
+        conditions_str = json.dumps([{"field": "title", "op": "contains", "value": "neural"}])
+
+        with patch("zotpilot.tools.search._get_zotero", return_value=mock_client):
+            results = advanced_search(conditions=conditions_str)
+
+        assert len(results) == 1
+        assert results[0]["item_key"] == "ITEM01"
+
+    def test_tool_invalid_json_string_raises_toolerror(self, tmp_path):
+        """MCP tool raises ToolError when conditions is an invalid JSON string."""
+        from zotpilot.tools.search import advanced_search
+        from zotpilot.state import ToolError
+
+        _create_search_db(tmp_path)
+        mock_client = _make_client(tmp_path)
+
+        with patch("zotpilot.tools.search._get_zotero", return_value=mock_client):
+            with pytest.raises(ToolError, match="conditions must be a JSON array"):
+                advanced_search(conditions="not valid json")

@@ -1,4 +1,5 @@
 """Search tools: semantic, topic, boolean, tables, figures."""
+import json
 import logging
 import time
 from collections import defaultdict
@@ -443,13 +444,18 @@ def search_figures(
 
 @mcp.tool()
 def advanced_search(
-    conditions: Annotated[list[dict], Field(description='[{field, op, value}]. Fields: title, author, year, tag, collection, publication, doi. Ops: contains, is, isNot, beginsWith, gt, lt.')],  # noqa: E501
+    conditions: Annotated[str | list[dict], Field(description='[{field, op, value}]. Fields: title, author, year, tag, collection, publication, doi. Ops: contains, is, isNot, beginsWith, gt, lt.')],  # noqa: E501
     match: Annotated[Literal["all", "any"], Field(description="all=AND, any=OR")] = "all",
     sort_by: Annotated[str | None, Field(description="Sort: year, title, dateAdded")] = None,
     sort_dir: Annotated[Literal["asc", "desc"], Field(description="Sort direction")] = "desc",
     limit: Annotated[int, Field(description="Max results", ge=1, le=500)] = 50,
 ) -> list[dict]:
     """Multi-condition metadata search. Works without indexing. Use for precise filters by year/author/tag/etc."""
+    if isinstance(conditions, str):
+        try:
+            conditions = json.loads(conditions)
+        except Exception:
+            raise ToolError("conditions must be a JSON array of {field, op, value} dicts")
     try:
         return _get_zotero().advanced_search(
             conditions=conditions,

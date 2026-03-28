@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from ..state import ToolError, _get_api_reader, _get_store_optional, _get_zotero, mcp
+from ..state import ToolError, _get_api_reader, _get_store_optional, _get_writer, _get_zotero, mcp
 from ..zotero_client import _sqlite_uri
 
 logger = logging.getLogger(__name__)
@@ -153,6 +153,18 @@ def get_notes(
 ) -> list[dict]:
     """Get or search notes. Filter by parent item and/or content keyword."""
     notes = _get_zotero().get_notes(item_key=item_key, query=query, limit=limit)
+    if not notes:
+        try:
+            writer = _get_writer()
+            api_notes = writer.get_notes(item_key=item_key, query=query, limit=limit)
+            if api_notes:
+                # Merge: Web API wins on key conflict
+                merged: dict[str, dict] = {n["key"]: n for n in notes}
+                for n in api_notes:
+                    merged[n["key"]] = n
+                notes = list(merged.values())
+        except ToolError:
+            pass  # No API key — accept SQLite empty result
     if verbosity == "minimal":
         return [
             {

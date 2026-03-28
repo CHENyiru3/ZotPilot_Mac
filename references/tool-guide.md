@@ -57,7 +57,7 @@ search_topic(
 
 - Returns one entry per paper (not per chunk), sorted by avg_composite_score
 - `num_relevant_chunks` tells you how deeply relevant the paper is (higher = discusses topic throughout, not just once)
-- Use `best_passage` for a quick preview; use `doc_id` with `get_passage_context` for full text
+- Use `doc_id` with `get_passage_context` for full text (`best_passage` field no longer returned)
 
 ### search_boolean — for exact matches
 
@@ -152,6 +152,14 @@ If you get "Document has no DOI", the paper's DOI field is empty in Zotero. Tell
 3. `create_collection(theme_name)` — create folder
 4. For each matching paper: `add_to_collection(item_key, collection_key)`
 5. `add_item_tags(item_key, [theme_tag])` — cross-reference with tags
+
+### Research → Ingest → Organize
+1. `search_academic_databases(query, limit=20)` — find candidate papers outside the library
+2. Show candidates to the user and confirm which ones to ingest
+3. `ingest_papers(papers)` — defaults to INBOX and returns `ingest_complete`
+4. Read `preflight_report`, `pdf_summary`, `collection_used`, and `ingest_complete`
+5. Present the ingest table to the user and ask once whether to continue with indexing, notes, classification, and tags
+6. If confirmed, follow [references/post-ingest-guide.md](/Users/zxd/ZotPilot/references/post-ingest-guide.md)
 
 ### Find a specific paper
 1. Try `search_boolean(query="author_last_name keyword", operator="AND")` first

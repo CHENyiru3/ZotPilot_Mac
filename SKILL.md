@@ -59,6 +59,21 @@ compatibility:
 | `list_collections` | All collections |
 | `get_collection_papers` | All papers in a specific collection |
 
+### Indexing
+
+| Tool | Use when |
+|------|----------|
+| `index_library` | Index all or specific papers for semantic search |
+| `get_index_stats` | Check index status, total documents, chunk type counts |
+
+### Admin
+
+| Tool | Use when |
+|------|----------|
+| `switch_library` | Switch active library for metadata/write tools. **Does NOT affect RAG search, passage context, or indexing** — those always use the default user library. |
+| `get_reranking_config` | Show current reranking weights and scoring config |
+| `get_vision_costs` | Show accumulated vision API usage and costs |
+
 ### External discovery
 
 | Tool | Use when |
@@ -78,9 +93,9 @@ compatibility:
 
 | Tool | Use when |
 |------|----------|
-| `ingest_papers` | Batch add papers by DOI / arXiv ID / OA URL |
+| `ingest_papers` | Batch add papers by DOI / arXiv ID / OA URL (defaults to INBOX). Returns `ingest_complete` for post-ingest gating |
 | `save_urls` | Save non-OA papers via browser connector |
-| `save_from_url` | Save a single URL via browser connector |
+| `save_from_url` | Save a single URL via browser connector (defaults to INBOX) |
 
 ### Write (requires `ZOTERO_API_KEY` + `ZOTERO_USER_ID`)
 
@@ -102,10 +117,26 @@ compatibility:
 
 ### Agent research discovery ("帮我调研 X")
 
-**Step 0 — Subscription check** (mandatory):
-Check whether user has a Zotero Web API key configured. Write ops (`save_from_url`, `save_urls`, tag/collection tools) require `ZOTERO_API_KEY`. If not set, warn before proceeding.
+**Step 1 — Clarify intent (mandatory before any action):**
 
-**Default research flow:**
+"调研"、"find papers"、"literature review" can mean two very different things. Determine which before acting:
+
+| Intent | Signal words | Action |
+|--------|-------------|--------|
+| **External discovery** — find new papers from academic databases, then ingest | "调研"、"找文献"、"帮我找一些 X 的论文"、"搜集文献" | Go to **External discovery flow** below |
+| **Local synthesis** — summarize / analyze what is already in the library | "基于我的文献库"、"我库里有哪些 X"、"帮我梳理"、"综述一下" | Go to **Local search flow** below |
+
+If the intent is ambiguous, **ask the user** before proceeding:
+> "您是希望从外部数据库发现并入库新文献，还是基于现有文献库做梳理总结？"
+
+---
+
+### Local search flow (synthesize existing library)
+
+**Step 0 — Readiness check:** call `get_index_stats()` first.
+- If it returns indexed documents → proceed to semantic search below.
+- If it reports no index or `embedding_provider: "none"` → fall back to `advanced_search` / `search_boolean` (metadata-only, always available). Do NOT attempt `search_topic` or `search_papers` — they will error.
+
 1. `search_topic(X)` to discover what is already in the local library
 2. Optionally `search_papers(X)` when you need supporting passages
 3. Optionally `get_passage_context(doc_id, chunk_index)` when you need surrounding text
@@ -116,49 +147,84 @@ All search tools default to `verbosity="minimal"`. Escalate to `standard` or `fu
 `doc_id` is the canonical identifier across tools. In `search_boolean`, `item_key` remains as a backward-compatible alias with the same value.
 `get_library_overview` and `get_paper_details` now return `doc_id` instead of `key`.
 
-**External discovery** remains available when you need new papers:
+---
+
+### External discovery flow (find and ingest new papers)
+
+**Step 2 — Prerequisites check:**
+
+- Check `ZOTERO_API_KEY` is configured. Without it, `ingest_papers` / `save_urls` can still save papers, but `item_key` discovery and collection/tag routing will be skipped. A warning is only attached when `collection_key` or `tags` were passed; otherwise the result is returned silently without `item_key`. Warn the user and proceed — do not stop.
+- Check `~/.config/zotpilot/ZOTPILOT.md` for a `## Subscription Info` section:
+  - **Found** → use recorded subscription info to determine which publishers' PDFs are accessible via institutional access.
+  - **Not found** → ask the user: "您的机构订阅了哪些出版商？（如 Elsevier、Springer、Nature、ACS 等）" → after user replies, append a `## Subscription Info` section to ZOTPILOT.md so it is never asked again.
+  - **ZOTPILOT.md missing entirely** → trigger library profiling first: follow `references/profiling-guide.md`
+
+**Step 3 — Search and score candidates:**
+
 `search_academic_databases(X, limit=20)` (add PubMed MCP for biomedical topics)
 
-**Score candidates** per `references/scoring-guide.md`
+Score candidates per `references/scoring-guide.md`
 
 > **MUST STOP** — Show scored list to user and wait for explicit confirmation before any ingest. Do not proceed automatically.
 
-**Ingest** (after user confirms list):
+**Step 4 — De-duplicate:**
 
-De-duplicate first: batch-check all candidate DOIs in one call:
-`advanced_search(conditions=[{field:"doi", op:"is", value:"doi1"}, ...], match:"any")`
-- Already in library → skip ingest, inform user ("已在库中: Title"), use existing `item_key` for Step 4
-- Not found → route each new paper by priority:
+Batch-check all confirmed candidate DOIs in one call:
+`advanced_search(conditions=[{"field":"doi", "op":"is", "value":"doi1"}, ...], match:"any")`
+- Already in library → skip ingest, inform user ("已在库中: Title"), use existing `item_key` for Step 7
+- Not in library → proceed to Step 5
 
-Preflight check:
-- `ingest_papers(...)` now runs an accessibility preflight by default before it saves anything through the Connector.
-- Read `preflight_report` on every `ingest_papers` response. It contains `checked`, `accessible`, `blocked`, `skipped`, `errors`, and `all_clear`.
-- If `all_clear=false`, stop and show the blocked/error URLs to the user before retrying. No save should have happened yet on that code path.
-- Use `preflight=False` only when the user explicitly wants to bypass the check after resolving access issues or accepting the risk.
+**Step 5 — Preflight (anti-bot check via Connector):**
+
+The user may leave their computer after issuing a research command — a silent anti-bot block mid-batch will stall the entire workflow.
+
+Preflight works by sending `{"action": "preflight", "url": ...}` through the ZotPilot Connector, which probes each URL **inside the already-logged-in Chrome browser** — institutional session cookies are active, so the result reflects actual access conditions.
+
+`ingest_papers` runs preflight automatically (default `preflight=True`) for all URLs it handles (Priority 1 & 2). Always read `preflight_report` on every `ingest_papers` response:
+- `all_clear=true` → proceed to save
+- `all_clear=false` → **stop immediately**, show blocked/error URLs to user, wait for resolution before retrying
+- Use `preflight=False` only when user explicitly bypasses after resolving the issue
+
+For Priority 3 (`save_urls`): call `save_urls([landing_page_url, ...])` directly — `save_urls` itself handles browser-based saving. Do NOT use `ingest_papers` as a preflight-only probe for Priority 3 URLs, because `ingest_papers` will proceed to save when preflight succeeds, causing duplicate saves. Preflight is only relevant for Priority 1 & 2 (where `ingest_papers` is the actual save tool).
+
+**Step 6 — Route and ingest:**
+
+> **Always pass the `landing_page_url` field from `search_academic_databases` results directly into `ingest_papers`. Never construct the papers list without including `landing_page_url` when it is available in the search result.**
 
 | Priority | Condition | Tool |
 |----------|-----------|------|
 | 1 | `arxiv_id` present | `ingest_papers([{arxiv_id:...}])` |
-| 2 | `doi` + `is_oa=True` + `oa_url` | `ingest_papers([{doi:..., oa_url:...}])` |
-| 3 | `doi` + `is_oa=False` + `landing_page_url` | `save_urls([landing_page_url])` — requires Chrome+Connector |
-| 4 | `doi` only | `ingest_papers([{doi:...}])` — metadata only, no PDF |
+| 2 | `doi` + `is_oa=True` + `oa_url` present | `ingest_papers([{doi:..., landing_page_url: <oa_url>}])` — pass `oa_url` value as `landing_page_url` (i.e., `landing_page_url` = the `oa_url` value from the search result) |
+| 3 | `doi` + `is_oa=False` + `landing_page_url` + user has subscription | `save_urls([landing_page_url])` — use `landing_page_url` from the search result as-is. Do not construct the URL from DOI alone. Requires Chrome+Connector. |
+| 4 | `doi` only (no subscription or OA) | `ingest_papers([{doi:...}])` — metadata only, no PDF |
 | 5 | No `doi` | Skip, inform user |
 
-Anti-bot / translator recovery:
-- `save_urls` entry has `error_code: "anti_bot_detected"` → retry with canonical DOI URL (`doi.org/{doi}`) or ask user to open the page manually in Chrome
-- `save_urls` entry has `translator_fallback_detected=True` → saved as web snapshot; user should verify/replace in Zotero
-- `save_urls` entry has `pdf_failed=True` (Elsevier-style robot check on PDF) → metadata saved successfully; inform user to download PDF manually
+> **ScienceDirect / Elsevier note:** `doi.org` redirects to ScienceDirect frequently trigger anti-bot. Always use the `landing_page_url` from OpenAlex when available. If only DOI is available, `save_urls([f"https://www.sciencedirect.com/science/article/doi/{doi}"])` is more reliable than `doi.org`.
 
-**Step 4 — Post-ingest:** for each `item_key`, follow `references/post-ingest-guide.md`
+> **Tags at ingest are discouraged.** The tool emits a `tags_advisory` warning when tags are passed. Prefer tagging after indexing and note generation: call `list_tags` first, pick from existing vocabulary only, and ask the user before adding any new tag.
 
-Post-ingest includes mandatory note generation for every ingested paper:
-- **Workflow A (brief, automatic):** runs for every paper — see `references/note-analysis-prompt.md`
+> **Initial ingest defaults to INBOX.** No need to pass `collection_key` for `ingest_papers` or `save_from_url` unless you explicitly want another collection.
+
+**Step 7 — Post-ingest:**
+
+1. Read `ingest_complete` from tool output:
+   - `true` → present the ingest result table to the user, then ask once whether to run post-ingest workflow
+   - `false` → resolve `ingest_blockers` first, then re-evaluate the gate
+2. After the user confirms, execute `references/post-ingest-guide.md` Phase 2 automatically
+3. Do not ask for confirmation at each sub-step (index, notes, classify, tag). The Phase 1 confirmation covers all of them.
+4. Exception: if auto-classification or tag selection is uncertain, batch unresolved cases and ask once at the end
+
+Post-ingest note generation options:
+- **Workflow A (brief, default post-ingest path):** runs when user confirms post-ingest workflow — see `references/note-analysis-prompt.md`
 - **Workflow B (full, on demand):** user says "帮我深读 X" / "详细分析这篇" — see `references/note-analysis-prompt.md`
 
 Note templates: `references/note-template-brief.md` (Workflow A) · `references/note-template-full.md` (Workflow B)
 
-**Library profiling:**
-Trigger: user says "分析我的文献库", "profile my library", or ZOTPILOT.md missing before research starts → follow `references/profiling-guide.md`
+---
+
+### Library profiling
+
+Trigger: user says "分析我的文献库", "profile my library", or ZOTPILOT.md is missing when a research workflow is about to start → follow `references/profiling-guide.md`
 
 ---
 
@@ -169,5 +235,5 @@ Trigger: user says "分析我的文献库", "profile my library", or ZOTPILOT.md
 | `extension_not_connected` | Chrome not open or Connector not installed/enabled | Open Chrome, check `chrome://extensions/`, enable ZotPilot Connector |
 | `error_code: "anti_bot_detected"` | Cloudflare / publisher blocked the save before it happened | Retry with `doi.org/{doi}`, or ask user to manually open page in Chrome first |
 | `translator_fallback_detected` | No Zotero translator matched the page | Saved as web snapshot — user should verify/replace in Zotero |
-| `pdf_failed: true` | Elsevier-style secondary robot check blocked PDF download | Metadata saved OK; user downloads PDF manually and attaches in Zotero |
+| `pdf: "none"` + `warning` in result | PDF not attached — robot check blocked download or PDF unavailable | Metadata saved OK; user downloads PDF manually and attaches in Zotero |
 | `status: "pending"` in batch result | Anti-bot triggered mid-batch; remaining URLs were short-circuited | Re-run ingest for the pending items after user resolves the blocked page |

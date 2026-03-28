@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 import httpx
 from pyzotero import zotero
 
+from .zotero_client import _strip_html
+
 logger = logging.getLogger(__name__)
 
 
@@ -126,6 +128,43 @@ class ZoteroWriter:
             return {"key": created_key, "parent_key": item_key}
         raise RuntimeError(f"Failed to create note: {result}")
 
+    def get_notes(self, item_key: str | None = None, query: str | None = None, limit: int = 20) -> list[dict]:
+        """Read notes via Zotero Web API. Returns notes in the same format as ZoteroClient.get_notes."""
+        try:
+            if item_key:
+                raw_items = self._zot.children(item_key, itemType="note")
+            else:
+                self._zot.url_params = {}
+                raw_items = self._zot.items(itemType="note", limit=limit)
+        except Exception as e:
+            logger.warning("ZoteroWriter.get_notes failed: %s", e)
+            return []
+        finally:
+            self._zot.url_params = {}
+
+        results: list[dict] = []
+        for item in raw_items:
+            data = item.get("data") or {}
+            if data.get("itemType") != "note":
+                continue
+            raw_content = data.get("note") or ""
+            content = _strip_html(raw_content)
+            if query and query.lower() not in content.lower():
+                continue
+            tag_list = data.get("tags") or []
+            tags_str = "; ".join(t["tag"] for t in tag_list if t.get("tag"))
+            results.append({
+                "key": data.get("key") or item.get("key") or "",
+                "parent_key": data.get("parentItem") or "",
+                "parent_title": "",
+                "tags": tags_str,
+                "content": content,
+                "date_added": data.get("dateAdded") or "",
+            })
+            if len(results) >= limit:
+                break
+        return results
+
     # =========================================================
     # Ingestion helpers
     # =========================================================
@@ -228,17 +267,19 @@ class ZoteroWriter:
             if doi.lower().startswith(prefix):
                 doi = doi[len(prefix):]
                 break
-
-        results = self._zot.items(q=doi, qmode="everything", limit=5)
-        for item in results:
-            item_doi = (item.get("data") or {}).get("DOI", "").strip()
-            for prefix in ("https://doi.org/", "http://doi.org/", "doi.org/"):
-                if item_doi.lower().startswith(prefix):
-                    item_doi = item_doi[len(prefix):]
-                    break
-            if item_doi.lower() == doi.lower():
-                return item["data"]["key"]
-        return None
+        try:
+            results = self._zot.items(q=doi, qmode="everything", limit=5)
+            for item in results:
+                item_doi = (item.get("data") or {}).get("DOI", "").strip()
+                for prefix in ("https://doi.org/", "http://doi.org/", "doi.org/"):
+                    if item_doi.lower().startswith(prefix):
+                        item_doi = item_doi[len(prefix):]
+                        break
+                if item_doi.lower() == doi.lower():
+                    return item["data"]["key"]
+            return None
+        finally:
+            self._zot.url_params = {}
 
     def create_item_from_metadata(
         self,
