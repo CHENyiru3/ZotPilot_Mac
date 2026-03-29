@@ -37,3 +37,11 @@ docs/test-runs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Connector (browser extension)
+connector/node_modules/
+connector/build/
+connector/dist/
+connector/build.log
+connector/cert/
+connector/config.sh
