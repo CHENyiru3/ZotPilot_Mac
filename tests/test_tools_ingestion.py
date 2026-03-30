@@ -1,12 +1,19 @@
 """Tests for ingestion MCP tools."""
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastmcp.exceptions import ToolError
 
-from zotpilot.tools.ingestion import ingest_papers, save_from_url, search_academic_databases
+from zotpilot.tools.ingestion import (
+    _batch_store,
+    ingest_papers,
+    save_from_url,
+    search_academic_databases,
+)
+from zotpilot.tools.ingestion import get_ingest_status  # noqa: F401 – tested directly
 
 
 def _make_config(*, preflight_enabled=False, openalex_email=None, zotero_api_key=None):
@@ -48,6 +55,17 @@ def _mock_oa_response(data=None, status_code=200):
     return mock_resp
 
 
+def _wait_for_batch(batch_id, timeout=5.0):
+    """Wait for a batch to finalize."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        batch = _batch_store.get(batch_id)
+        if batch is None or batch.is_final:
+            return batch
+        time.sleep(0.05)
+    return _batch_store.get(batch_id)
+
+
 class TestSearchAcademicDatabases:
     def test_returns_formatted_list(self):
         with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
@@ -86,6 +104,9 @@ class TestSearchAcademicDatabases:
 
 
 class TestIngestPapers:
+    def setup_method(self):
+        _batch_store.clear()
+
     def test_over_50_raises_tool_error(self):
         papers = [{"doi": f"10.1000/{i}", "landing_page_url": f"https://example.com/{i}"} for i in range(51)]
         with pytest.raises(ToolError, match="50"):
@@ -105,6 +126,8 @@ class TestIngestPapers:
                  ],
              }) as save_urls_mock:
             result = ingest_papers(papers)
+            # Wait inside with-block so mock is still active when background thread runs
+            _wait_for_batch(result["batch_id"])
 
         assert save_urls_mock.call_args.kwargs["collection_key"] == "INBOX1"
         assert result["collection_used"] == "INBOX1"
@@ -118,6 +141,7 @@ class TestIngestPapers:
                  ],
              }) as save_urls_mock:
             result = ingest_papers(papers, collection_key="COL1")
+            _wait_for_batch(result["batch_id"])
 
         assert save_urls_mock.call_args.kwargs["collection_key"] == "COL1"
         assert result["collection_used"] == "COL1"
@@ -140,6 +164,7 @@ class TestIngestPapers:
     def test_arxiv_id_has_priority(self):
         papers = [{"doi": "10.1000/test", "arxiv_id": "2401.00001", "landing_page_url": "https://publisher.example/paper"}]
         with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
+             patch("zotpilot.tools.ingestion._lookup_local_item_key_by_doi", return_value=None), \
              patch("zotpilot.tools.ingestion.save_urls", return_value={
                  "results": [
                      {
@@ -150,7 +175,8 @@ class TestIngestPapers:
                      },
                  ],
              }) as save_urls_mock:
-            ingest_papers(papers)
+            result = ingest_papers(papers)
+            _wait_for_batch(result["batch_id"])
 
         assert save_urls_mock.call_args.args[0] == ["https://arxiv.org/abs/2401.00001"]
 
@@ -162,7 +188,8 @@ class TestIngestPapers:
                      {"success": True, "url": "https://publisher.example/paper", "item_key": "ITEM1", "title": "Paper"},
                  ],
              }) as save_urls_mock:
-            ingest_papers(papers)
+            result = ingest_papers(papers)
+            _wait_for_batch(result["batch_id"])
 
         assert save_urls_mock.call_args.args[0] == ["https://publisher.example/paper"]
 
@@ -194,7 +221,8 @@ class TestIngestPapers:
                      {"success": True, "url": "https://publisher.example/paper", "item_key": "ITEM1", "title": "Paper"},
                  ],
              }):
-            ingest_papers(papers)
+            result = ingest_papers(papers)
+            _wait_for_batch(result["batch_id"])
 
         preflight_mock.assert_called_once()
 
@@ -207,7 +235,8 @@ class TestIngestPapers:
                      {"success": True, "url": "https://publisher.example/paper", "item_key": "ITEM1", "title": "Paper"},
                  ],
              }):
-            ingest_papers(papers)
+            result = ingest_papers(papers)
+            _wait_for_batch(result["batch_id"])
 
         preflight_mock.assert_not_called()
 
@@ -239,9 +268,12 @@ class TestIngestPapers:
                  "results": [],
              }):
             result = ingest_papers(papers)
+            batch_id = result["batch_id"]
+            _wait_for_batch(batch_id)
 
-        assert result["failed"] == 1
-        assert result["results"][0]["error"] == "bridge save failed"
+        status = get_ingest_status(batch_id)
+        assert status["failed"] == 1
+        assert status["results"][0]["error"] == "bridge save failed"
 
     def test_missing_batch_result_marks_unmatched_url_failed(self):
         papers = [
@@ -255,12 +287,15 @@ class TestIngestPapers:
                  ],
              }):
             result = ingest_papers(papers)
+            batch_id = result["batch_id"]
+            _wait_for_batch(batch_id)
 
-        assert result["saved"] == 1
-        assert result["failed"] == 1
+        status = get_ingest_status(batch_id)
+        assert status["saved"] == 1
+        assert status["failed"] == 1
         assert any(
             item["url"] == "https://publisher.example/2" and item["status"] == "failed"
-            for item in result["results"]
+            for item in status["results"]
         )
 
     def test_success_and_failure_are_mapped_to_simplified_statuses(self):
@@ -276,10 +311,106 @@ class TestIngestPapers:
                  ],
              }):
             result = ingest_papers(papers)
+            batch_id = result["batch_id"]
+            _wait_for_batch(batch_id)
 
+        status = get_ingest_status(batch_id)
+        assert status["saved"] == 1
+        assert status["failed"] == 1
+        assert {item["status"] for item in status["results"]} == {"saved", "failed"}
+
+
+class TestGetIngestStatus:
+    def setup_method(self):
+        _batch_store.clear()
+
+    def test_not_found(self):
+        result = get_ingest_status("ing_nonexistent")
+        assert result["state"] == "not_found"
+        assert result["is_final"] is True
+
+    def test_returns_full_status(self):
+        from zotpilot.tools.ingest_state import BatchState, IngestItemState
+
+        items = [IngestItemState(index=0, url="https://example.com", title="T")]
+        batch = BatchState(total=1, collection_used="INBOX1", tags=None, pending_items=items)
+        _batch_store.put(batch)
+        result = get_ingest_status(batch.batch_id)
+        assert result["batch_id"] == batch.batch_id
+        assert result["state"] == "queued"
+        assert result["is_final"] is False
+        assert result["pending_count"] == 1
+
+    def test_returns_final_with_item_keys(self):
+        from zotpilot.tools.ingest_state import BatchState, IngestItemState
+
+        items = [IngestItemState(index=0, url="https://example.com", title="T")]
+        batch = BatchState(total=1, collection_used="INBOX1", tags=None, pending_items=items)
+        batch.update_item(0, status="saved", item_key="ITEM1", title="Real Title")
+        batch.finalize()
+        _batch_store.put(batch)
+        result = get_ingest_status(batch.batch_id)
+        assert result["is_final"] is True
         assert result["saved"] == 1
+        assert result["results"][0]["item_key"] == "ITEM1"
+
+
+class TestIngestPapersAsync:
+    def setup_method(self):
+        _batch_store.clear()
+
+    def test_returns_batch_id_and_pending(self):
+        papers = [{"landing_page_url": "https://publisher.example/paper"}]
+        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
+             patch("zotpilot.tools.ingestion.save_urls", return_value={
+                 "results": [
+                     {"success": True, "url": "https://publisher.example/paper", "item_key": "ITEM1", "title": "Paper"},
+                 ],
+             }):
+            result = ingest_papers(papers)
+
+        assert "batch_id" in result
+        assert result["batch_id"].startswith("ing_")
+        assert "pending_count" in result
+        assert "_instruction" in result
+
+    def test_duplicates_resolved_immediately(self):
+        papers = [{"doi": "10.1000/existing", "landing_page_url": "https://publisher.example/paper"}]
+        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
+             patch("zotpilot.tools.ingestion._lookup_local_item_key_by_doi", return_value="EXISTING1"):
+            result = ingest_papers(papers)
+
+        assert result["is_final"] is True
+        assert result["pending_count"] == 0
+        assert result["duplicates"] == 1
+
+    def test_no_save_candidates_returns_final(self):
+        # Papers with no usable identifier → all fail immediately, is_final
+        papers = [{"title": "No identifier here"}]
+        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()):
+            result = ingest_papers(papers)
+
+        assert result["is_final"] is True
+        assert result["pending_count"] == 0
         assert result["failed"] == 1
-        assert {item["status"] for item in result["results"]} == {"saved", "failed"}
+
+    def test_preflight_blocked_returns_final(self):
+        papers = [{"landing_page_url": "https://publisher.example/paper"}]
+        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=True)), \
+             patch("zotpilot.tools.ingestion.ingestion_bridge.preflight_urls", return_value={
+                 "checked": 1,
+                 "accessible": [],
+                 "blocked": [{"url": "https://publisher.example/paper", "error": "robot check"}],
+                 "skipped": [],
+                 "errors": [],
+                 "all_clear": False,
+             }), \
+             patch("zotpilot.tools.ingestion.save_urls") as save_urls_mock:
+            result = ingest_papers(papers)
+
+        assert result["is_final"] is True
+        assert result["pending_count"] == 0
+        save_urls_mock.assert_not_called()
 
 
 class TestSaveFromUrl:

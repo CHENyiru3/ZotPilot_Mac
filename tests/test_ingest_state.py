@@ -5,8 +5,6 @@ from __future__ import annotations
 import threading
 import time
 
-import pytest
-
 from zotpilot.tools.ingest_state import BatchState, BatchStore, IngestItemState
 
 
