@@ -111,6 +111,10 @@ def index_library(
             "long_documents": result.get("long_documents", []),
             "skipped_long": result.get("skipped_long", 0),
             "total_to_index": result.get("total_to_index", 0),
+            "vision_pending_tables": result.get("vision_pending_tables", 0),
+            "vision_estimated_cost_usd": result.get("vision_estimated_cost_usd", 0.0),
+            "vision_budget_skipped": result.get("vision_budget_skipped", False),
+            "vision_skip_reason": result.get("vision_skip_reason"),
         })
 
     return response

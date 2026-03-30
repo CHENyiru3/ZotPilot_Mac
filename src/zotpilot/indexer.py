@@ -19,6 +19,8 @@ from .zotero_client import ZoteroClient
 
 logger = logging.getLogger(__name__)
 
+_VISION_ESTIMATED_COST_PER_TABLE_USD = 0.01
+
 
 def _config_hash(config: Config) -> str:
     """Hash of config values that affect indexed content.
@@ -92,6 +94,10 @@ class Indexer:
 
     def _save_empty_docs(self, mapping: dict[str, str]) -> None:
         self._empty_docs_path.write_text(json.dumps(mapping, indent=2))
+
+    def _estimate_vision_cost_usd(self, pending_tables: int) -> float:
+        """Return a rough upper-bound estimate for batch vision cost."""
+        return round(pending_tables * _VISION_ESTIMATED_COST_PER_TABLE_USD, 6)
 
     @staticmethod
     def _pdf_hash(path: Path) -> str:
@@ -341,33 +347,64 @@ class Indexer:
             )
 
         # ---- Phase 2: Resolve vision batch (one API call for all papers) ----
+        vision_pending_tables = 0
+        vision_estimated_cost_usd = 0.0
+        vision_budget_skipped = False
+        vision_skip_reason = ""
         if self._vision_api and doc_extractions:
-            from .pdf.extractor import resolve_pending_vision
+            from .pdf.extractor import _finalize_document_no_tables, resolve_pending_vision
             pending_count = sum(
                 len(v[1].pending_vision.specs)
                 for v in doc_extractions.values()
                 if v[1].pending_vision is not None and v[1].pending_vision.specs
             )
+            vision_pending_tables = pending_count
+            vision_estimated_cost_usd = self._estimate_vision_cost_usd(pending_count)
             pending_docs = sum(
                 1 for v in doc_extractions.values()
                 if v[1].pending_vision is not None and v[1].pending_vision.specs
+            )
+            over_table_cap = (
+                self.config.vision_max_tables_per_run is not None
+                and pending_count > self.config.vision_max_tables_per_run
+            )
+            over_cost_cap = (
+                self.config.vision_max_cost_usd is not None
+                and vision_estimated_cost_usd > self.config.vision_max_cost_usd
             )
             if pending_count > 0:
                 logger.info(
                     f"Vision: {pending_count} tables across {pending_docs} papers "
                     f"queued for Batch API (up to 3 waves, est. 10-30min per wave)"
                 )
-            phase2_start = time.perf_counter()
-            resolve_pending_vision(
-                {k: v[1] for k, v in doc_extractions.items()},
-                self._vision_api,
-            )
-            phase2_elapsed = time.perf_counter() - phase2_start
-            if pending_count > 0:
-                logger.info(
-                    f"Vision complete: {pending_count} tables in "
-                    f"{phase2_elapsed / 60:.1f}min ({phase2_elapsed / max(pending_count, 1):.1f}s avg/table)"
+            if pending_count > 0 and (over_table_cap or over_cost_cap):
+                reasons = []
+                if over_table_cap:
+                    reasons.append(f"table cap {self.config.vision_max_tables_per_run}")
+                if over_cost_cap:
+                    reasons.append(
+                        "estimated cost "
+                        f"${vision_estimated_cost_usd:.2f} exceeds cap "
+                        f"${self.config.vision_max_cost_usd:.2f}"
+                    )
+                vision_budget_skipped = True
+                vision_skip_reason = "; ".join(reasons)
+                logger.warning("Skipping vision batch: %s", vision_skip_reason)
+                for _item, extraction in doc_extractions.values():
+                    if extraction.pending_vision is not None:
+                        _finalize_document_no_tables(extraction)
+            else:
+                phase2_start = time.perf_counter()
+                resolve_pending_vision(
+                    {k: v[1] for k, v in doc_extractions.items()},
+                    self._vision_api,
                 )
+                phase2_elapsed = time.perf_counter() - phase2_start
+                if pending_count > 0:
+                    logger.info(
+                        f"Vision complete: {pending_count} tables in "
+                        f"{phase2_elapsed / 60:.1f}min ({phase2_elapsed / max(pending_count, 1):.1f}s avg/table)"
+                    )
 
         # ---- Phase 3: Index each document (chunk, store, etc.) ----
         total_to_store = len(doc_extractions)
@@ -446,6 +483,11 @@ class Indexer:
         counts["total_to_index"] = total_to_index
         counts["batch_size"] = batch_size
         counts["has_more"] = total_to_index > len(to_index) if batch_size else False
+        counts["vision_pending_tables"] = vision_pending_tables
+        counts["vision_estimated_cost_usd"] = vision_estimated_cost_usd
+        counts["vision_budget_skipped"] = vision_budget_skipped
+        if vision_skip_reason:
+            counts["vision_skip_reason"] = vision_skip_reason
 
         # Save config hash after successful indexing
         if counts["indexed"] > 0 or counts["already_indexed"] > 0:
@@ -473,8 +515,22 @@ class Indexer:
 
         # Resolve vision for this single document
         if extraction.pending_vision is not None and self._vision_api:
-            from .pdf.extractor import resolve_pending_vision
-            resolve_pending_vision({item.item_key: extraction}, self._vision_api)
+            from .pdf.extractor import _finalize_document_no_tables, resolve_pending_vision
+
+            pending_count = len(extraction.pending_vision.specs)
+            estimated_cost = self._estimate_vision_cost_usd(pending_count)
+            over_table_cap = (
+                self.config.vision_max_tables_per_run is not None
+                and pending_count > self.config.vision_max_tables_per_run
+            )
+            over_cost_cap = (
+                self.config.vision_max_cost_usd is not None
+                and estimated_cost > self.config.vision_max_cost_usd
+            )
+            if pending_count > 0 and (over_table_cap or over_cost_cap):
+                _finalize_document_no_tables(extraction)
+            else:
+                resolve_pending_vision({item.item_key: extraction}, self._vision_api)
 
         return self._index_extraction(item, extraction)
 
