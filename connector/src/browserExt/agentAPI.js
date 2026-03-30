@@ -310,8 +310,9 @@ Zotero.AgentAPI = new function() {
 				signal: AbortSignal.timeout(5000),
 			});
 			if (!resp.ok) {
-				Zotero.debug("[ZotPilot] local routing GET failed: " + resp.status);
-				return;
+				let msg = "local routing GET failed: " + resp.status;
+				Zotero.debug("[ZotPilot] " + msg);
+				return { error: msg };
 			}
 			let item = await resp.json();
 			let data = item.data || item;
@@ -338,11 +339,16 @@ Zotero.AgentAPI = new function() {
 			if (patch.ok) {
 				Zotero.debug("[ZotPilot] local routing applied for " + itemKey);
 			} else {
-				Zotero.debug("[ZotPilot] local routing PATCH failed: " + patch.status);
+				let msg = "local routing PATCH failed: " + patch.status;
+				Zotero.debug("[ZotPilot] " + msg);
+				return { error: msg };
 			}
 		} catch (e) {
-			Zotero.debug("[ZotPilot] local routing error: " + e.message);
+			let msg = "local routing error: " + e.message;
+			Zotero.debug("[ZotPilot] " + msg);
+			return { error: msg };
 		}
+		return null;
 	}
 
 	async function _fetchRecentTopLevelItems() {
@@ -559,8 +565,12 @@ Zotero.AgentAPI = new function() {
 
 			// 7a. Apply collection/tag routing via Zotero local API while item is guaranteed
 			//     to exist in the local database — avoids cloud-sync race condition in bridge.
+			let routingWarning = null;
 			if (entry.item_key && (command.collection_key || (command.tags && command.tags.length))) {
-				await _applyLocalRouting(entry.item_key, command.collection_key, command.tags);
+				let routingResult = await _applyLocalRouting(entry.item_key, command.collection_key, command.tags);
+				if (routingResult && routingResult.error) {
+					routingWarning = routingResult.error;
+				}
 			}
 
 			// 7. Post result — Task 1.3: include item_key and title for bridge-side routing
@@ -569,6 +579,7 @@ Zotero.AgentAPI = new function() {
 				success: result.success,
 				...(result.error_code ? { error_code: result.error_code } : {}),
 				...(result.error ? { error_message: result.error } : {}),
+				...(routingWarning ? { routing_warning: routingWarning } : {}),
 				url,
 				title: entry.item_title || tab.title || "",
 				item_key: entry.item_key || null,

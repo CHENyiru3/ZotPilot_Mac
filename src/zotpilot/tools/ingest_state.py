@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Literal
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -42,16 +45,20 @@ def _default_batch_id() -> str:
     return f"ing_{uuid.uuid4().hex[:12]}"
 
 
+_POST_INGEST_INSTRUCTION = (
+    "Present ingest results to user. Ask once whether to run "
+    "post-ingest workflow (index → notes → classify → tag). "
+    "See references/post-ingest-guide.md"
+)
+
+
 @dataclass
 class BatchState:
     total: int
     collection_used: str | None
-    tags: list[str] | None
     pending_items: list[IngestItemState]
     batch_id: str = field(default_factory=_default_batch_id)
-    state: Literal[
-        "queued", "running", "completed", "completed_with_errors", "failed", "cancelled"
-    ] = "queued"
+    state: Literal["queued", "running", "completed", "completed_with_errors", "failed", "cancelled"] = "queued"
     is_final: bool = False
     created_at: float = field(default_factory=time.monotonic)
     finalized_at: float | None = None
@@ -66,9 +73,16 @@ class BatchState:
         title: str | None = None,
         error: str | None = None,
     ) -> None:
-        """Thread-safe update of an item by index."""
+        """Thread-safe update of an item by index.
+
+        Looks up the item by its .index attribute (not list position) so that
+        gaps in the index sequence (caused by duplicates) don't cause IndexError.
+        """
         with self._lock:
-            item = self.pending_items[index]
+            item = next((it for it in self.pending_items if it.index == index), None)
+            if item is None:
+                logger.warning("update_item: no item with index=%d", index)
+                return
             item.status = status
             if item_key is not None:
                 item.item_key = item_key
@@ -80,9 +94,7 @@ class BatchState:
     def finalize(self) -> None:
         """Set is_final=True, determine state, set finalized_at."""
         with self._lock:
-            saved = sum(
-                1 for it in self.pending_items if it.status in ("saved", "duplicate")
-            )
+            saved = sum(1 for it in self.pending_items if it.status in ("saved", "duplicate"))
             failed = sum(1 for it in self.pending_items if it.status == "failed")
             total_resolved = saved + failed
 
@@ -121,10 +133,10 @@ class BatchState:
             }
 
     def full_status(self) -> dict:
-        """Like summary() but adds results list."""
+        """Like summary() but adds results list and _instruction."""
         with self._lock:
             saved, failed, pending_count = self._counts()
-            return {
+            status: dict = {
                 "batch_id": self.batch_id,
                 "state": self.state,
                 "is_final": self.is_final,
@@ -135,6 +147,11 @@ class BatchState:
                 "collection_used": self.collection_used,
                 "results": [it.to_dict() for it in self.pending_items],
             }
+            if self.is_final and saved > 0:
+                status["_instruction"] = _POST_INGEST_INSTRUCTION
+            elif not self.is_final and pending_count > 0:
+                status["_instruction"] = f"Use get_ingest_status(batch_id='{self.batch_id}') to track progress"
+            return status
 
 
 class BatchStore:
@@ -180,9 +197,7 @@ class BatchStore:
         expired = [
             bid
             for bid, b in self._batches.items()
-            if b.is_final
-            and b.finalized_at is not None
-            and (now - b.finalized_at) > self._completed_ttl_s
+            if b.is_final and b.finalized_at is not None and (now - b.finalized_at) > self._completed_ttl_s
         ]
         for bid in expired:
             del self._batches[bid]

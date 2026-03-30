@@ -1,4 +1,5 @@
 """Tests for ingestion MCP tools."""
+
 from __future__ import annotations
 
 import time
@@ -38,7 +39,10 @@ OA_RESPONSE = {
             "cited_by_count": 50000,
             "open_access": {"is_oa": False, "oa_url": None},
             "abstract_inverted_index": {
-                "We": [0], "propose": [1], "the": [2], "Transformer": [3],
+                "We": [0],
+                "propose": [1],
+                "the": [2],
+                "Transformer": [3],
             },
             "ids": {"doi": "https://doi.org/10.9999/attention"},
             "primary_location": {"landing_page_url": "https://example.com/paper"},
@@ -68,8 +72,10 @@ def _wait_for_batch(batch_id, timeout=5.0):
 
 class TestSearchAcademicDatabases:
     def test_returns_formatted_list(self):
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
-             patch("zotpilot.tools.ingestion.httpx.get", return_value=_mock_oa_response()):
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()),
+            patch("zotpilot.tools.ingestion.httpx.get", return_value=_mock_oa_response()),
+        ):
             results = search_academic_databases("attention mechanism")
 
         assert len(results) == 1
@@ -83,20 +89,24 @@ class TestSearchAcademicDatabases:
 
         mock_resp = MagicMock()
         mock_resp.status_code = 503
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
-             patch(
-                 "zotpilot.tools.ingestion.httpx.get",
-                 side_effect=httpx.HTTPStatusError("service unavailable", request=MagicMock(), response=mock_resp),
-             ):
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()),
+            patch(
+                "zotpilot.tools.ingestion.httpx.get",
+                side_effect=httpx.HTTPStatusError("service unavailable", request=MagicMock(), response=mock_resp),
+            ),
+        ):
             with pytest.raises(ToolError, match="http_503"):
                 search_academic_databases("attention mechanism")
 
     def test_uses_openalex_email_as_mailto(self):
-        with patch(
-            "zotpilot.tools.ingestion._get_config",
-            return_value=_make_config(openalex_email="me@example.com"),
-        ), \
-             patch("zotpilot.tools.ingestion.httpx.get", return_value=_mock_oa_response()) as mock_get:
+        with (
+            patch(
+                "zotpilot.tools.ingestion._get_config",
+                return_value=_make_config(openalex_email="me@example.com"),
+            ),
+            patch("zotpilot.tools.ingestion.httpx.get", return_value=_mock_oa_response()) as mock_get,
+        ):
             search_academic_databases("attention mechanism")
 
         _, kwargs = mock_get.call_args
@@ -118,13 +128,18 @@ class TestIngestPapers:
 
     def test_defaults_to_inbox_collection(self):
         papers = [{"landing_page_url": "https://example.com/paper"}]
-        with patch("zotpilot.tools.ingestion._ensure_inbox_collection", return_value="INBOX1"), \
-             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
-             patch("zotpilot.tools.ingestion.save_urls", return_value={
-                 "results": [
-                     {"success": True, "url": "https://example.com/paper", "item_key": "ITEM1", "title": "Paper"},
-                 ],
-             }) as save_urls_mock:
+        with (
+            patch("zotpilot.tools.ingestion._ensure_inbox_collection", return_value="INBOX1"),
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()),
+            patch(
+                "zotpilot.tools.ingestion.save_urls",
+                return_value={
+                    "results": [
+                        {"success": True, "url": "https://example.com/paper", "item_key": "ITEM1", "title": "Paper"},
+                    ],
+                },
+            ) as save_urls_mock,
+        ):
             result = ingest_papers(papers)
             # Wait inside with-block so mock is still active when background thread runs
             _wait_for_batch(result["batch_id"])
@@ -134,12 +149,17 @@ class TestIngestPapers:
 
     def test_explicit_collection_is_used(self):
         papers = [{"landing_page_url": "https://example.com/paper"}]
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
-             patch("zotpilot.tools.ingestion.save_urls", return_value={
-                 "results": [
-                     {"success": True, "url": "https://example.com/paper", "item_key": "ITEM1", "title": "Paper"},
-                 ],
-             }) as save_urls_mock:
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()),
+            patch(
+                "zotpilot.tools.ingestion.save_urls",
+                return_value={
+                    "results": [
+                        {"success": True, "url": "https://example.com/paper", "item_key": "ITEM1", "title": "Paper"},
+                    ],
+                },
+            ) as save_urls_mock,
+        ):
             result = ingest_papers(papers, collection_key="COL1")
             _wait_for_batch(result["batch_id"])
 
@@ -162,19 +182,26 @@ class TestIngestPapers:
         assert "DOI-only papers cannot be ingested" in result["results"][0]["error"]
 
     def test_arxiv_id_has_priority(self):
-        papers = [{"doi": "10.1000/test", "arxiv_id": "2401.00001", "landing_page_url": "https://publisher.example/paper"}]
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
-             patch("zotpilot.tools.ingestion._lookup_local_item_key_by_doi", return_value=None), \
-             patch("zotpilot.tools.ingestion.save_urls", return_value={
-                 "results": [
-                     {
-                         "success": True,
-                         "url": "https://arxiv.org/abs/2401.00001",
-                         "item_key": "ITEM1",
-                         "title": "Paper",
-                     },
-                 ],
-             }) as save_urls_mock:
+        papers = [
+            {"doi": "10.1000/test", "arxiv_id": "2401.00001", "landing_page_url": "https://publisher.example/paper"}
+        ]
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()),
+            patch("zotpilot.tools.ingestion._lookup_local_item_key_by_doi", return_value=None),
+            patch(
+                "zotpilot.tools.ingestion.save_urls",
+                return_value={
+                    "results": [
+                        {
+                            "success": True,
+                            "url": "https://arxiv.org/abs/2401.00001",
+                            "item_key": "ITEM1",
+                            "title": "Paper",
+                        },
+                    ],
+                },
+            ) as save_urls_mock,
+        ):
             result = ingest_papers(papers)
             _wait_for_batch(result["batch_id"])
 
@@ -182,12 +209,22 @@ class TestIngestPapers:
 
     def test_landing_page_has_priority_over_doi(self):
         papers = [{"doi": "10.1000/test", "landing_page_url": "https://publisher.example/paper"}]
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
-             patch("zotpilot.tools.ingestion.save_urls", return_value={
-                 "results": [
-                     {"success": True, "url": "https://publisher.example/paper", "item_key": "ITEM1", "title": "Paper"},
-                 ],
-             }) as save_urls_mock:
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()),
+            patch(
+                "zotpilot.tools.ingestion.save_urls",
+                return_value={
+                    "results": [
+                        {
+                            "success": True,
+                            "url": "https://publisher.example/paper",
+                            "item_key": "ITEM1",
+                            "title": "Paper",
+                        },
+                    ],
+                },
+            ) as save_urls_mock,
+        ):
             result = ingest_papers(papers)
             _wait_for_batch(result["batch_id"])
 
@@ -195,9 +232,11 @@ class TestIngestPapers:
 
     def test_local_doi_duplicate_skips_save(self):
         papers = [{"doi": "10.1000/existing", "landing_page_url": "https://publisher.example/paper"}]
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
-             patch("zotpilot.tools.ingestion._lookup_local_item_key_by_doi", return_value="EXISTING1"), \
-             patch("zotpilot.tools.ingestion.save_urls") as save_urls_mock:
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()),
+            patch("zotpilot.tools.ingestion._lookup_local_item_key_by_doi", return_value="EXISTING1"),
+            patch("zotpilot.tools.ingestion.save_urls") as save_urls_mock,
+        ):
             result = ingest_papers(papers)
 
         save_urls_mock.assert_not_called()
@@ -205,22 +244,52 @@ class TestIngestPapers:
         assert result["results"][0]["status"] == "duplicate"
         assert result["results"][0]["item_key"] == "EXISTING1"
 
+    def test_local_doi_duplicate_with_collection_routes_to_collection(self):
+        """Duplicate papers are routed into the specified collection (not orphaned)."""
+        papers = [{"doi": "10.1000/existing", "landing_page_url": "https://publisher.example/paper"}]
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()),
+            patch("zotpilot.tools.ingestion._lookup_local_item_key_by_doi", return_value="EXISTING1"),
+            patch("zotpilot.tools.ingestion._ensure_inbox_collection", return_value="COL1"),
+            patch("zotpilot.tools.ingestion._get_writer") as get_writer_mock,
+            patch("zotpilot.tools.ingestion.save_urls") as save_urls_mock,
+        ):
+            result = ingest_papers(papers, collection_key="COL1")
+
+        save_urls_mock.assert_not_called()
+        assert result["duplicates"] == 1
+        writer_mock = get_writer_mock.return_value
+        writer_mock.add_to_collection.assert_called_once_with("EXISTING1", "COL1")
+
     def test_preflight_uses_config_flag(self):
         papers = [{"landing_page_url": "https://publisher.example/paper"}]
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=True)), \
-             patch("zotpilot.tools.ingestion.ingestion_bridge.preflight_urls", return_value={
-                 "checked": 1,
-                 "accessible": [],
-                 "blocked": [],
-                 "skipped": [],
-                 "errors": [],
-                 "all_clear": True,
-             }) as preflight_mock, \
-             patch("zotpilot.tools.ingestion.save_urls", return_value={
-                 "results": [
-                     {"success": True, "url": "https://publisher.example/paper", "item_key": "ITEM1", "title": "Paper"},
-                 ],
-             }):
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=True)),
+            patch(
+                "zotpilot.tools.ingestion.ingestion_bridge.preflight_urls",
+                return_value={
+                    "checked": 1,
+                    "accessible": [],
+                    "blocked": [],
+                    "skipped": [],
+                    "errors": [],
+                    "all_clear": True,
+                },
+            ) as preflight_mock,
+            patch(
+                "zotpilot.tools.ingestion.save_urls",
+                return_value={
+                    "results": [
+                        {
+                            "success": True,
+                            "url": "https://publisher.example/paper",
+                            "item_key": "ITEM1",
+                            "title": "Paper",
+                        },
+                    ],
+                },
+            ),
+        ):
             result = ingest_papers(papers)
             _wait_for_batch(result["batch_id"])
 
@@ -228,13 +297,23 @@ class TestIngestPapers:
 
     def test_preflight_can_be_disabled_in_config(self):
         papers = [{"landing_page_url": "https://publisher.example/paper"}]
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=False)), \
-             patch("zotpilot.tools.ingestion.ingestion_bridge.preflight_urls") as preflight_mock, \
-             patch("zotpilot.tools.ingestion.save_urls", return_value={
-                 "results": [
-                     {"success": True, "url": "https://publisher.example/paper", "item_key": "ITEM1", "title": "Paper"},
-                 ],
-             }):
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=False)),
+            patch("zotpilot.tools.ingestion.ingestion_bridge.preflight_urls") as preflight_mock,
+            patch(
+                "zotpilot.tools.ingestion.save_urls",
+                return_value={
+                    "results": [
+                        {
+                            "success": True,
+                            "url": "https://publisher.example/paper",
+                            "item_key": "ITEM1",
+                            "title": "Paper",
+                        },
+                    ],
+                },
+            ),
+        ):
             result = ingest_papers(papers)
             _wait_for_batch(result["batch_id"])
 
@@ -242,16 +321,21 @@ class TestIngestPapers:
 
     def test_preflight_blocked_returns_failed_results_and_arrays(self):
         papers = [{"landing_page_url": "https://publisher.example/paper"}]
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=True)), \
-             patch("zotpilot.tools.ingestion.ingestion_bridge.preflight_urls", return_value={
-                 "checked": 1,
-                 "accessible": [],
-                 "blocked": [{"url": "https://publisher.example/paper", "error": "robot check"}],
-                 "skipped": [],
-                 "errors": [],
-                 "all_clear": False,
-             }), \
-             patch("zotpilot.tools.ingestion.save_urls") as save_urls_mock:
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=True)),
+            patch(
+                "zotpilot.tools.ingestion.ingestion_bridge.preflight_urls",
+                return_value={
+                    "checked": 1,
+                    "accessible": [],
+                    "blocked": [{"url": "https://publisher.example/paper", "error": "robot check"}],
+                    "skipped": [],
+                    "errors": [],
+                    "all_clear": False,
+                },
+            ),
+            patch("zotpilot.tools.ingestion.save_urls") as save_urls_mock,
+        ):
             result = ingest_papers(papers)
 
         save_urls_mock.assert_not_called()
@@ -261,12 +345,17 @@ class TestIngestPapers:
 
     def test_bridge_top_level_failure_marks_urls_failed(self):
         papers = [{"landing_page_url": "https://publisher.example/paper"}]
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=False)), \
-             patch("zotpilot.tools.ingestion.save_urls", return_value={
-                 "success": False,
-                 "error": "bridge down",
-                 "results": [],
-             }):
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=False)),
+            patch(
+                "zotpilot.tools.ingestion.save_urls",
+                return_value={
+                    "success": False,
+                    "error": "bridge down",
+                    "results": [],
+                },
+            ),
+        ):
             result = ingest_papers(papers)
             batch_id = result["batch_id"]
             _wait_for_batch(batch_id)
@@ -280,12 +369,17 @@ class TestIngestPapers:
             {"landing_page_url": "https://publisher.example/1"},
             {"landing_page_url": "https://publisher.example/2"},
         ]
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=False)), \
-             patch("zotpilot.tools.ingestion.save_urls", return_value={
-                 "results": [
-                     {"success": True, "url": "https://publisher.example/1", "item_key": "ITEM1", "title": "One"},
-                 ],
-             }):
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=False)),
+            patch(
+                "zotpilot.tools.ingestion.save_urls",
+                return_value={
+                    "results": [
+                        {"success": True, "url": "https://publisher.example/1", "item_key": "ITEM1", "title": "One"},
+                    ],
+                },
+            ),
+        ):
             result = ingest_papers(papers)
             batch_id = result["batch_id"]
             _wait_for_batch(batch_id)
@@ -294,8 +388,7 @@ class TestIngestPapers:
         assert status["saved"] == 1
         assert status["failed"] == 1
         assert any(
-            item["url"] == "https://publisher.example/2" and item["status"] == "failed"
-            for item in status["results"]
+            item["url"] == "https://publisher.example/2" and item["status"] == "failed" for item in status["results"]
         )
 
     def test_success_and_failure_are_mapped_to_simplified_statuses(self):
@@ -303,13 +396,18 @@ class TestIngestPapers:
             {"landing_page_url": "https://publisher.example/1"},
             {"landing_page_url": "https://publisher.example/2"},
         ]
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=False)), \
-             patch("zotpilot.tools.ingestion.save_urls", return_value={
-                 "results": [
-                     {"success": True, "url": "https://publisher.example/1", "item_key": "ITEM1", "title": "One"},
-                     {"success": False, "url": "https://publisher.example/2", "error": "translator failed"},
-                 ],
-             }):
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=False)),
+            patch(
+                "zotpilot.tools.ingestion.save_urls",
+                return_value={
+                    "results": [
+                        {"success": True, "url": "https://publisher.example/1", "item_key": "ITEM1", "title": "One"},
+                        {"success": False, "url": "https://publisher.example/2", "error": "translator failed"},
+                    ],
+                },
+            ),
+        ):
             result = ingest_papers(papers)
             batch_id = result["batch_id"]
             _wait_for_batch(batch_id)
@@ -333,7 +431,7 @@ class TestGetIngestStatus:
         from zotpilot.tools.ingest_state import BatchState, IngestItemState
 
         items = [IngestItemState(index=0, url="https://example.com", title="T")]
-        batch = BatchState(total=1, collection_used="INBOX1", tags=None, pending_items=items)
+        batch = BatchState(total=1, collection_used="INBOX1", pending_items=items)
         _batch_store.put(batch)
         result = get_ingest_status(batch.batch_id)
         assert result["batch_id"] == batch.batch_id
@@ -345,7 +443,7 @@ class TestGetIngestStatus:
         from zotpilot.tools.ingest_state import BatchState, IngestItemState
 
         items = [IngestItemState(index=0, url="https://example.com", title="T")]
-        batch = BatchState(total=1, collection_used="INBOX1", tags=None, pending_items=items)
+        batch = BatchState(total=1, collection_used="INBOX1", pending_items=items)
         batch.update_item(0, status="saved", item_key="ITEM1", title="Real Title")
         batch.finalize()
         _batch_store.put(batch)
@@ -361,12 +459,22 @@ class TestIngestPapersAsync:
 
     def test_returns_batch_id_and_pending(self):
         papers = [{"landing_page_url": "https://publisher.example/paper"}]
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
-             patch("zotpilot.tools.ingestion.save_urls", return_value={
-                 "results": [
-                     {"success": True, "url": "https://publisher.example/paper", "item_key": "ITEM1", "title": "Paper"},
-                 ],
-             }):
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()),
+            patch(
+                "zotpilot.tools.ingestion.save_urls",
+                return_value={
+                    "results": [
+                        {
+                            "success": True,
+                            "url": "https://publisher.example/paper",
+                            "item_key": "ITEM1",
+                            "title": "Paper",
+                        },
+                    ],
+                },
+            ),
+        ):
             result = ingest_papers(papers)
 
         assert "batch_id" in result
@@ -376,8 +484,10 @@ class TestIngestPapersAsync:
 
     def test_duplicates_resolved_immediately(self):
         papers = [{"doi": "10.1000/existing", "landing_page_url": "https://publisher.example/paper"}]
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()), \
-             patch("zotpilot.tools.ingestion._lookup_local_item_key_by_doi", return_value="EXISTING1"):
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()),
+            patch("zotpilot.tools.ingestion._lookup_local_item_key_by_doi", return_value="EXISTING1"),
+        ):
             result = ingest_papers(papers)
 
         assert result["is_final"] is True
@@ -396,16 +506,21 @@ class TestIngestPapersAsync:
 
     def test_preflight_blocked_returns_final(self):
         papers = [{"landing_page_url": "https://publisher.example/paper"}]
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=True)), \
-             patch("zotpilot.tools.ingestion.ingestion_bridge.preflight_urls", return_value={
-                 "checked": 1,
-                 "accessible": [],
-                 "blocked": [{"url": "https://publisher.example/paper", "error": "robot check"}],
-                 "skipped": [],
-                 "errors": [],
-                 "all_clear": False,
-             }), \
-             patch("zotpilot.tools.ingestion.save_urls") as save_urls_mock:
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=True)),
+            patch(
+                "zotpilot.tools.ingestion.ingestion_bridge.preflight_urls",
+                return_value={
+                    "checked": 1,
+                    "accessible": [],
+                    "blocked": [{"url": "https://publisher.example/paper", "error": "robot check"}],
+                    "skipped": [],
+                    "errors": [],
+                    "all_clear": False,
+                },
+            ),
+            patch("zotpilot.tools.ingestion.save_urls") as save_urls_mock,
+        ):
             result = ingest_papers(papers)
 
         assert result["is_final"] is True
@@ -415,10 +530,13 @@ class TestIngestPapersAsync:
 
 class TestSaveFromUrl:
     def test_aliases_save_urls_and_preserves_collection_used(self):
-        with patch("zotpilot.tools.ingestion.save_urls", return_value={
-            "results": [{"success": True, "url": "https://example.com", "item_key": "ITEM1"}],
-            "collection_used": "INBOX1",
-        }) as save_urls_mock:
+        with patch(
+            "zotpilot.tools.ingestion.save_urls",
+            return_value={
+                "results": [{"success": True, "url": "https://example.com", "item_key": "ITEM1"}],
+                "collection_used": "INBOX1",
+            },
+        ) as save_urls_mock:
             result = save_from_url("https://example.com")
 
         save_urls_mock.assert_called_once_with(["https://example.com"], collection_key=None, tags=None)

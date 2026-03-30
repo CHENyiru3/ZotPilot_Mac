@@ -157,7 +157,7 @@ All search tools default to `verbosity="minimal"`. Escalate to `standard` or `fu
 
 **Step 2 — Prerequisites check:**
 
-- Check `ZOTERO_API_KEY` is configured. Without it, `ingest_papers` / `save_urls` can still save papers, but `item_key` discovery and collection/tag routing will be skipped. A warning is only attached when `collection_key` or `tags` were passed; otherwise the result is returned silently without `item_key`. Warn the user and proceed — do not stop.
+- Check `ZOTERO_API_KEY` is configured. Without it, `ingest_papers` / `save_urls` can still save papers, but `item_key` discovery and collection/tag routing will be skipped. A warning is only attached when `collection_key` was passed; otherwise the result is returned silently without `item_key`. Warn the user and proceed — do not stop.
 - Check `~/.config/zotpilot/ZOTPILOT.md` for a `## Subscription Info` section:
   - **Found** → use recorded subscription info to determine which publishers' PDFs are accessible via institutional access.
   - **Not found** → ask the user: "您的机构订阅了哪些出版商？（如 Elsevier、Springer、Nature、ACS 等）" → after user replies, append a `## Subscription Info` section to ZOTPILOT.md so it is never asked again.
@@ -200,7 +200,7 @@ For Priority 3 (`save_urls`): call `save_urls([landing_page_url, ...])` directly
 | 4 | `doi` only (no `arxiv_id` or `landing_page_url`) | Skip — doi.org redirects produce unpredictable publisher formats that cause Zotero translators to save incorrect entries |
 | 5 | No identifier | Skip, inform user |
 
-> **Tags at ingest are discouraged.** Prefer tagging after indexing and note generation: call `list_tags` first, pick from existing vocabulary only, and ask the user before adding any new tag.
+> **Do not tag at ingest.** `ingest_papers` does not accept a `tags` parameter. Tagging happens in post-ingest workflow (Step 8): after indexing and note generation, call `list_tags` first, pick from existing vocabulary only, and ask the user before adding any new tag.
 
 > **Initial ingest defaults to INBOX.** No need to pass `collection_key` for `ingest_papers` or `save_urls` unless you explicitly want another collection.
 

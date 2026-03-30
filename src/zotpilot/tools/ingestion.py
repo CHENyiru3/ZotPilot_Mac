@@ -1,4 +1,5 @@
 """MCP tools for academic paper ingestion into Zotero."""
+
 from __future__ import annotations
 
 import json
@@ -15,7 +16,7 @@ from pydantic import Field
 from ..bridge import DEFAULT_PORT, BridgeServer
 from ..state import _get_config, _get_writer, _get_zotero, mcp, register_reset_callback
 from . import ingestion_bridge, ingestion_search
-from .ingest_state import BatchState, BatchStore, IngestItemState
+from .ingest_state import BatchState, BatchStore, IngestItemState, _POST_INGEST_INSTRUCTION
 
 logger = logging.getLogger(__name__)
 
@@ -100,11 +101,7 @@ def _lookup_local_item_key_by_doi(normalized_doi: str | None) -> str | None:
     except Exception:
         return None
 
-    unique_keys = [
-        hit["item_key"]
-        for hit in hits
-        if isinstance(hit, dict) and hit.get("item_key")
-    ]
+    unique_keys = [hit["item_key"] for hit in hits if isinstance(hit, dict) and hit.get("item_key")]
     if unique_keys:
         return unique_keys[0]
     return None
@@ -127,7 +124,7 @@ def search_academic_databases(
     year_max: Annotated[int | None, Field(description="Latest publication year filter")] = None,
     sort_by: Annotated[
         Literal["relevance", "citationCount", "publicationDate"],
-        Field(description="Sort order: relevance (default), citationCount, or publicationDate")
+        Field(description="Sort order: relevance (default), citationCount, or publicationDate"),
     ] = "relevance",
 ) -> list[dict]:
     """Search external academic databases for papers on a topic. Use this as the first step
@@ -155,7 +152,6 @@ def _run_save_worker(
     batch: BatchState,
     save_candidates: list[dict],
     resolved_collection_key: str | None,
-    tags: list[str] | None,
 ) -> None:
     """Background worker: runs save_urls chunks and updates batch state.
 
@@ -169,8 +165,8 @@ def _run_save_worker(
         candidate_by_url = {c["url"]: c for c in save_candidates}
 
         for start in range(0, len(urls_to_save), 10):
-            chunk = urls_to_save[start:start + 10]
-            batch_result = save_urls(chunk, collection_key=resolved_collection_key, tags=tags)
+            chunk = urls_to_save[start : start + 10]
+            batch_result = save_urls(chunk, collection_key=resolved_collection_key, tags=None)
             batch_results = list(batch_result.get("results") or [])
             returned_urls = {r.get("url") for r in batch_results if r.get("url")}
 
@@ -183,13 +179,15 @@ def _run_save_worker(
                 idx = candidate["_index"]
                 if result.get("success") is True:
                     batch.update_item(
-                        idx, status="saved",
+                        idx,
+                        status="saved",
                         item_key=result.get("item_key"),
                         title=result.get("title") or candidate.get("paper", {}).get("title"),
                     )
                 else:
                     batch.update_item(
-                        idx, status="failed",
+                        idx,
+                        status="failed",
                         error=result.get("error") or result.get("error_message") or "bridge save failed",
                     )
 
@@ -215,17 +213,18 @@ def _run_save_worker(
 
 @mcp.tool()
 def ingest_papers(
-    papers: Annotated[list[dict] | str, Field(description=(
-        "JSON array of paper dicts, each with at least one of: doi, arxiv_id, landing_page_url. "
-        "Typically from search_academic_databases results. Max 50 per call."
-    ))],
+    papers: Annotated[
+        list[dict] | str,
+        Field(
+            description=(
+                "JSON array of paper dicts, each with at least one of: doi, arxiv_id, landing_page_url. "
+                "Typically from search_academic_databases results. Max 50 per call."
+            )
+        ),
+    ],
     collection_key: Annotated[
         str | None,
         Field(description="Zotero collection key for all ingested papers. Defaults to INBOX."),
-    ] = None,
-    tags: Annotated[
-        list[str] | str | None,
-        Field(description='JSON array of tags to apply to all ingested papers, e.g. ["tag1","tag2"]'),
     ] = None,
 ) -> dict:
     """Start async batch ingestion of papers to Zotero via ZotPilot Connector.
@@ -238,8 +237,6 @@ def ingest_papers(
         raise ToolError("papers must be a JSON array of paper dicts")
     if len(papers) > 50:
         raise ToolError(f"Batch size {len(papers)} exceeds maximum of 50. Split into smaller batches.")
-
-    tags = _coerce_json_list(tags, "tags") if isinstance(tags, str) else tags
 
     if collection_key is None:
         collection_key = _ensure_inbox_collection()
@@ -266,12 +263,30 @@ def ingest_papers(
         )
         if existing_item_key:
             duplicates += 1
-            results.append({
-                "url": landing_page_url or (f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else None),
-                "status": "duplicate",
-                "item_key": existing_item_key,
-                "title": paper.get("title"),
-            })
+            # Route duplicate into INBOX (or target collection) so it's not orphaned
+            if resolved_collection_key:
+                try:
+                    writer = _get_writer()
+                    writer.add_to_collection(existing_item_key, resolved_collection_key)
+                except Exception as exc:
+                    results.append(
+                        {
+                            "url": landing_page_url or (f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else None),
+                            "status": "duplicate",
+                            "item_key": existing_item_key,
+                            "title": paper.get("title"),
+                            "warning": f"collection routing failed: {exc}",
+                        }
+                    )
+                    continue
+            results.append(
+                {
+                    "url": landing_page_url or (f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else None),
+                    "status": "duplicate",
+                    "item_key": existing_item_key,
+                    "title": paper.get("title"),
+                }
+            )
             continue
 
         if arxiv_id:
@@ -280,30 +295,36 @@ def ingest_papers(
             url = landing_page_url
         elif doi:
             failed += 1
-            results.append({
-                "url": None,
-                "status": "failed",
-                "error": (
-                    "no arxiv_id or landing_page_url; DOI-only papers cannot be ingested. "
-                    "doi.org redirects produce unpredictable publisher formats that cause "
-                    "Zotero translators to save incorrect entries."
-                ),
-            })
+            results.append(
+                {
+                    "url": None,
+                    "status": "failed",
+                    "error": (
+                        "no arxiv_id or landing_page_url; DOI-only papers cannot be ingested. "
+                        "doi.org redirects produce unpredictable publisher formats that cause "
+                        "Zotero translators to save incorrect entries."
+                    ),
+                }
+            )
             continue
         else:
             failed += 1
-            results.append({
-                "url": None,
-                "status": "failed",
-                "error": "no usable identifier",
-            })
+            results.append(
+                {
+                    "url": None,
+                    "status": "failed",
+                    "error": "no usable identifier",
+                }
+            )
             continue
 
-        save_candidates.append({
-            "paper": paper,
-            "url": url,
-            "_index": idx,
-        })
+        save_candidates.append(
+            {
+                "paper": paper,
+                "url": url,
+                "_index": idx,
+            }
+        )
 
     # --- Preflight (still synchronous — fast enough) ---
     urls_to_save = [candidate["url"] for candidate in save_candidates]
@@ -320,30 +341,32 @@ def ingest_papers(
         if not preflight_report.get("all_clear", False):
             for blocked in preflight_report.get("blocked", []):
                 failed += 1
-                results.append({
-                    "url": blocked.get("url"),
-                    "status": "failed",
-                    "error": blocked.get("error") or "preflight blocked",
-                })
+                results.append(
+                    {
+                        "url": blocked.get("url"),
+                        "status": "failed",
+                        "error": blocked.get("error") or "preflight blocked",
+                    }
+                )
             for error in preflight_report.get("errors", []):
                 failed += 1
-                results.append({
-                    "url": error.get("url"),
-                    "status": "failed",
-                    "error": error.get("error") or "preflight failed",
-                })
+                results.append(
+                    {
+                        "url": error.get("url"),
+                        "status": "failed",
+                        "error": error.get("error") or "preflight failed",
+                    }
+                )
             # All candidates blocked — clear so no background work
             save_candidates = []
 
     # --- Build batch state ---
     pending_items = [
-        IngestItemState(index=c["_index"], url=c["url"], title=c["paper"].get("title"))
-        for c in save_candidates
+        IngestItemState(index=c["_index"], url=c["url"], title=c["paper"].get("title")) for c in save_candidates
     ]
     batch = BatchState(
         total=len(papers),
         collection_used=resolved_collection_key,
-        tags=tags,
         pending_items=pending_items,
     )
 
@@ -355,7 +378,13 @@ def ingest_papers(
     else:
         # Submit background work
         _batch_store.put(batch)
-        _executor.submit(_run_save_worker, batch, save_candidates, resolved_collection_key, tags)
+        _executor.submit(_run_save_worker, batch, save_candidates, resolved_collection_key)
+
+    _instruction: str | None = None
+    if batch.is_final and (saved + duplicates) > 0:
+        _instruction = _POST_INGEST_INSTRUCTION
+    elif not batch.is_final:
+        _instruction = f"Use get_ingest_status(batch_id='{batch.batch_id}') to track progress"
 
     return {
         "batch_id": batch.batch_id,
@@ -368,8 +397,7 @@ def ingest_papers(
         "collection_used": resolved_collection_key,
         "results": results,
         "pending_items": [it.to_dict() for it in pending_items],
-        "_instruction": f"Use get_ingest_status(batch_id='{batch.batch_id}') to track progress"
-        if not batch.is_final else None,
+        "_instruction": _instruction,
     }
 
 
@@ -518,18 +546,13 @@ def _apply_bridge_result_routing(
         tags,
         get_config=_get_config,
         get_writer=_get_writer,
-        discover_saved_item_key_fn=lambda title,
-        url,
-        known_key,
-        writer,
-        window_s=ingestion_bridge.ITEM_DISCOVERY_WINDOW_S: ingestion_bridge.discover_saved_item_key(
-            title, url, known_key, writer, window_s=window_s, logger=logger
+        discover_saved_item_key_fn=lambda title, url, known_key, writer, window_s=ingestion_bridge.ITEM_DISCOVERY_WINDOW_S: (
+            ingestion_bridge.discover_saved_item_key(title, url, known_key, writer, window_s=window_s, logger=logger)
         ),
-        apply_collection_tag_routing_fn=lambda item_key,
-        routed_collection_key,
-        routed_tags,
-        writer: ingestion_bridge.apply_collection_tag_routing(
-            item_key, routed_collection_key, routed_tags, writer, get_config=_get_config
+        apply_collection_tag_routing_fn=lambda item_key, routed_collection_key, routed_tags, writer: (
+            ingestion_bridge.apply_collection_tag_routing(
+                item_key, routed_collection_key, routed_tags, writer, get_config=_get_config
+            )
         ),
         writer_lock=_writer_lock,
         sleep_fn=time.sleep,

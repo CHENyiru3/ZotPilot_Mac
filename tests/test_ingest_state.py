@@ -70,7 +70,6 @@ class TestBatchState:
         return BatchState(
             total=n,
             collection_used=kwargs.get("collection_used"),
-            tags=kwargs.get("tags"),
             pending_items=items,
         )
 
@@ -161,6 +160,46 @@ class TestBatchState:
         assert len(fs["results"]) == 2
         assert fs["results"][0]["status"] == "saved"
 
+    def test_update_item_with_gap_indices(self):
+        """update_item must find items even when index sequence has gaps (duplicates skipped)."""
+        # Simulate: index 0 saved, index 1 duplicate (skipped), index 2 saved
+        items = [
+            IngestItemState(index=0, url="https://ex.com/0"),
+            IngestItemState(index=2, url="https://ex.com/2"),  # gap: index 1 missing
+        ]
+        batch = BatchState(total=3, collection_used=None, pending_items=items)
+        # Can update index 2 even though pending_items[1] has index 2
+        batch.update_item(2, status="saved", item_key="K2")
+        assert batch.pending_items[1].status == "saved"
+        assert batch.pending_items[1].item_key == "K2"
+        # Index 0 is still pending (not updated)
+        assert batch.pending_items[0].status == "pending"
+
+    def test_full_status_includes_instruction_when_final_with_saved(self):
+        """_instruction is included when batch is final with saved items."""
+        batch = self._make_batch(n=1)
+        batch.update_item(0, status="saved", item_key="K1")
+        batch.finalize()
+        fs = batch.full_status()
+        assert "_instruction" in fs
+        assert "post-ingest" in fs["_instruction"]
+
+    def test_full_status_includes_poll_instruction_when_running(self):
+        """_instruction is a poll hint when batch is still running with pending items."""
+        batch = self._make_batch(n=2)
+        batch.update_item(0, status="saved", item_key="K1")
+        fs = batch.full_status()
+        assert "_instruction" in fs
+        assert "get_ingest_status" in fs["_instruction"]
+
+    def test_full_status_no_instruction_when_final_no_saved(self):
+        """No _instruction when batch is final but nothing was saved (all-failed)."""
+        batch = self._make_batch(n=1)
+        batch.update_item(0, status="failed", error="timeout")
+        batch.finalize()
+        fs = batch.full_status()
+        assert "_instruction" not in fs
+
     def test_summary_includes_collection_used(self):
         batch = self._make_batch(n=1, collection_used="MyCollection")
         s = batch.summary()
@@ -170,7 +209,7 @@ class TestBatchState:
         """Concurrent updates must not corrupt state."""
         n = 100
         items = [IngestItemState(index=i, url=f"https://ex.com/{i}") for i in range(n)]
-        batch = BatchState(total=n, collection_used=None, tags=None, pending_items=items)
+        batch = BatchState(total=n, collection_used=None, pending_items=items)
 
         errors = []
 
@@ -197,7 +236,6 @@ class TestBatchStore:
         batch = BatchState(
             total=1,
             collection_used=None,
-            tags=None,
             pending_items=[IngestItemState(index=0, url="https://ex.com/0")],
         )
         store.put(batch)
@@ -212,7 +250,8 @@ class TestBatchStore:
         store = BatchStore()
         assert store.count() == 0
         b = BatchState(
-            total=1, collection_used=None, tags=None,
+            total=1,
+            collection_used=None,
             pending_items=[IngestItemState(index=0, url=None)],
         )
         store.put(b)
@@ -221,7 +260,8 @@ class TestBatchStore:
     def test_clear(self):
         store = BatchStore()
         b = BatchState(
-            total=1, collection_used=None, tags=None,
+            total=1,
+            collection_used=None,
             pending_items=[IngestItemState(index=0, url=None)],
         )
         store.put(b)
@@ -231,7 +271,8 @@ class TestBatchStore:
     def test_ttl_evicts_completed_batches(self):
         store = BatchStore(completed_ttl_s=0.01)  # 10ms TTL
         b = BatchState(
-            total=1, collection_used=None, tags=None,
+            total=1,
+            collection_used=None,
             pending_items=[IngestItemState(index=0, url=None)],
         )
         b.update_item(0, status="saved", item_key="K1")
@@ -247,7 +288,8 @@ class TestBatchStore:
     def test_running_batch_not_evicted_by_ttl(self):
         store = BatchStore(completed_ttl_s=0.01)
         b = BatchState(
-            total=1, collection_used=None, tags=None,
+            total=1,
+            collection_used=None,
             pending_items=[IngestItemState(index=0, url=None)],
             state="running",
         )
@@ -264,7 +306,8 @@ class TestBatchStore:
         completed_batches = []
         for _ in range(3):
             b = BatchState(
-                total=1, collection_used=None, tags=None,
+                total=1,
+                collection_used=None,
                 pending_items=[IngestItemState(index=0, url=None)],
             )
             b.update_item(0, status="saved", item_key="K")
@@ -277,7 +320,8 @@ class TestBatchStore:
 
         # Add a 4th batch — should evict oldest completed
         new_batch = BatchState(
-            total=1, collection_used=None, tags=None,
+            total=1,
+            collection_used=None,
             pending_items=[IngestItemState(index=0, url=None)],
         )
         store.put(new_batch)
@@ -294,7 +338,8 @@ class TestBatchStore:
         running = []
         for _ in range(2):
             b = BatchState(
-                total=1, collection_used=None, tags=None,
+                total=1,
+                collection_used=None,
                 pending_items=[IngestItemState(index=0, url=None)],
                 state="running",
             )
@@ -303,7 +348,8 @@ class TestBatchStore:
 
         # Try to add a third — cannot evict running batches
         new_b = BatchState(
-            total=1, collection_used=None, tags=None,
+            total=1,
+            collection_used=None,
             pending_items=[IngestItemState(index=0, url=None)],
         )
         store.put(new_b)  # should not raise, just store (or overflow gracefully)
