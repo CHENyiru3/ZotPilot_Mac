@@ -96,7 +96,8 @@ compatibility:
 
 | Tool | Use when |
 |------|----------|
-| `ingest_papers` | Batch add papers by arXiv ID / landing page URL (defaults to INBOX). Returns `saved`/`duplicates`/`failed` counts |
+| `ingest_papers` | Batch add papers by arXiv ID / landing page URL (defaults to INBOX). Returns immediately with `batch_id`; use `get_ingest_status` to track progress |
+| `get_ingest_status` | Poll async ingestion progress by `batch_id`. Returns per-item status and `item_key`s when complete |
 | `save_urls` | Save 1-10 URLs via browser connector (defaults to INBOX) |
 | `save_from_url` | Alias for `save_urls([url])` — backward compat |
 
@@ -203,7 +204,18 @@ For Priority 3 (`save_urls`): call `save_urls([landing_page_url, ...])` directly
 
 > **Initial ingest defaults to INBOX.** No need to pass `collection_key` for `ingest_papers` or `save_urls` unless you explicitly want another collection.
 
-**Step 7 — Post-ingest:**
+**Step 7 — Wait for async ingestion:**
+
+`ingest_papers` returns immediately. If `is_final` is false, you MUST poll before proceeding:
+
+1. Call `get_ingest_status(batch_id)` after ~10 seconds
+2. If `is_final` is false, inform the user and poll again after 10-15 seconds
+3. When `is_final` is true, read the `results` array for final `item_key`s and statuses
+4. **CRITICAL**: Do NOT call `index_library`, `create_note`, or `add_item_tags` until `is_final` is true
+
+If `is_final` was already true in the `ingest_papers` response (all duplicates/failures resolved synchronously), skip polling and proceed directly.
+
+**Step 8 — Post-ingest:**
 
 1. Read the result: check `saved`, `duplicates`, `failed` counts
    - `saved > 0` → present the ingest result table to the user, then ask once whether to run post-ingest workflow
