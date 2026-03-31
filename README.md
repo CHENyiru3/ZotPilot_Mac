@@ -539,6 +539,7 @@ Agent → ZotPilot MCP tool → 本地 bridge (127.0.0.1:2619) → Chrome 扩展
 | MCP 工具没出来 | 重新注册 MCP 服务器然后重启 |
 | 搜出来是空的 | 先跑 `zotpilot index`，或者换个更宽泛的搜索词 |
 | `GEMINI_API_KEY not set` | 设环境变量，或 `zotpilot setup --non-interactive --provider local` 换本地模型 |
+| OpenCode MCP 超时 (`-32001`) | 见 [troubleshooting](references/troubleshooting.md#opencode)——需在 `opencode.json` 设 `experimental.mcp_timeout` |
 | 不知道哪出了问题 | 跑 `zotpilot doctor` |
 
 更多见 [references/troubleshooting.md](references/troubleshooting.md)。

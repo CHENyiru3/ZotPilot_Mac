@@ -405,6 +405,10 @@ def _write_mcp_config(config_path: Path, env: dict[str, str]) -> bool:
         entry: dict = {"type": "local", "command": [zp]}
         if env:
             entry["environment"] = env
+        # OpenCode: set experimental.mcp_timeout for long-running tool calls.
+        # The per-server "timeout" only controls tool discovery, not execution.
+        existing.setdefault("experimental", {})
+        existing["experimental"].setdefault("mcp_timeout", 600000)
     else:
         entry = {"type": "stdio", "command": zp, "args": []}
         if env:
@@ -553,13 +557,16 @@ def _print_manual_fallback(plat: str, env: dict[str, str]) -> None:
             entry: dict = {"type": "local", "command": [zp]}
             if env:
                 entry["environment"] = env
+            print(f"    Manual: Add to {config_path}:")
+            print(f'    {{"{mcp_key}": {{"zotpilot": {json.dumps(entry)}}},')
+            print(f'     "experimental": {{"mcp_timeout": 600000}}}}')
         else:
             mcp_key = "mcpServers"
             entry = {"type": "stdio", "command": zp, "args": []}
             if env:
                 entry["env"] = env
-        print(f"    Manual: Add to {config_path}:")
-        print(f'    {{"{mcp_key}": {{"zotpilot": {json.dumps(entry)}}}}}')
+            print(f"    Manual: Add to {config_path}:")
+            print(f'    {{"{mcp_key}": {{"zotpilot": {json.dumps(entry)}}}}}')
 
 
 # ---------------------------------------------------------------------------

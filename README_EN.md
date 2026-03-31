@@ -528,6 +528,7 @@ Optional feature. Uses Claude Haiku (via Batch API) to re-extract PDF tables, fi
 | MCP tools not showing up | Re-register MCP server and restart |
 | Empty search results | Run `zotpilot index` first, or try a broader query |
 | `GEMINI_API_KEY not set` | Set the env var, or `zotpilot setup --non-interactive --provider local` |
+| OpenCode MCP timeout (`-32001`) | See [troubleshooting](references/troubleshooting.md#opencode) — set `experimental.mcp_timeout` in `opencode.json` |
 | Not sure what's wrong | Run `zotpilot doctor` |
 
 More at [references/troubleshooting.md](references/troubleshooting.md).

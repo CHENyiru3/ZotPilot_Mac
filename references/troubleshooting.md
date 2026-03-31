@@ -73,10 +73,23 @@ If tools still not showing, restart Claude Code or run `/mcp`.
 
 ### OpenCode
 
-```bash
-opencode mcp add
-# Follow prompts: name=zotpilot, command=zotpilot, transport=stdio
+Edit `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "experimental": {
+    "mcp_timeout": 600000
+  },
+  "mcp": {
+    "zotpilot": {
+      "type": "local",
+      "command": ["zotpilot"]
+    }
+  }
+}
 ```
+
+> **`experimental.mcp_timeout`（重要）：** OpenCode 的 per-server `timeout` 只控制工具发现（`listTools`），不控制 tool call 执行。ZotPilot 的索引和批量操作可能超过默认 30 秒超时，导致 `MCP Error -32001: Request Timeout`。设 `600000`（10 分钟）可避免此问题。
 
 ### OpenClaw
 
