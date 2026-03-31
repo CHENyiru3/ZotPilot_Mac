@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import Future
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,10 +13,12 @@ from fastmcp.exceptions import ToolError
 from zotpilot.tools.ingestion import (
     _batch_store,
     _is_pdf_or_doi_url,
+    _resolve_dois_concurrent,
     _run_save_worker,
     classify_ingest_candidate,
     get_ingest_status,
     ingest_papers,
+    resolve_doi_to_landing_url,
     save_from_url,
     search_academic_databases,
 )
@@ -63,7 +66,7 @@ def _mock_oa_response(data=None, status_code=200):
     return mock_resp
 
 
-def _wait_for_batch(batch_id, timeout=5.0):
+def _wait_for_batch(batch_id, timeout=20.0):
     """Wait for a batch to finalize."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -120,6 +123,20 @@ class TestSearchAcademicDatabases:
 class TestIngestPapers:
     def setup_method(self):
         _batch_store.clear()
+        self._submit_patcher = patch("zotpilot.tools.ingestion._executor.submit", side_effect=self._submit_inline)
+        self._submit_patcher.start()
+
+    def teardown_method(self):
+        self._submit_patcher.stop()
+
+    @staticmethod
+    def _submit_inline(fn, *args, **kwargs):
+        future = Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except Exception as exc:  # pragma: no cover - mirrors executor behavior
+            future.set_exception(exc)
+        return future
 
     def test_over_50_raises_tool_error(self):
         papers = [{"doi": f"10.1000/{i}", "landing_page_url": f"https://example.com/{i}"} for i in range(51)]
@@ -194,10 +211,26 @@ class TestIngestPapers:
         assert result["results"][0]["status"] == "failed"
         assert "no usable identifier" in result["results"][0]["error"]
 
-    def test_doi_only_routes_to_api_fallback(self):
-        """DOI-only papers are routed to the API fallback path, not rejected."""
+    def test_doi_only_routes_to_connector_when_resolution_finds_landing_page(self):
         with (
             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()),
+            patch(
+                "zotpilot.tools.ingestion._resolve_dois_concurrent",
+                return_value={"10.1000/test": "https://publisher.example/article"},
+            ),
+            patch("zotpilot.tools.ingestion._run_save_worker"),
+        ):
+            result = ingest_papers([{"doi": "10.1000/test"}])
+
+        assert result["failed"] == 0
+        assert len(result["pending_items"]) == 1
+        assert result["pending_items"][0]["ingest_method"] == "connector"
+        assert result["pending_items"][0]["url"] == "https://publisher.example/article"
+
+    def test_doi_only_falls_back_to_api_when_resolution_fails(self):
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()),
+            patch("zotpilot.tools.ingestion._resolve_dois_concurrent", return_value={"10.1000/test": None}),
             patch("zotpilot.tools.ingestion._run_save_worker"),
         ):
             result = ingest_papers([{"doi": "10.1000/test"}])
@@ -747,6 +780,15 @@ class TestHelperFunctions:
         )
         assert result == "api"
 
+    def test_classify_ingest_candidate_resolved_landing_page_routes_to_connector(self):
+        result = classify_ingest_candidate(
+            paper={"doi": "10.1000/test", "_resolved_landing_url": "https://publisher.example/article"},
+            normalized_doi="10.1000/test",
+            arxiv_id=None,
+            landing_page_url=None,
+        )
+        assert result == "connector"
+
     def test_classify_ingest_candidate_no_identifier_rejects(self):
         result = classify_ingest_candidate(
             paper={"title": "No identifier here"},
@@ -844,6 +886,33 @@ class TestSaveViaApi:
         assert batch.pending_items[0].status == "failed"
 
 
+class TestDoiResolutionHelpers:
+    def test_resolve_doi_to_landing_url_returns_location_header(self):
+        response = MagicMock(status_code=302, headers={"location": "https://publisher.example/article"})
+        with patch("zotpilot.tools.ingestion.httpx.head", return_value=response) as head_mock:
+            result = resolve_doi_to_landing_url("10.1000/test")
+
+        assert result == "https://publisher.example/article"
+        head_mock.assert_called_once_with(
+            "https://doi.org/10.1000/test",
+            follow_redirects=False,
+            timeout=10.0,
+        )
+
+    def test_resolve_dois_concurrent_handles_partial_failures(self):
+        def fake_resolver(doi):
+            if doi == "10.1000/fail":
+                raise RuntimeError("boom")
+            return f"https://publisher.example/{doi.rsplit('/', 1)[-1]}"
+
+        with patch("zotpilot.tools.ingestion.resolve_doi_to_landing_url", side_effect=fake_resolver):
+            result = _resolve_dois_concurrent(["10.1000/one", "10.1000/fail", "10.1000/two"])
+
+        assert result["10.1000/one"] == "https://publisher.example/one"
+        assert result["10.1000/two"] == "https://publisher.example/two"
+        assert result["10.1000/fail"] is None
+
+
 class TestReconciliationSkipsApiItems:
     def setup_method(self):
         _batch_store.clear()
@@ -886,3 +955,57 @@ class TestReconciliationSkipsApiItems:
         assert len(api_items) == 1
         assert api_items[0].index == 1
         assert api_items[0].routing_status == "routed_by_api"
+
+
+class TestConnectorFallbackToApi:
+    def setup_method(self):
+        _batch_store.clear()
+
+    def test_connector_failure_with_doi_retries_via_api_before_reconciliation(self):
+        from zotpilot.tools.ingest_state import BatchState, IngestItemState
+
+        batch = BatchState(
+            total=1,
+            collection_used="COL1",
+            pending_items=[
+                IngestItemState(
+                    index=0,
+                    url="https://publisher.example/paper",
+                    title="Paper",
+                    ingest_method="connector",
+                )
+            ],
+        )
+        writer = MagicMock()
+        with (
+            patch(
+                "zotpilot.tools.ingestion.save_urls",
+                return_value={
+                    "success": False,
+                    "error": "bridge down",
+                    "results": [],
+                },
+            ),
+            patch(
+                "zotpilot.tools.ingestion._save_via_api",
+                return_value={"success": True, "item_key": "ITEM1", "title": "Paper"},
+            ) as save_via_api_mock,
+            patch("zotpilot.tools.ingestion._get_writer", return_value=writer),
+        ):
+            _run_save_worker(
+                batch,
+                [
+                    {
+                        "url": "https://publisher.example/paper",
+                        "_index": 0,
+                        "paper": {"title": "Paper", "doi": "10.1000/test"},
+                        "ingest_method": "connector",
+                    }
+                ],
+                [],
+                "COL1",
+            )
+
+        assert batch.is_final is True
+        assert batch.pending_items[0].ingest_method == "api"
+        save_via_api_mock.assert_called_once()

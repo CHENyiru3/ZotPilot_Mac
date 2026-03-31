@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Annotated, Literal
 
 import httpx
@@ -71,6 +71,55 @@ def _is_pdf_or_doi_url(url: str | None) -> bool:
     return bool(_PDF_URL_RE.search(url)) or bool(_DOI_REDIRECT_RE.match(url))
 
 
+_LINKINGHUB_PII_RE = _re.compile(
+    r"^https?://linkinghub\.elsevier\.com/retrieve/pii/(S[0-9X]+)",
+    _re.IGNORECASE,
+)
+
+
+def _normalize_landing_url(url: str) -> str:
+    """Convert known intermediate redirectors to final landing pages."""
+    # Elsevier linkinghub → ScienceDirect
+    m = _LINKINGHUB_PII_RE.match(url)
+    if m:
+        return f"https://www.sciencedirect.com/science/article/pii/{m.group(1)}"
+    return url
+
+
+def resolve_doi_to_landing_url(doi: str) -> str | None:
+    """Resolve DOI to publisher landing page via doi.org redirect."""
+    try:
+        response = httpx.head(
+            f"https://doi.org/{doi}",
+            follow_redirects=False,
+            timeout=10.0,
+        )
+        if response.status_code in (301, 302, 303, 307, 308):
+            url = response.headers.get("location")
+            if url:
+                return _normalize_landing_url(url)
+    except Exception as exc:
+        logger.debug("DOI resolution failed for %s: %s", doi, exc)
+    return None
+
+
+def _resolve_dois_concurrent(dois: list[str]) -> dict[str, str | None]:
+    """Resolve multiple DOIs concurrently."""
+    if not dois:
+        return {}
+
+    results: dict[str, str | None] = {}
+    with ThreadPoolExecutor(max_workers=min(len(dois), 10)) as pool:
+        futures = {pool.submit(resolve_doi_to_landing_url, doi): doi for doi in dois}
+        for future in as_completed(futures):
+            doi = futures[future]
+            try:
+                results[doi] = future.result()
+            except Exception:
+                results[doi] = None
+    return results
+
+
 def classify_ingest_candidate(
     paper: dict,
     normalized_doi: str | None,
@@ -87,6 +136,9 @@ def classify_ingest_candidate(
     if arxiv_id:
         return "connector"
     if landing_page_url and not _is_pdf_or_doi_url(landing_page_url):
+        return "connector"
+    resolved_url = paper.get("_resolved_landing_url")
+    if resolved_url and not _is_pdf_or_doi_url(resolved_url):
         return "connector"
     if normalized_doi or (paper.get("doi") and not landing_page_url):
         return "api"
@@ -112,21 +164,24 @@ def _ensure_inbox_collection() -> str | None:
             return None
 
         try:
-            collections = writer._zot.collections()
+            with _writer_lock:
+                collections = writer._zot.collections()
             for coll in collections:
                 data = coll.get("data", {})
                 if data.get("name") == _INBOX_COLLECTION_NAME:
                     _inbox_collection_key = data.get("key") or coll.get("key")
                     return _inbox_collection_key
 
-            response = writer._zot.create_collections([{"name": _INBOX_COLLECTION_NAME}])
+            with _writer_lock:
+                response = writer._zot.create_collections([{"name": _INBOX_COLLECTION_NAME}])
             if response and "successful" in response:
                 for value in response["successful"].values():
                     _inbox_collection_key = value.get("key") or value.get("data", {}).get("key")
                     if _inbox_collection_key:
                         return _inbox_collection_key
 
-            collections = writer._zot.collections()
+            with _writer_lock:
+                collections = writer._zot.collections()
             for coll in collections:
                 data = coll.get("data", {})
                 if data.get("name") == _INBOX_COLLECTION_NAME:
@@ -228,7 +283,8 @@ def _discover_via_web_api(url: str, title: str | None) -> str | None:
     if not title:
         return None
     try:
-        keys = _get_writer().find_items_by_url_and_title(url, title, window_s=120)
+        with _writer_lock:
+            keys = _get_writer().find_items_by_url_and_title(url, title, window_s=120)
         if len(keys) == 1:
             return keys[0]
     except Exception:
@@ -341,12 +397,20 @@ def _save_via_api(
                 writer.try_attach_oa_pdf(
                     item_key,
                     doi=metadata.doi,
-                    oa_url=metadata.oa_url,
+                    oa_url=paper.get("oa_url") or metadata.oa_url,
                     arxiv_id=metadata.arxiv_id,
                 )
         except Exception as attach_exc:
             logger.debug("PDF attach best-effort failed for %s: %s", item_key, attach_exc)
             pass  # best-effort, proceed without PDF
+
+        connector_error = candidate.get("_connector_error")
+        warning = None
+        if connector_error:
+            warning = (
+                f"Connector failed ({connector_error}); saved via API (metadata only, no PDF). "
+                "Check Chrome/Connector if you need PDF."
+            )
 
         batch.update_item(
             idx,
@@ -355,6 +419,7 @@ def _save_via_api(
             title=metadata.title,
             routing_status="routed_by_api",
             ingest_method="api",
+            warning=warning,
         )
         return {
             "success": True,
@@ -439,10 +504,42 @@ def _run_save_worker(
                         if item.index == idx and item.status == "pending":
                             batch.update_item(idx, status="failed", error="bridge save failed")
 
-        # --- Phase 2: API saves (via CrossRef/arXiv + pyzotero) ---
-        if api_candidates:
+        # --- Phase 2: API fallback for failed connector items ---
+        # Preserve the connector failure reason as a warning so the user knows
+        # what went wrong (anti-bot, timeout, translator error, etc.), while
+        # still attempting API save to ensure metadata is not lost.
+        connector_api_retries: list[dict] = []
+        for candidate in connector_candidates:
+            paper = candidate["paper"]
+            if not paper.get("doi"):
+                continue
+            for item in batch.pending_items:
+                if item.index == candidate["_index"] and item.status == "failed":
+                    connector_error = item.error or "connector save failed"
+                    connector_api_retries.append(
+                        {
+                            **candidate,
+                            "url": None,
+                            "ingest_method": "api",
+                            "_connector_error": connector_error,
+                        }
+                    )
+                    batch.update_item(
+                        candidate["_index"],
+                        status="pending",
+                        ingest_method="api",
+                        warning=(
+                            f"Connector failed ({connector_error}); retrying via API (metadata only, no PDF). "
+                            "Check Chrome/Connector if you need PDF."
+                        ),
+                        error=None,
+                    )
+                    break
+
+        phase2_api_candidates = api_candidates + connector_api_retries
+        if phase2_api_candidates:
             writer = _get_writer()
-            for candidate in api_candidates:
+            for candidate in phase2_api_candidates:
                 idx = candidate["_index"]
                 api_result = _save_via_api(
                     candidate,
@@ -504,7 +601,8 @@ def _run_save_worker(
                     else:
                         if writer is None:
                             writer = _get_writer()
-                        writer.add_to_collection(item.item_key, resolved_collection_key)
+                        with _writer_lock:
+                            writer.add_to_collection(item.item_key, resolved_collection_key)
                         batch.update_item(
                             item.index,
                             status="saved",
@@ -572,6 +670,7 @@ def ingest_papers(
     saved = 0
     duplicates = 0
     failed = 0
+    skipped_indices: set[int] = set()
 
     for idx, paper in enumerate(papers):
         arxiv_id = paper.get("arxiv_id")
@@ -587,11 +686,13 @@ def ingest_papers(
             _lookup_local_item_key_by_doi(arxiv_doi) if arxiv_doi and arxiv_doi != normalized_doi else None
         )
         if existing_item_key:
+            skipped_indices.add(idx)
             duplicates += 1
             if resolved_collection_key:
                 try:
                     writer = _get_writer()
-                    writer.add_to_collection(existing_item_key, resolved_collection_key)
+                    with _writer_lock:
+                        writer.add_to_collection(existing_item_key, resolved_collection_key)
                 except Exception as exc:
                     results.append(
                         {
@@ -612,6 +713,41 @@ def ingest_papers(
                 }
             )
             continue
+
+    dois_to_resolve: list[str] = []
+    seen_dois: set[str] = set()
+    for idx, paper in enumerate(papers):
+        if idx in skipped_indices:
+            continue
+        normalized_doi = ingestion_search.normalize_doi(paper.get("doi"))
+        if (
+            normalized_doi
+            and not paper.get("arxiv_id")
+            and (not paper.get("landing_page_url") or _is_pdf_or_doi_url(paper.get("landing_page_url")))
+            and normalized_doi not in seen_dois
+        ):
+            seen_dois.add(normalized_doi)
+            dois_to_resolve.append(normalized_doi)
+
+    resolved_dois = _resolve_dois_concurrent(dois_to_resolve)
+    for idx, paper in enumerate(papers):
+        if idx in skipped_indices:
+            continue
+        normalized_doi = ingestion_search.normalize_doi(paper.get("doi"))
+        if normalized_doi in resolved_dois:
+            paper["_resolved_landing_url"] = resolved_dois[normalized_doi]
+
+    for idx, paper in enumerate(papers):
+        if idx in skipped_indices:
+            continue
+        arxiv_id = paper.get("arxiv_id")
+        landing_page_url = paper.get("landing_page_url")
+        doi = paper.get("doi")
+
+        normalized_doi = ingestion_search.normalize_doi(doi)
+        arxiv_doi = ingestion_search.normalize_doi(f"10.48550/arxiv.{arxiv_id}") if arxiv_id else None
+        if not normalized_doi:
+            normalized_doi = arxiv_doi
 
         routing = classify_ingest_candidate(paper, normalized_doi, arxiv_id, landing_page_url)
 
@@ -641,7 +777,7 @@ def ingest_papers(
         if arxiv_id:
             url = f"https://arxiv.org/abs/{arxiv_id}"
         else:
-            url = landing_page_url
+            url = paper.get("_resolved_landing_url") or landing_page_url
         connector_candidates.append(
             {
                 "paper": paper,
@@ -650,6 +786,56 @@ def ingest_papers(
                 "ingest_method": "connector",
             }
         )
+
+    # --- Bridge availability check: no Chrome → re-route DOI candidates to API ---
+    if connector_candidates:
+        bridge_running = BridgeServer.is_running(DEFAULT_PORT)
+        if not bridge_running:
+            try:
+                BridgeServer.auto_start(DEFAULT_PORT)
+                bridge_running = True
+            except Exception:
+                bridge_running = False
+        if bridge_running:
+            ext_status = ingestion_bridge.get_extension_status(f"http://127.0.0.1:{DEFAULT_PORT}")
+            bridge_running = ext_status.get("extension_connected", False)
+
+        if not bridge_running:
+            _no_bridge_warning = (
+                "Chrome/Connector not available — falling back to API (metadata only, no PDF). "
+                "For full PDF download, open Chrome with ZotPilot Connector extension enabled."
+            )
+            doi_count = sum(1 for c in connector_candidates if c["paper"].get("doi"))
+            no_doi_count = len(connector_candidates) - doi_count
+            for candidate in connector_candidates:
+                paper = candidate["paper"]
+                if paper.get("doi"):
+                    api_candidates.append(
+                        {
+                            "paper": paper,
+                            "url": None,
+                            "_index": candidate["_index"],
+                            "ingest_method": "api",
+                        }
+                    )
+                else:
+                    failed += 1
+                    results.append(
+                        {
+                            "url": candidate["url"],
+                            "status": "failed",
+                            "error": "Chrome/Connector not available, no DOI for API fallback",
+                        }
+                    )
+            connector_candidates = []  # all re-routed or failed
+            results.append(
+                {
+                    "status": "warning",
+                    "warning": _no_bridge_warning,
+                    "api_fallback_count": doi_count,
+                    "no_fallback_count": no_doi_count,
+                }
+            )
 
     # --- Preflight (still synchronous — fast enough) ---
     urls_to_save = [candidate["url"] for candidate in connector_candidates]
@@ -682,7 +868,7 @@ def ingest_papers(
                         "error": error.get("error") or "preflight failed",
                     }
                 )
-            # All candidates blocked — clear so no background work
+            # All candidates blocked — user must handle anti-bot/timeout then retry
             connector_candidates = []
 
     # --- Build batch state (includes ALL candidates for index-based updates) ---
