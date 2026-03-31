@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re as _re
 import threading
 import time
 import urllib.error
@@ -46,6 +47,50 @@ def _clear_batch_store() -> None:
 
 
 register_reset_callback(_clear_batch_store)
+
+# ---------------------------------------------------------------------------
+# URL classification for routing decisions
+# ---------------------------------------------------------------------------
+
+_PDF_URL_RE = _re.compile(
+    r"(?:"
+    r"\.pdf(?:[?#]|$)"          # ends with .pdf or .pdf?query
+    r"|/pdf(?:[?/]|$)"          # /pdf path segment
+    r"|/content/pdf/"           # Springer PDF pattern
+    r"|pdf\.sciencedirect\.com" # Elsevier PDF domain
+    r")",
+    _re.IGNORECASE,
+)
+_DOI_REDIRECT_RE = _re.compile(r"^https?://(?:dx\.)?doi\.org/10\.", _re.IGNORECASE)
+
+
+def _is_pdf_or_doi_url(url: str | None) -> bool:
+    """Return True if url is a direct PDF link or a doi.org redirect."""
+    if not url:
+        return False
+    return bool(_PDF_URL_RE.search(url)) or bool(_DOI_REDIRECT_RE.match(url))
+
+
+def classify_ingest_candidate(
+    paper: dict,
+    normalized_doi: str | None,
+    arxiv_id: str | None,
+    landing_page_url: str | None,
+) -> Literal["connector", "api", "reject"]:
+    """Classify a paper candidate for routing.
+
+    Returns:
+        "connector" - regular landing page, use Zotero Connector
+        "api"       - PDF direct link or doi.org URL, use API fallback
+        "reject"    - no usable identifier
+    """
+    if arxiv_id:
+        return "connector"
+    if landing_page_url and not _is_pdf_or_doi_url(landing_page_url):
+        return "connector"
+    if normalized_doi or (paper.get("doi") and not landing_page_url):
+        return "api"
+    return "reject"
 
 
 def _ensure_inbox_collection() -> str | None:
@@ -223,9 +268,111 @@ def search_academic_databases(
     )
 
 
+def _save_via_api(
+    candidate: dict,
+    resolved_collection_key: str | None,
+    tags: list[str] | None,
+    batch: BatchState,
+    writer,  # ZoteroWriter instance
+    _writer_lock: threading.Lock,
+) -> dict:
+    """Save a single paper via API (CrossRef/arXiv + pyzotero), bypassing Connector.
+
+    All pyzotero API calls are wrapped in _writer_lock for thread safety.
+    On success, sets routing_status="routed_by_api" so reconciliation skips this item.
+    """
+    from ..state import _get_resolver
+
+    paper = candidate["paper"]
+    idx = candidate["_index"]
+
+    # --- Determine identifier to resolve ---
+    doi = paper.get("doi")
+    arxiv_id = paper.get("arxiv_id")
+    landing_page_url = paper.get("landing_page_url")
+
+    normalized_doi = ingestion_search.normalize_doi(doi)
+    arxiv_doi = ingestion_search.normalize_doi(f"10.48550/arxiv.{arxiv_id}") if arxiv_id else None
+    if not normalized_doi:
+        normalized_doi = arxiv_doi
+
+    if arxiv_id:
+        identifier = f"arxiv:{arxiv_id}"
+    elif normalized_doi:
+        identifier = normalized_doi
+    elif landing_page_url:
+        identifier = landing_page_url
+    else:
+        batch.update_item(idx, status="failed", error="no usable identifier for API resolution")
+        return {"success": False, "error": "no usable identifier"}
+
+    try:
+        resolver = _get_resolver()
+        metadata = resolver.resolve(identifier)
+
+        # --- Merge OpenAlex abstract when CrossRef abstract is empty ---
+        if not metadata.abstract:
+            abstract_snippet = paper.get("abstract_snippet") or paper.get("abstract")
+            if abstract_snippet:
+                metadata.abstract = abstract_snippet
+
+        with _writer_lock:
+            collection_keys = [resolved_collection_key] if resolved_collection_key else None
+            result = writer.create_item_from_metadata(
+                metadata,
+                collection_keys=collection_keys,
+                tags=tags,
+            )
+
+        # Extract created item key from pyzotero result
+        item_key = None
+        if result and "successful" in result:
+            for value in result["successful"].values():
+                item_key = value.get("key") or value.get("data", {}).get("key")
+                if item_key:
+                    break
+
+        if not item_key:
+            raise ToolError("create_item_from_metadata returned no item key")
+
+        # --- Attach OA PDF (best-effort) ---
+        try:
+            with _writer_lock:
+                writer.try_attach_oa_pdf(
+                    item_key,
+                    doi=metadata.doi,
+                    oa_url=metadata.oa_url,
+                    arxiv_id=metadata.arxiv_id,
+                )
+        except Exception as attach_exc:
+            logger.debug("PDF attach best-effort failed for %s: %s", item_key, attach_exc)
+            pass  # best-effort, proceed without PDF
+
+        batch.update_item(
+            idx,
+            status="saved",
+            item_key=item_key,
+            title=metadata.title,
+            routing_status="routed_by_api",
+            ingest_method="api",
+        )
+        return {
+            "success": True,
+            "item_key": item_key,
+            "title": metadata.title,
+            "error": None,
+        }
+
+    except Exception as exc:
+        logger.warning("API save failed for index %d: %s", idx, exc)
+        batch.update_item(idx, status="failed", error=str(exc))
+        return {"success": False, "error": str(exc)}
+
+
 def _run_save_worker(
     batch: BatchState,
-    save_candidates: list[dict],
+    connector_candidates: list[dict],
+    api_candidates: list[dict],
     resolved_collection_key: str | None,
 ) -> None:
     """Background worker: runs save_urls chunks and updates batch state.
@@ -233,11 +380,19 @@ def _run_save_worker(
     This function calls save_urls exactly as the old synchronous code did —
     the only difference is it runs in a background thread and writes results
     into BatchState instead of returning them directly.
+
+    Phase 1: Connector saves (via browser bridge)
+    Phase 2: API saves (via CrossRef/arXiv + pyzotero, skipped by reconciliation)
     """
     try:
         batch.state = "running"
-        urls_to_save = [c["url"] for c in save_candidates]
-        candidate_by_url = {c["url"]: c for c in save_candidates}
+        saved = 0
+        failed = 0
+
+        # --- Phase 1: Connector saves ---
+        candidate_by_index: dict[int, dict] = {c["_index"]: c for c in connector_candidates}
+        candidate_by_url: dict[str, dict] = {c["url"]: c for c in connector_candidates}
+        urls_to_save = [c["url"] for c in connector_candidates]
 
         for start in range(0, len(urls_to_save), 10):
             chunk = urls_to_save[start : start + 10]
@@ -247,17 +402,21 @@ def _run_save_worker(
 
             top_level_failed = batch_result.get("success") is False
             for result in batch_results:
+                idx = result.get("index")
                 url = result.get("url")
-                candidate = candidate_by_url.get(url)
-                if candidate is None:
-                    continue
-                idx = candidate["_index"]
+                if idx is None:
+                    candidate = candidate_by_url.get(url)
+                    if candidate is None:
+                        continue
+                    idx = candidate["_index"]
+                else:
+                    candidate = candidate_by_index.get(idx)
                 if result.get("success") is True:
                     batch.update_item(
                         idx,
                         status="saved",
                         item_key=result.get("item_key"),
-                        title=result.get("title") or candidate.get("paper", {}).get("title"),
+                        title=result.get("title") or (candidate.get("paper", {}).get("title") if candidate else None),
                         warning=result.get("warning"),
                         routing_status=result.get("routing_status"),
                     )
@@ -280,15 +439,32 @@ def _run_save_worker(
                         if item.index == idx and item.status == "pending":
                             batch.update_item(idx, status="failed", error="bridge save failed")
 
+        # --- Phase 2: API saves (via CrossRef/arXiv + pyzotero) ---
+        if api_candidates:
+            writer = _get_writer()
+            for candidate in api_candidates:
+                idx = candidate["_index"]
+                api_result = _save_via_api(
+                    candidate,
+                    resolved_collection_key=resolved_collection_key,
+                    tags=None,
+                    batch=batch,
+                    writer=writer,
+                    _writer_lock=_writer_lock,
+                )
+                if api_result.get("success"):
+                    saved += 1
+                else:
+                    failed += 1
+
         # Post-batch reconciliation for items that were saved but not fully routed.
+        # API-saved items are skipped (already routed via API).
         unrouted_items = [
             item
             for item in batch.pending_items
-            if item.status == "saved" and item.item_key and not item.routing_status
+            if item.status == "saved" and item.item_key and not item.routing_status and item.ingest_method != "api"
         ]
-        deferred_items = [
-            item for item in batch.pending_items if item.status == "saved" and not item.item_key
-        ]
+        deferred_items = [item for item in batch.pending_items if item.status == "saved" and not item.item_key]
         if (unrouted_items or deferred_items) and resolved_collection_key:
             logger.info(
                 "Starting reconciliation for %d unrouted and %d deferred items",
@@ -339,9 +515,7 @@ def _run_save_worker(
                     # Clean publisher auto-tags after successful routing
                     if writer is None:
                         writer = _get_writer()
-                    ingestion_bridge._cleanup_publisher_tags(
-                        item.item_key, item.url or "", writer, logger
-                    )
+                    ingestion_bridge._cleanup_publisher_tags(item.item_key, item.url or "", writer, logger)
                 except Exception as exc:
                     batch.update_item(
                         item.index,
@@ -393,7 +567,8 @@ def ingest_papers(
     resolved_collection_key = collection_key
 
     results: list[dict] = []
-    save_candidates: list[dict] = []
+    connector_candidates: list[dict] = []
+    api_candidates: list[dict] = []
     saved = 0
     duplicates = 0
     failed = 0
@@ -413,7 +588,6 @@ def ingest_papers(
         )
         if existing_item_key:
             duplicates += 1
-            # Route duplicate into INBOX (or target collection) so it's not orphaned
             if resolved_collection_key:
                 try:
                     writer = _get_writer()
@@ -439,45 +613,46 @@ def ingest_papers(
             )
             continue
 
-        if arxiv_id:
-            url = f"https://arxiv.org/abs/{arxiv_id}"
-        elif landing_page_url:
-            url = landing_page_url
-        elif doi:
+        routing = classify_ingest_candidate(paper, normalized_doi, arxiv_id, landing_page_url)
+
+        if routing == "reject":
             failed += 1
             results.append(
                 {
-                    "url": None,
-                    "status": "failed",
-                    "error": (
-                        "no arxiv_id or landing_page_url; DOI-only papers cannot be ingested. "
-                        "doi.org redirects produce unpredictable publisher formats that cause "
-                        "Zotero translators to save incorrect entries."
-                    ),
-                }
-            )
-            continue
-        else:
-            failed += 1
-            results.append(
-                {
-                    "url": None,
+                    "url": landing_page_url or None,
                     "status": "failed",
                     "error": "no usable identifier",
                 }
             )
             continue
 
-        save_candidates.append(
+        if routing == "api":
+            api_candidates.append(
+                {
+                    "paper": paper,
+                    "url": None,
+                    "_index": idx,
+                    "ingest_method": "api",
+                }
+            )
+            continue
+
+        # connector
+        if arxiv_id:
+            url = f"https://arxiv.org/abs/{arxiv_id}"
+        else:
+            url = landing_page_url
+        connector_candidates.append(
             {
                 "paper": paper,
                 "url": url,
                 "_index": idx,
+                "ingest_method": "connector",
             }
         )
 
     # --- Preflight (still synchronous — fast enough) ---
-    urls_to_save = [candidate["url"] for candidate in save_candidates]
+    urls_to_save = [candidate["url"] for candidate in connector_candidates]
     if urls_to_save and _get_config().preflight_enabled:
         preflight_report = ingestion_bridge.preflight_urls(
             urls_to_save,
@@ -508,11 +683,17 @@ def ingest_papers(
                     }
                 )
             # All candidates blocked — clear so no background work
-            save_candidates = []
+            connector_candidates = []
 
-    # --- Build batch state ---
+    # --- Build batch state (includes ALL candidates for index-based updates) ---
     pending_items = [
-        IngestItemState(index=c["_index"], url=c["url"], title=c["paper"].get("title")) for c in save_candidates
+        IngestItemState(
+            index=c["_index"],
+            url=c["url"],
+            title=c["paper"].get("title"),
+            ingest_method=c.get("ingest_method"),
+        )
+        for c in connector_candidates + api_candidates
     ]
     batch = BatchState(
         total=len(papers),
@@ -520,7 +701,7 @@ def ingest_papers(
         pending_items=pending_items,
     )
 
-    if not save_candidates:
+    if not connector_candidates and not api_candidates:
         # Everything resolved synchronously — mark final immediately
         batch.state = "completed" if failed == 0 else "completed_with_errors"
         batch.is_final = True
@@ -528,7 +709,7 @@ def ingest_papers(
     else:
         # Submit background work
         _batch_store.put(batch)
-        _executor.submit(_run_save_worker, batch, save_candidates, resolved_collection_key)
+        _executor.submit(_run_save_worker, batch, connector_candidates, api_candidates, resolved_collection_key)
 
     _instruction: str | None = None
     if batch.is_final and (saved + duplicates) > 0:
@@ -543,7 +724,7 @@ def ingest_papers(
         "saved": saved,
         "duplicates": duplicates,
         "failed": failed,
-        "pending_count": len(save_candidates),
+        "pending_count": len(connector_candidates) + len(api_candidates),
         "collection_used": resolved_collection_key,
         "results": results,
         "pending_items": [it.to_dict() for it in pending_items],

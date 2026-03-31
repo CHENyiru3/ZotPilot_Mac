@@ -29,6 +29,7 @@ class IngestItemState:
     error: str | None = None
     warning: str | None = None
     routing_status: str | None = None
+    ingest_method: str | None = None  # "connector" | "api" | None
 
     def to_dict(self) -> dict:
         """Return dict representation, omitting None-valued optional fields.
@@ -51,6 +52,8 @@ class IngestItemState:
             d["warning"] = self.warning
         if self.routing_status is not None:
             d["routing_status"] = self.routing_status
+        if self.ingest_method is not None:
+            d["ingest_method"] = self.ingest_method
         return d
 
 
@@ -87,6 +90,7 @@ class BatchState:
         error: str | None | _UnsetType = _UNSET,
         warning: str | None | _UnsetType = _UNSET,
         routing_status: str | None | _UnsetType = _UNSET,
+        ingest_method: str | None | _UnsetType = _UNSET,
     ) -> None:
         """Thread-safe update of an item by index.
 
@@ -109,6 +113,8 @@ class BatchState:
                 item.warning = warning
             if routing_status is not _UNSET:
                 item.routing_status = routing_status
+            if ingest_method is not _UNSET:
+                item.ingest_method = ingest_method
 
     def finalize(self) -> None:
         """Set is_final=True, determine state, set finalized_at."""

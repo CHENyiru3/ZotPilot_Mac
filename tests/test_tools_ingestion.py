@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -10,7 +11,9 @@ from fastmcp.exceptions import ToolError
 
 from zotpilot.tools.ingestion import (
     _batch_store,
+    _is_pdf_or_doi_url,
     _run_save_worker,
+    classify_ingest_candidate,
     get_ingest_status,
     ingest_papers,
     save_from_url,
@@ -191,12 +194,18 @@ class TestIngestPapers:
         assert result["results"][0]["status"] == "failed"
         assert "no usable identifier" in result["results"][0]["error"]
 
-    def test_doi_only_marks_failed(self):
-        with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()):
+    def test_doi_only_routes_to_api_fallback(self):
+        """DOI-only papers are routed to the API fallback path, not rejected."""
+        with (
+            patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()),
+            patch("zotpilot.tools.ingestion._run_save_worker"),
+        ):
             result = ingest_papers([{"doi": "10.1000/test"}])
 
-        assert result["failed"] == 1
-        assert "DOI-only papers cannot be ingested" in result["results"][0]["error"]
+        assert result["failed"] == 0
+        assert len(result["pending_items"]) == 1
+        assert result["pending_items"][0]["ingest_method"] == "api"
+        assert result["pending_items"][0]["url"] is None
 
     def test_arxiv_id_has_priority(self):
         papers = [
@@ -595,6 +604,7 @@ class TestRunSaveWorkerReconciliation:
             _run_save_worker(
                 batch,
                 [{"url": "https://example.com/paper", "_index": 0, "paper": {"title": "Paper"}}],
+                [],
                 "COL1",
             )
 
@@ -634,6 +644,7 @@ class TestRunSaveWorkerReconciliation:
             _run_save_worker(
                 batch,
                 [{"url": "https://example.com/paper", "_index": 0, "paper": {"title": "Paper"}}],
+                [],
                 "COL1",
             )
 
@@ -673,8 +684,205 @@ class TestRunSaveWorkerReconciliation:
             _run_save_worker(
                 batch,
                 [{"url": "https://example.com/paper", "_index": 0, "paper": {"title": "Paper"}}],
+                [],
                 "COL1",
             )
 
         writer.add_to_collection.assert_called_once_with("ITEM1", "COL1")
         assert batch.pending_items[0].routing_status == "routed_by_reconciliation_web"
+
+
+class TestHelperFunctions:
+    def test_is_pdf_or_doi_url_pdf_suffix(self):
+        assert _is_pdf_or_doi_url("https://example.com/paper.pdf") is True
+        assert _is_pdf_or_doi_url("https://example.com/paper.pdf?download=1") is True
+        assert _is_pdf_or_doi_url("https://example.com/paper.pdf#section") is True
+
+    def test_is_pdf_or_doi_url_doi_redirect(self):
+        assert _is_pdf_or_doi_url("https://doi.org/10.1000/test") is True
+        assert _is_pdf_or_doi_url("https://dx.doi.org/10.1000/test") is True
+        assert _is_pdf_or_doi_url("http://doi.org/10.1000/test") is True
+
+    def test_is_pdf_or_doi_url_false_for_regular_urls(self):
+        assert _is_pdf_or_doi_url("https://publisher.example/article") is False
+        assert _is_pdf_or_doi_url("https://arxiv.org/abs/2401.00001") is False
+        assert _is_pdf_or_doi_url("https://scholar.google.com/scholar?q=test") is False
+
+    def test_is_pdf_or_doi_url_none(self):
+        assert _is_pdf_or_doi_url(None) is False
+
+    def test_classify_ingest_candidate_arxiv_routes_to_connector(self):
+        result = classify_ingest_candidate(
+            paper={"doi": "10.1000/test", "arxiv_id": "2401.00001"},
+            normalized_doi="10.1000/test",
+            arxiv_id="2401.00001",
+            landing_page_url="https://arxiv.org/abs/2401.00001",
+        )
+        assert result == "connector"
+
+    def test_classify_ingest_candidate_non_pdf_landing_page_routes_to_connector(self):
+        result = classify_ingest_candidate(
+            paper={"doi": "10.1000/test"},
+            normalized_doi=None,
+            arxiv_id=None,
+            landing_page_url="https://publisher.example/article",
+        )
+        assert result == "connector"
+
+    def test_classify_ingest_candidate_doi_only_routes_to_api(self):
+        result = classify_ingest_candidate(
+            paper={"doi": "10.1000/test"},
+            normalized_doi="10.1000/test",
+            arxiv_id=None,
+            landing_page_url=None,
+        )
+        assert result == "api"
+
+    def test_classify_ingest_candidate_doi_with_pdf_url_routes_to_api(self):
+        result = classify_ingest_candidate(
+            paper={"doi": "10.1000/test"},
+            normalized_doi="10.1000/test",
+            arxiv_id=None,
+            landing_page_url="https://example.com/paper.pdf",
+        )
+        assert result == "api"
+
+    def test_classify_ingest_candidate_no_identifier_rejects(self):
+        result = classify_ingest_candidate(
+            paper={"title": "No identifier here"},
+            normalized_doi=None,
+            arxiv_id=None,
+            landing_page_url=None,
+        )
+        assert result == "reject"
+
+
+class TestSaveViaApi:
+    def setup_method(self):
+        _batch_store.clear()
+
+    def test_save_via_api_success(self):
+        from zotpilot.tools.ingest_state import BatchState, IngestItemState
+
+        candidate = {
+            "_index": 0,
+            "paper": {"doi": "10.1000/test"},
+            "url": None,
+        }
+        batch = BatchState(
+            total=1,
+            collection_used="COL1",
+            pending_items=[IngestItemState(index=0, url=None, title=None)],
+        )
+        writer = MagicMock()
+        writer.create_item_from_metadata.return_value = {
+            "successful": {"0": {"key": "ITEM1", "data": {"key": "ITEM1"}}}
+        }
+        writer.try_attach_oa_pdf.return_value = "not_found"
+        resolver_mock = MagicMock()
+        resolver_mock.resolve.return_value.title = "Test Paper"
+        resolver_mock.resolve.return_value.doi = "10.1000/test"
+        resolver_mock.resolve.return_value.abstract = "Abstract."
+        resolver_mock.resolve.return_value.oa_url = None
+        resolver_mock.resolve.return_value.arxiv_id = None
+
+        with (
+            patch("zotpilot.state._get_resolver", return_value=resolver_mock),
+            patch("zotpilot.state._get_config", return_value=_make_config()),
+        ):
+            from zotpilot.tools.ingestion import _save_via_api
+
+            result = _save_via_api(
+                candidate,
+                resolved_collection_key="COL1",
+                tags=None,
+                batch=batch,
+                writer=writer,
+                _writer_lock=threading.Lock(),
+            )
+
+        assert result["success"] is True
+        assert result["item_key"] == "ITEM1"
+        assert batch.pending_items[0].status == "saved"
+        assert batch.pending_items[0].routing_status == "routed_by_api"
+        assert batch.pending_items[0].ingest_method == "api"
+
+    def test_save_via_api_crossref_failure_marks_failed(self):
+        from zotpilot.tools.ingest_state import BatchState, IngestItemState
+
+        candidate = {
+            "_index": 0,
+            "paper": {"doi": "10.1000/test"},
+            "url": None,
+        }
+        batch = BatchState(
+            total=1,
+            collection_used="COL1",
+            pending_items=[IngestItemState(index=0, url=None, title=None)],
+        )
+        writer = MagicMock()
+        resolver_mock = MagicMock()
+        resolver_mock.resolve.side_effect = Exception("CrossRef lookup failed")
+
+        with (
+            patch("zotpilot.state._get_resolver", return_value=resolver_mock),
+            patch("zotpilot.state._get_config", return_value=_make_config()),
+        ):
+            from zotpilot.tools.ingestion import _save_via_api
+
+            result = _save_via_api(
+                candidate,
+                resolved_collection_key="COL1",
+                tags=None,
+                batch=batch,
+                writer=writer,
+                _writer_lock=threading.Lock(),
+            )
+
+        assert result["success"] is False
+        assert "CrossRef lookup failed" in result["error"]
+        assert batch.pending_items[0].status == "failed"
+
+
+class TestReconciliationSkipsApiItems:
+    def setup_method(self):
+        _batch_store.clear()
+
+    def test_api_saved_item_excluded_from_unrouted_items(self):
+        from zotpilot.tools.ingest_state import BatchState, IngestItemState
+
+        batch = BatchState(
+            total=2,
+            collection_used="COL1",
+            pending_items=[
+                IngestItemState(
+                    index=0,
+                    url="https://example.com/connector",
+                    title="Connector Paper",
+                    ingest_method="connector",
+                ),
+                IngestItemState(
+                    index=1,
+                    url=None,
+                    title="API Paper",
+                    ingest_method="api",
+                    routing_status="routed_by_api",
+                    status="saved",
+                    item_key="ITEM2",
+                ),
+            ],
+        )
+        batch.update_item(0, status="saved", item_key="ITEM1", routing_status=None)
+
+        unrouted_items = [
+            item
+            for item in batch.pending_items
+            if item.status == "saved" and item.item_key and not item.routing_status and item.ingest_method != "api"
+        ]
+        api_items = [item for item in batch.pending_items if item.ingest_method == "api"]
+
+        assert len(unrouted_items) == 1
+        assert unrouted_items[0].index == 0
+        assert len(api_items) == 1
+        assert api_items[0].index == 1
+        assert api_items[0].routing_status == "routed_by_api"

@@ -197,8 +197,8 @@ For Priority 3 (`save_urls`): call `save_urls([landing_page_url, ...])` directly
 | 1 | `arxiv_id` present | `ingest_papers([{arxiv_id:...}])` |
 | 2 | `doi` + `is_oa=True` + `oa_url` present | `ingest_papers([{doi:..., landing_page_url: <oa_url>}])` — pass `oa_url` value as `landing_page_url` (i.e., `landing_page_url` = the `oa_url` value from the search result) |
 | 3 | `doi` + `is_oa=False` + `landing_page_url` + user has subscription | `save_urls([landing_page_url])` — use `landing_page_url` from the search result as-is. Do not construct the URL from DOI alone. Requires Chrome+Connector. |
-| 4 | `doi` only (no `arxiv_id` or `landing_page_url`) | Skip — doi.org redirects produce unpredictable publisher formats that cause Zotero translators to save incorrect entries |
-| 5 | No identifier | Skip, inform user |
+| 3b | `doi` only (no `arxiv_id`, no `landing_page_url`, or URL is a pdf/doi.org link) | `ingest_papers([{doi:...}])` — DOI is looked up via CrossRef API; metadata + OA PDF attached automatically. No Chrome/Connector needed. |
+| 4 | No identifier | Skip, inform user |
 
 > **Do not tag at ingest.** `ingest_papers` does not accept a `tags` parameter. Tagging happens in post-ingest workflow (Step 8): after indexing and note generation, call `list_tags` first, pick from existing vocabulary only, and ask the user before adding any new tag.
 
