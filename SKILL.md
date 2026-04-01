@@ -151,6 +151,6 @@ Follow `references/profiling-guide.md`
 | `extension_not_connected` | Chrome not open or Connector not installed | Open Chrome, check extensions, enable ZotPilot Connector |
 | `anti_bot_detected` | Publisher blocked the save | Retry with `doi.org/{doi}`, or ask user to open page in Chrome first |
 | `translator_fallback_detected` | No Zotero translator matched | Saved as web snapshot — user should verify in Zotero |
-| `pdf: "none"` + warning | PDF not attached | Metadata saved; user downloads PDF manually |
+| `pdf: "none"` + warning | PDF not attached | Metadata saved. **Acceptable** when user has no subscription or publisher is paywalled. For OA papers, if PDF is missing, retry with `doi.org/{doi}` or manually download. |
 | `pdf: "pending"` + warning | Zotero still downloading PDF | Wait 1-2 minutes, then verify with `get_paper_details` |
 | `status: "pending"` in batch | Anti-bot mid-batch | Re-run ingest for pending items after user resolves blocked page |

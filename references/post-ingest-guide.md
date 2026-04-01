@@ -23,7 +23,7 @@ Compare returned count with `saved` count:
 | 1 | ... | attached / none | ✅ / ❌ |
 
 - `attached` — `pdf_available: true` from ingest result or paper details
-- `none` — metadata only (no subscription, anti-bot, or paywalled)
+- `none` — metadata only. **Acceptable** when user has no subscription or publisher is paywalled (not an error). For OA papers, PDF should be available—if missing, retry or report.
 - `❌` — reported saved but not found in Zotero
 
 For failed/missing items, show error and suggest: retry with different URL, or manually add in Zotero.
