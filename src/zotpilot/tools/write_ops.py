@@ -359,12 +359,15 @@ def batch_collections(
     if len(item_keys) > _BATCH_MAX:
         raise ToolError(f"Batch size {len(item_keys)} exceeds limit of {_BATCH_MAX}")
     writer = _get_writer()
-    op = writer.add_to_collection if action == "add" else writer.remove_from_collection
     results = []
     for key in item_keys:
         try:
-            op(key, collection_key)
-            results.append({"item_key": key, "success": True})
+            if action == "add":
+                result = _add_to_collection_impl(key, collection_key, auto_cleanup_inbox=True)
+                results.append({"item_key": key, "success": True, "inbox_removed": result.get("inbox_removed", False)})
+            else:
+                writer.remove_from_collection(key, collection_key)
+                results.append({"item_key": key, "success": True})
         except Exception as e:
             results.append({"item_key": key, "success": False, "error": str(e)})
     _invalidate_collection_cache()

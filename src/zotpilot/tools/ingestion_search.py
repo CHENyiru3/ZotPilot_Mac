@@ -115,6 +115,7 @@ def search_openalex(
     sort_map = {
         "relevance": "relevance_score:desc",
         "publicationDate": "publication_date:desc",
+        "citationCount": "cited_by_count:desc",
     }
     author_filter: str | None = None
     search_query = query
@@ -140,15 +141,22 @@ def search_openalex(
         ),
         "mailto": mailto,
     }
-    if search_query:
-        params["search"] = search_query
+
+    # Use title_and_abstract.search filter for higher precision than generic search.
+    # Generic search includes fulltext which adds noise. Boolean operators (AND/OR/NOT)
+    # and exact phrases ("...") are supported in both modes.
     filters: list[str] = []
+    if search_query:
+        filters.append(f"title_and_abstract.search:{search_query}")
     if author_filter is not None:
         filters.append(f"raw_author_name.search:{author_filter}")
     if year_min:
         filters.append(f"publication_year:>{year_min - 1}")
     if year_max:
         filters.append(f"publication_year:<{year_max + 1}")
+    # Exclude works with no citations when sorting by citation count
+    if sort_by == "citationCount":
+        filters.append("cited_by_count:>0")
     if filters:
         params["filter"] = ",".join(filters)
 
@@ -160,10 +168,7 @@ def search_openalex(
     response.raise_for_status()
 
     results = [format_openalex_paper(p) for p in response.json().get("results", [])]
-    results = results[:limit]
-    if sort_by == "citationCount":
-        results.sort(key=lambda result: result.get("cited_by_count") or 0, reverse=True)
-    return results
+    return results[:limit]
 
 def search_academic_databases_impl(
     config,

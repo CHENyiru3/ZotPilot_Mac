@@ -105,7 +105,7 @@ class TestBatchCollections:
     def test_add_invalidates_cache(self, mock_writer):
         with patch("zotpilot.tools.write_ops._invalidate_collection_cache") as mock_inv:
             batch_collections(action="add", item_keys=["A"], collection_key="COL1")
-            mock_inv.assert_called_once()
+            assert mock_inv.call_count >= 1  # called per-item via _add_to_collection_impl (add + inbox cleanup)
 
     def test_remove_invalidates_cache(self, mock_writer):
         with patch("zotpilot.tools.write_ops._invalidate_collection_cache") as mock_inv:
