@@ -262,7 +262,7 @@ class TestApplyBridgeResultRouting:
         assert result["routing_status"] == "routed_by_connector"
         writer.set_item_tags.assert_called_once_with("ITEM1", [])
 
-    def test_non_publisher_urls_do_not_clear_tags(self):
+    def test_non_publisher_urls_also_clear_tags(self):
         writer = _make_writer()
         with patch("zotpilot.tools.ingestion._get_config", return_value=_make_config("KEY")), \
              patch("zotpilot.tools.ingestion._get_writer", return_value=writer):
@@ -278,7 +278,7 @@ class TestApplyBridgeResultRouting:
                 None,
             )
 
-        writer.set_item_tags.assert_not_called()
+        writer.set_item_tags.assert_called_once_with("ITEM1", [])
 
 
 class TestBridgeHelpers:

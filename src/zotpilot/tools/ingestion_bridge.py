@@ -14,7 +14,33 @@ SAVE_RESULT_POLL_OVERALL_TIMEOUT_S = 600.0
 SAVE_RESULT_POLL_PER_URL_BUDGET_S = 75.0
 SAVE_RESULT_POLL_OVERALL_GRACE_S = 120.0
 ROUTING_RETRY_DELAYS_S = [0.0, 2.0, 5.0]
-_PUBLISHER_TAG_SOURCES = {"arxiv.org", "biorxiv.org", "medrxiv.org"}
+_PUBLISHER_TAG_SOURCES = {
+    "arxiv.org",
+    "biorxiv.org",
+    "medrxiv.org",
+    "sciencedirect.com",
+    "elsevier.com",
+    "springer.com",
+    "springerlink.com",
+    "nature.com",
+    "wiley.com",
+    "onlinelibrary.wiley.com",
+    "acs.org",
+    "pubs.acs.org",
+    "iop.org",
+    "iopscience.iop.org",
+    "mdpi.com",
+    "cambridge.org",
+    "tandfonline.com",
+    "aip.org",
+    "aip.scitation.org",
+    "rsc.org",
+    "pnas.org",
+    "ieee.org",
+    "ieeexplore.ieee.org",
+    "acm.org",
+    "dl.acm.org",
+}
 
 ANTI_BOT_TITLE_PATTERNS = [
     "just a moment",
@@ -133,11 +159,16 @@ def extract_publisher_domain(url: str) -> str:
 
 
 def _should_clean_publisher_tags(url: str) -> bool:
-    """Return True for sources known to inject unwanted auto-tags."""
+    """Check if publisher tags should be cleaned for this URL.
+
+    Default to True for all URLs; publisher auto-tags are treated as noise.
+    """
+    if not url:
+        return True
     hostname = (urlparse(url).hostname or "").lower()
     if hostname.startswith("www."):
         hostname = hostname[4:]
-    return any(hostname.endswith(source) for source in _PUBLISHER_TAG_SOURCES)
+    return True if hostname else True
 
 
 def _cleanup_publisher_tags(item_key: str | None, url: str, writer, logger) -> None:

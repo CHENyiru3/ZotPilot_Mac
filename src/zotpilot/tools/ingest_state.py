@@ -24,7 +24,7 @@ class IngestItemState:
     index: int
     url: str | None
     title: str | None = None
-    status: Literal["pending", "saved", "duplicate", "failed"] = "pending"
+    status: Literal["pending", "saved", "duplicate", "duplicate_in_batch", "failed"] = "pending"
     item_key: str | None = None
     error: str | None = None
     warning: str | None = None
@@ -62,9 +62,16 @@ def _default_batch_id() -> str:
 
 
 _POST_INGEST_INSTRUCTION = (
-    "Present ingest results to user. Ask once whether to run "
-    "post-ingest workflow (index → notes → classify → tag). "
-    "See references/post-ingest-guide.md"
+    "Present ingest results to user. Ask ONCE whether to run post-ingest workflow. "
+    "If confirmed, execute IN ORDER:\n"
+    "1. index_library for new papers (parallel, up to 5)\n"
+    "2. Generate brief notes per paper\n"
+    "3. Classify into DEEPEST matching sub-collection + INBOX auto-removed\n"
+    "4. Tags: call list_tags() first -> select from existing vocabulary ONLY -> "
+    "use set_item_tags to REPLACE all tags (clears publisher auto-tags). "
+    "NEVER invent new tags without explicit user approval (set allow_new=True).\n"
+    "5. Quality check: verify INBOX empty, all papers in sub-collections, "
+    "no publisher tags remaining."
 )
 
 
@@ -84,7 +91,7 @@ class BatchState:
         self,
         index: int,
         *,
-        status: Literal["pending", "saved", "duplicate", "failed"],
+        status: Literal["pending", "saved", "duplicate", "duplicate_in_batch", "failed"],
         item_key: str | None | _UnsetType = _UNSET,
         title: str | None | _UnsetType = _UNSET,
         error: str | None | _UnsetType = _UNSET,
@@ -119,7 +126,7 @@ class BatchState:
     def finalize(self) -> None:
         """Set is_final=True, determine state, set finalized_at."""
         with self._lock:
-            saved = sum(1 for it in self.pending_items if it.status in ("saved", "duplicate"))
+            saved = sum(1 for it in self.pending_items if it.status in ("saved", "duplicate", "duplicate_in_batch"))
             failed = sum(1 for it in self.pending_items if it.status == "failed")
             total_resolved = saved + failed
 
@@ -137,7 +144,7 @@ class BatchState:
 
     def _counts(self) -> tuple[int, int, int]:
         """Return (saved, failed, pending_count) without acquiring lock."""
-        saved = sum(1 for it in self.pending_items if it.status in ("saved", "duplicate"))
+        saved = sum(1 for it in self.pending_items if it.status in ("saved", "duplicate", "duplicate_in_batch"))
         failed = sum(1 for it in self.pending_items if it.status == "failed")
         pending = sum(1 for it in self.pending_items if it.status == "pending")
         return saved, failed, pending

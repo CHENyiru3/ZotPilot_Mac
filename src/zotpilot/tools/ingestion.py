@@ -421,6 +421,8 @@ def _save_via_api(
             ingest_method="api",
             warning=warning,
         )
+        if item_key:
+            ingestion_bridge._cleanup_publisher_tags(item_key, landing_page_url or "", writer, logger)
         return {
             "success": True,
             "item_key": item_key,
@@ -671,6 +673,7 @@ def ingest_papers(
     duplicates = 0
     failed = 0
     skipped_indices: set[int] = set()
+    batch_seen_dois: dict[str, int] = {}
 
     for idx, paper in enumerate(papers):
         arxiv_id = paper.get("arxiv_id")
@@ -681,6 +684,23 @@ def ingest_papers(
         arxiv_doi = ingestion_search.normalize_doi(f"10.48550/arxiv.{arxiv_id}") if arxiv_id else None
         if not normalized_doi:
             normalized_doi = arxiv_doi
+
+        if normalized_doi and normalized_doi in batch_seen_dois:
+            first_idx = batch_seen_dois[normalized_doi]
+            logger.warning("Skipping batch item %d due to duplicate DOI %s already seen at index %d", idx, normalized_doi, first_idx)
+            skipped_indices.add(idx)
+            duplicates += 1
+            results.append(
+                {
+                    "url": landing_page_url or (f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else None),
+                    "status": "duplicate_in_batch",
+                    "title": paper.get("title"),
+                    "error": f"Duplicate of item {first_idx} in this batch",
+                }
+            )
+            continue
+        if normalized_doi:
+            batch_seen_dois[normalized_doi] = idx
 
         existing_item_key = _lookup_local_item_key_by_doi(normalized_doi) or (
             _lookup_local_item_key_by_doi(arxiv_doi) if arxiv_doi and arxiv_doi != normalized_doi else None

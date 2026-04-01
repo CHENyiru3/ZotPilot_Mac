@@ -164,12 +164,14 @@ class TestSetItemTags:
 
 
 class TestAddItemTags:
+    @patch("zotpilot.tools.write_ops._get_zotero")
     @patch("zotpilot.tools.write_ops._get_writer")
-    def test_add_item_tags(self, mock_get_writer):
+    def test_add_item_tags(self, mock_get_writer, mock_get_zotero):
         from zotpilot.tools.write_ops import add_item_tags
 
         mock_writer = MagicMock()
         mock_get_writer.return_value = mock_writer
+        mock_get_zotero.return_value.get_all_tags.return_value = [{"name": "new-tag", "count": 1}]
 
         result = add_item_tags("ITEM1", ["new-tag"])
         assert result == {"success": True, "item_key": "ITEM1", "added": ["new-tag"]}

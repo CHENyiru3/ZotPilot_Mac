@@ -775,6 +775,24 @@ class ZoteroClient:
         finally:
             conn.close()
 
+    def get_item_collections(self, item_key: str) -> list[dict]:
+        """Get collections containing an item."""
+        conn = sqlite3.connect(_sqlite_uri(self.db_path), uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute("""
+                SELECT c.key, c.collectionName AS name
+                FROM items i
+                JOIN collectionItems ci ON i.itemID = ci.itemID
+                JOIN collections c ON ci.collectionID = c.collectionID
+                WHERE i.key = ?
+                  AND i.libraryID = ?
+                ORDER BY c.collectionName
+            """, (item_key, self.library_id)).fetchall()
+            return [{"key": row["key"], "name": row["name"]} for row in rows]
+        finally:
+            conn.close()
+
     def get_item_abstract(self, item_key: str) -> str:
         """Get abstract text for a specific item."""
         conn = sqlite3.connect(_sqlite_uri(self.db_path), uri=True)

@@ -1,11 +1,14 @@
 """Library write operations via Pyzotero Web API."""
 import json
+import logging
 from typing import Annotated, Literal, TypedDict
 
 from pydantic import Field
 
-from ..state import ToolError, _get_writer, mcp
+from ..state import ToolError, _get_writer, _get_zotero, mcp
 from .library import _invalidate_collection_cache
+
+logger = logging.getLogger(__name__)
 
 
 def _coerce_list(value) -> list:
@@ -35,7 +38,9 @@ def set_item_tags(
     item_key: Annotated[str, Field(description="Zotero item key")],
     tags: Annotated[list[str], Field(description="New tag list (replaces all existing)")],
 ) -> dict:
-    """Replace ALL tags on an item (destructive). Use add_item_tags to append safely."""
+    """Replace ALL tags on an item (destructive). Use this after ingest to clear
+    publisher auto-tags and set clean tags from library vocabulary.
+    Call list_tags() first to see available tags."""
     tags = _coerce_list(tags)
     _get_writer().set_item_tags(item_key, tags)
     return {"success": True, "item_key": item_key, "tags": tags}
@@ -45,9 +50,33 @@ def set_item_tags(
 def add_item_tags(
     item_key: Annotated[str, Field(description="Zotero item key")],
     tags: Annotated[list[str], Field(description="Tags to add")],
+    allow_new: Annotated[
+        bool,
+        Field(description="When false, reject tags not already in the library vocabulary"),
+    ] = False,
 ) -> dict:
-    """Add tags to an item without removing existing ones."""
+    """Add tags to an item without removing existing ones.
+
+    By default (allow_new=False), rejects tags not in the library's existing
+    vocabulary. Call list_tags() first to see available tags. Set allow_new=True
+    only with explicit user approval to create new tags.
+    """
     tags = _coerce_list(tags)
+    if not allow_new:
+        existing_tags = {t["name"] for t in _get_zotero().get_all_tags()}
+        new_tags = [tag for tag in tags if tag not in existing_tags]
+        if new_tags:
+            return {
+                "success": False,
+                "error": "new_tags_rejected",
+                "rejected_tags": new_tags,
+                "message": (
+                    f"Tags {new_tags} not in library vocabulary. "
+                    "Call list_tags() to see existing tags, or set allow_new=True "
+                    "with explicit user approval to create new tags."
+                ),
+                "existing_tag_count": len(existing_tags),
+            }
     _get_writer().add_item_tags(item_key, tags)
     return {"success": True, "item_key": item_key, "added": tags}
 
@@ -67,11 +96,43 @@ def remove_item_tags(
 def add_to_collection(
     item_key: Annotated[str, Field(description="Zotero item key")],
     collection_key: Annotated[str, Field(description="Target collection key from list_collections")],
+    auto_cleanup_inbox: Annotated[
+        bool,
+        Field(description="When true, remove the paper from INBOX after adding to target collection"),
+    ] = True,
 ) -> dict:
-    """Add a paper to a collection. Non-destructive: stays in existing collections."""
-    _get_writer().add_to_collection(item_key, collection_key)
+    """Add a paper to a collection. When auto_cleanup_inbox is True (default),
+    automatically removes the paper from INBOX if it was there."""
+    writer = _get_writer()
+    writer.add_to_collection(item_key, collection_key)
     _invalidate_collection_cache()
-    return {"success": True, "item_key": item_key, "collection_key": collection_key}
+    inbox_removed = False
+    if auto_cleanup_inbox:
+        try:
+            item_collections = _get_zotero().get_item_collections(item_key)
+            inbox_keys = [
+                collection["key"]
+                for collection in item_collections
+                if collection.get("name", "").upper() == "INBOX" and collection["key"] != collection_key
+            ]
+            for inbox_key in inbox_keys:
+                writer.remove_from_collection(item_key, inbox_key)
+                inbox_removed = True
+            _invalidate_collection_cache()
+        except Exception as exc:
+            logger.warning("INBOX auto-cleanup failed for %s: %s", item_key, exc)
+
+    return {
+        "success": True,
+        "item_key": item_key,
+        "collection_key": collection_key,
+        "inbox_removed": inbox_removed,
+        "_instruction": (
+            "Paper moved to collection and removed from INBOX. Classify to deepest matching sub-collection."
+            if inbox_removed
+            else "Classify to the deepest matching sub-collection, not the root collection."
+        ),
+    }
 
 
 @mcp.tool()
@@ -140,9 +201,49 @@ def _batch_tag_result(items: list, operation):
 def batch_tags(
     action: Annotated[Literal["add", "set", "remove"], Field(description="add=append, set=replace all (destructive), remove=delete specific tags")],  # noqa: E501
     items: Annotated[list[dict], Field(description="List of {item_key, tags} objects. Max 100.")],
+    allow_new: Annotated[
+        bool,
+        Field(description="When action='add', reject tags not already in the library vocabulary unless true"),
+    ] = False,
 ) -> dict:
     """Batch tag operation on multiple items. Partial failures reported per-item."""
     items = _coerce_list(items)
+    if len(items) > _BATCH_MAX:
+        raise ToolError(f"Batch size {len(items)} exceeds limit of {_BATCH_MAX}")
+    if action == "add" and not allow_new:
+        existing_tags = {t["name"] for t in _get_zotero().get_all_tags()}
+        validated_items = []
+        rejected = []
+        for item in items:
+            item_key, tags = _extract_tag_item(item)
+            if tags is None:
+                rejected.append(
+                    {
+                        "item_key": item_key or "unknown",
+                        "success": False,
+                        "error": "Missing item_key or tags",
+                    }
+                )
+                continue
+            tags = _coerce_list(tags)
+            new_tags = [tag for tag in tags if tag not in existing_tags]
+            if new_tags:
+                rejected.append(
+                    {
+                        "item_key": item_key or "unknown",
+                        "success": False,
+                        "error": "new_tags_rejected",
+                        "rejected_tags": new_tags,
+                    }
+                )
+                continue
+            validated_items.append({"item_key": item_key, "tags": tags})
+        batch_result = _batch_tag_result(validated_items, lambda w, k, t: w.add_item_tags(k, t))
+        batch_result["results"].extend(rejected)
+        batch_result["total"] = len(items)
+        batch_result["succeeded"] = sum(1 for r in batch_result["results"] if r["success"])
+        batch_result["failed"] = len(items) - batch_result["succeeded"]
+        return batch_result
     ops = {
         "add": lambda w, k, t: w.add_item_tags(k, t),
         "set": lambda w, k, t: w.set_item_tags(k, t),
