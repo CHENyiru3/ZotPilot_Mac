@@ -216,6 +216,35 @@ def get_extension_status(bridge_url: str) -> dict:
         return {"extension_connected": False, "error": str(exc)}
 
 
+def wait_for_extension(
+    bridge_url: str,
+    timeout_s: float = 12.0,
+    poll_interval_s: float = 1.0,
+    sleep_fn=time.sleep,
+    monotonic_fn=time.monotonic,
+) -> dict:
+    """Poll ``/status`` until the extension reports connected, or ``timeout_s``.
+
+    When the bridge server is freshly started (auto_start), its heartbeat
+    table is empty and ``extension_connected`` will initially be False.
+    The browser extension normally sends a heartbeat every 10s, so waiting
+    up to ~12s lets a real running extension reconnect before we declare
+    it offline.
+
+    Returns the last ``/status`` payload seen.  Caller inspects
+    ``extension_connected``.
+    """
+    deadline = monotonic_fn() + timeout_s
+    last_status: dict = {}
+    while True:
+        last_status = get_extension_status(bridge_url)
+        if last_status.get("extension_connected"):
+            return last_status
+        if monotonic_fn() >= deadline:
+            return last_status
+        sleep_fn(poll_interval_s)
+
+
 def sample_preflight_urls(urls: list[str], sample_size: int) -> tuple[list[str], list[str]]:
     """Pick up to sample_size URLs, favoring publisher diversity first."""
     if len(urls) <= sample_size:

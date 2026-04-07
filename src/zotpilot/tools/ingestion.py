@@ -873,7 +873,14 @@ def ingest_papers(
             }
         )
 
-    # --- Bridge availability check: no Chrome → re-route DOI candidates to API ---
+    # --- Bridge + extension availability check ---
+    # Connector candidates require the ZotPilot Connector extension to be
+    # running in Chrome.  If the bridge is down we try to auto-start it; if
+    # the extension is disconnected we wait briefly for its heartbeat (up to
+    # ~12s, since the extension sends one every 10s) before concluding that
+    # the user needs to fix it.  We do NOT silently fall back to the
+    # metadata-only API path — the user explicitly asked for PDF ingest via
+    # the connector and deserves a prominent warning if that isn't possible.
     if connector_candidates:
         bridge_running = BridgeServer.is_running(DEFAULT_PORT)
         if not bridge_running:
@@ -882,46 +889,65 @@ def ingest_papers(
                 bridge_running = True
             except Exception:
                 bridge_running = False
-        if bridge_running:
-            ext_status = ingestion_bridge.get_extension_status(f"http://127.0.0.1:{DEFAULT_PORT}")
-            bridge_running = ext_status.get("extension_connected", False)
 
-        if not bridge_running:
-            _no_bridge_warning = (
-                "Chrome/Connector not available — falling back to API (metadata only, no PDF). "
-                "For full PDF download, open Chrome with ZotPilot Connector extension enabled."
+        extension_connected = False
+        last_seen_s: float | None = None
+        if bridge_running:
+            ext_status = ingestion_bridge.wait_for_extension(
+                f"http://127.0.0.1:{DEFAULT_PORT}"
             )
-            doi_count = sum(1 for c in connector_candidates if c["paper"].get("doi"))
-            no_doi_count = len(connector_candidates) - doi_count
+            extension_connected = bool(ext_status.get("extension_connected"))
+            last_seen_s = ext_status.get("extension_last_seen_s")
+
+        if not extension_connected:
+            if not bridge_running:
+                detail = (
+                    "ZotPilot bridge could not be started. "
+                    "Run 'zotpilot bridge' manually or check the logs."
+                )
+            elif last_seen_s is not None:
+                detail = (
+                    f"ZotPilot Connector last sent a heartbeat {last_seen_s:.0f}s ago "
+                    "(stale). Make sure Chrome is open and the ZotPilot Connector "
+                    "extension is enabled, then retry ingest_papers."
+                )
+            else:
+                detail = (
+                    "ZotPilot Connector has not connected to the bridge. "
+                    "Make sure Chrome is open and the ZotPilot Connector extension "
+                    "is installed and enabled, then retry ingest_papers."
+                )
+            # Fail hard — do not silently fall back.  Return an early terminal
+            # batch so the LLM surfaces the error to the user instead of
+            # polling and reporting API-metadata-only success.
             for candidate in connector_candidates:
-                paper = candidate["paper"]
-                if paper.get("doi"):
-                    api_candidates.append(
-                        {
-                            "paper": paper,
-                            "url": None,
-                            "_index": candidate["_index"],
-                            "ingest_method": "api",
-                        }
-                    )
-                else:
-                    failed += 1
-                    results.append(
-                        {
-                            "url": candidate["url"],
-                            "status": "failed",
-                            "error": "Chrome/Connector not available, no DOI for API fallback",
-                        }
-                    )
-            connector_candidates = []  # all re-routed or failed
-            results.append(
-                {
-                    "status": "warning",
-                    "warning": _no_bridge_warning,
-                    "api_fallback_count": doi_count,
-                    "no_fallback_count": no_doi_count,
-                }
-            )
+                failed += 1
+                results.append(
+                    {
+                        "url": candidate["url"],
+                        "paper_title": candidate["paper"].get("title"),
+                        "status": "failed",
+                        "error_code": "connector_offline",
+                        "error": detail,
+                    }
+                )
+            return {
+                "batch_id": None,
+                "is_final": True,
+                "total": len(papers),
+                "saved": saved,
+                "duplicates": duplicates,
+                "failed": failed,
+                "results": results,
+                "error_code": "connector_offline",
+                "error": detail,
+                "remediation": (
+                    "1) Open Chrome. 2) Confirm the ZotPilot Connector extension "
+                    "icon is active (click it if needed). 3) Wait ~10s for the "
+                    "heartbeat to re-establish. 4) Retry ingest_papers with the "
+                    "same inputs."
+                ),
+            }
 
     # --- Preflight (still synchronous — fast enough) ---
     urls_to_save = [candidate["url"] for candidate in connector_candidates]
@@ -1088,7 +1114,9 @@ def save_urls(
             }
 
     # Fast-fail if extension is not connected (Chrome closed or extension disabled).
-    ext_status = ingestion_bridge.get_extension_status(bridge_url)
+    # Wait briefly for the heartbeat so a freshly-started bridge has a chance
+    # to receive the first heartbeat from the already-running extension.
+    ext_status = ingestion_bridge.wait_for_extension(bridge_url)
     if not ext_status.get("extension_connected"):
         last_seen = ext_status.get("extension_last_seen_s")
         if last_seen is not None:

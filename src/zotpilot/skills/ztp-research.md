@@ -22,6 +22,10 @@ Workflow:
 6. Present ranked candidates and stop at checkpoint 1.
 7. After explicit approval, call `research_session(action="approve", checkpoint="candidate-review")`.
 8. Call `ingest_papers`, then poll `get_ingest_status` until terminal.
+   - If the response contains `error_code: "connector_offline"`, **STOP
+     immediately and surface the `error` and `remediation` fields verbatim
+     to the user**. Do not silently fall back to any alternate path. Ask
+     the user to fix Chrome/Connector and confirm before retrying.
 9. Present ingest results and downstream plan, then stop at checkpoint 2.
 10. After explicit approval, call `research_session(action="approve", checkpoint="post-ingest-review")`.
 11. Run `index_library` as needed until `has_more=false`.
