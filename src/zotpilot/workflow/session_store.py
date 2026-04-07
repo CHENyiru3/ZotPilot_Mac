@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from ..config import _default_data_dir
@@ -11,6 +12,16 @@ from .research_session import ItemFingerprint, ResearchSession, SessionItem
 
 
 def _default_sessions_dir() -> Path:
+    """Return the directory that stores research session JSON files.
+
+    Honors the ``ZOTPILOT_SESSIONS_DIR`` environment variable when set so
+    that tests and isolated runs can redirect persistence away from the
+    user's real data directory.  Falls back to
+    ``<ZotPilot data dir>/sessions`` otherwise.
+    """
+    override = os.environ.get("ZOTPILOT_SESSIONS_DIR")
+    if override:
+        return Path(override).expanduser()
     return _default_data_dir() / "sessions"
 
 

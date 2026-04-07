@@ -1,4 +1,15 @@
 """Shared test fixtures for ZotPilot tests."""
+# Isolate research-session persistence BEFORE any zotpilot module imports.
+# Without this, tests share ``~/.local/share/zotpilot/sessions`` with the
+# user's real MCP server state: any in-flight research session triggers
+# Gate 2 and causes write-operation tests (create_note, manage_tags,
+# manage_collections) to fail.  Point the session store at an ephemeral
+# temp dir so the test run stays hermetic regardless of host state.
+import os
+import tempfile
+
+os.environ["ZOTPILOT_SESSIONS_DIR"] = tempfile.mkdtemp(prefix="zotpilot-test-sessions-")
+
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock
