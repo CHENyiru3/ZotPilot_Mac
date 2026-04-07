@@ -159,7 +159,22 @@ class Indexer:
             Dict with 'results' (list[IndexResult]) and summary counts.
         """
         items = self.zotero.get_all_items_with_pdfs()
-        items = [i for i in items if i.pdf_path and i.pdf_path.exists()]
+        skipped_no_pdf: list[dict] = []
+        kept_items: list = []
+        for i in items:
+            if i.pdf_path and i.pdf_path.exists():
+                kept_items.append(i)
+            else:
+                skipped_no_pdf.append({
+                    "item_key": i.item_key,
+                    "title": getattr(i, "title", None) or "",
+                    "reason": "no_pdf_attachment",
+                })
+        items = kept_items
+        if skipped_no_pdf:
+            logger.info(
+                "Indexer: skipped %d item(s) without PDF attachments", len(skipped_no_pdf)
+            )
         # Deduplicate by item_key (defensive: SQL should already deduplicate)
         seen_keys: set[str] = set()
         unique_items: list[ZoteroItem] = []
@@ -177,7 +192,7 @@ class Indexer:
             items = [i for i in items if i.item_key == item_key]
             if not items:
                 logger.error(f"No item found with key: {item_key}")
-                return {"results": [], "indexed": 0, "failed": 0, "empty": 0, "skipped": 0, "already_indexed": 0}
+                return {"results": [], "indexed": 0, "failed": 0, "empty": 0, "skipped": 0, "already_indexed": 0, "skipped_no_pdf": []}
 
         if title_pattern:
             import re
@@ -473,6 +488,7 @@ class Indexer:
             "extraction_stats": aggregated_extraction_stats,
         }
 
+        counts["skipped_no_pdf"] = skipped_no_pdf
         counts["skipped_long"] = len(long_items)
         counts["long_documents"] = [
             {"item_key": item.item_key, "title": item.title, "pages": pages}

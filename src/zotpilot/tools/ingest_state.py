@@ -30,6 +30,7 @@ class IngestItemState:
     warning: str | None = None
     routing_status: str | None = None
     ingest_method: str | None = None  # "connector" | "api" | None
+    has_pdf: bool | None = None
 
     def to_dict(self) -> dict:
         """Return dict representation, omitting None-valued optional fields.
@@ -54,6 +55,8 @@ class IngestItemState:
             d["routing_status"] = self.routing_status
         if self.ingest_method is not None:
             d["ingest_method"] = self.ingest_method
+        if self.has_pdf is not None:
+            d["has_pdf"] = self.has_pdf
         return d
 
 
@@ -99,6 +102,7 @@ class BatchState:
         warning: str | None | _UnsetType = _UNSET,
         routing_status: str | None | _UnsetType = _UNSET,
         ingest_method: str | None | _UnsetType = _UNSET,
+        has_pdf: bool | None | _UnsetType = _UNSET,
     ) -> None:
         """Thread-safe update of an item by index.
 
@@ -123,6 +127,8 @@ class BatchState:
                 item.routing_status = routing_status
             if ingest_method is not _UNSET:
                 item.ingest_method = ingest_method
+            if has_pdf is not _UNSET:
+                item.has_pdf = has_pdf
 
     def finalize(self) -> None:
         """Set is_final=True, determine state, set finalized_at."""
@@ -170,6 +176,17 @@ class BatchState:
         """Like summary() but adds results list and _instruction."""
         with self._lock:
             saved, failed, pending_count = self._counts()
+            saved_with_pdf = sum(
+                1 for it in self.pending_items if it.status == "saved" and it.has_pdf is True
+            )
+            saved_metadata_only = sum(
+                1 for it in self.pending_items if it.status == "saved" and it.has_pdf is False
+            )
+            pdf_missing_items = [
+                {"item_key": it.item_key, "title": it.title, "url": it.url}
+                for it in self.pending_items
+                if it.status == "saved" and it.has_pdf is False
+            ]
             status: dict = {
                 "batch_id": self.batch_id,
                 "session_id": self.session_id,
@@ -177,13 +194,25 @@ class BatchState:
                 "is_final": self.is_final,
                 "total": self.total,
                 "saved": saved,
+                "saved_with_pdf": saved_with_pdf,
+                "saved_metadata_only": saved_metadata_only,
                 "failed": failed,
                 "pending_count": pending_count,
                 "collection_used": self.collection_used,
                 "results": [it.to_dict() for it in self.pending_items],
             }
+            if pdf_missing_items:
+                status["pdf_missing_items"] = pdf_missing_items
             if self.is_final and saved > 0:
-                status["_instruction"] = _POST_INGEST_INSTRUCTION
+                instruction = _POST_INGEST_INSTRUCTION
+                if saved_metadata_only > 0:
+                    instruction += (
+                        f"\n\u26a0\ufe0f {saved_metadata_only} paper(s) saved as metadata-only (no PDF). "
+                        "Ask user: (1) log in to institutional VPN and re-ingest, "
+                        "(2) keep as metadata references, "
+                        "(3) delete metadata-only items. Indexing will skip these."
+                    )
+                status["_instruction"] = instruction
             elif not self.is_final and pending_count > 0:
                 status["_instruction"] = f"Use get_ingest_status(batch_id='{self.batch_id}') to track progress"
             return status

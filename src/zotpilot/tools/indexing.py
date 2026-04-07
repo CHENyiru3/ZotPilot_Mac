@@ -201,6 +201,11 @@ def index_library(
             "quality_grade": r.quality_grade,
         })
 
+    skipped_no_pdf_all: list[dict] = result.get("skipped_no_pdf", [])
+    skipped_no_pdf_count = len(skipped_no_pdf_all)
+    skipped_no_pdf_items = skipped_no_pdf_all[:50]
+    has_more_skipped = skipped_no_pdf_count > 50
+
     response = {
         "results": serialized_results,
         "indexed": result["indexed"],
@@ -210,7 +215,18 @@ def index_library(
         "already_indexed": result["already_indexed"],
         "has_more": result.get("has_more", False),
         "vision_enabled": config.vision_enabled,
+        "skipped_no_pdf_count": skipped_no_pdf_count,
+        "skipped_no_pdf_items": skipped_no_pdf_items,
     }
+    if has_more_skipped:
+        response["skipped_no_pdf_has_more"] = True
+
+    if skipped_no_pdf_count > 0:
+        response["_notice_no_pdf"] = (
+            f"\u26a0\ufe0f {skipped_no_pdf_count} paper(s) skipped during indexing (no PDF attachment). "
+            "These are metadata-only entries. Log in via institutional VPN and re-ingest to add PDFs, "
+            "or treat as reference-only."
+        )
 
     if include_summary:
         response.update({

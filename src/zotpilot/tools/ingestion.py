@@ -685,6 +685,43 @@ def _run_save_worker(
                     )
                     logger.error("Reconciliation routing failed for %s: %s", item.item_key, exc)
 
+        # Post-reconciliation: verify PDF attachments for all saved items.
+        # Items without a PDF attachment are marked saved_metadata_only so
+        # the caller can tell the user — indexing will silently skip them otherwise.
+        saved_items_with_keys = [
+            item for item in batch.pending_items
+            if item.status == "saved" and item.item_key
+        ]
+        if saved_items_with_keys:
+            if writer is None:
+                try:
+                    writer = _get_writer()
+                except Exception as exc:
+                    logger.warning("PDF verification: writer unavailable: %s", exc)
+                    writer = None
+            if writer is not None and hasattr(writer, "check_has_pdf"):
+                with _writer_lock:
+                    for item in saved_items_with_keys:
+                        try:
+                            has_pdf = writer.check_has_pdf(item.item_key)
+                            existing_warning = item.warning or ""
+                            new_warning = (
+                                "metadata_only: no PDF attachment — "
+                                "institutional access may be required"
+                                if not has_pdf
+                                else existing_warning or None
+                            )
+                            batch.update_item(
+                                item.index,
+                                status=item.status,
+                                has_pdf=has_pdf,
+                                warning=new_warning if new_warning else existing_warning,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "check_has_pdf failed for %s: %s", item.item_key, exc
+                            )
+
     except Exception as exc:
         logger.error("Ingest worker failed: %s", exc, exc_info=True)
         for item in batch.pending_items:
@@ -1067,11 +1104,15 @@ def ingest_papers(
     elif not batch.is_final:
         _instruction = f"Use get_ingest_status(batch_id='{batch.batch_id}') to track progress"
 
+    saved_with_pdf = sum(1 for it in pending_items if it.has_pdf is True)
+    saved_metadata_only = sum(1 for it in pending_items if it.has_pdf is False)
     return {
         "batch_id": batch.batch_id,
         "is_final": batch.is_final,
         "total": len(papers),
         "saved": saved,
+        "saved_with_pdf": saved_with_pdf,
+        "saved_metadata_only": saved_metadata_only,
         "duplicates": duplicates,
         "failed": failed,
         "pending_count": len(connector_candidates) + len(api_candidates),

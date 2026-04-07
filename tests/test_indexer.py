@@ -79,6 +79,115 @@ class TestIndexerReDoSIntegration:
                 indexer.index_all(title_pattern="[invalid")
 
 
+class TestSkipTracking:
+    """Test that items without PDFs are tracked rather than silently dropped."""
+
+    def _make_indexer(self, items):
+        try:
+            from zotpilot.indexer import Indexer
+        except (ImportError, ModuleNotFoundError):
+            pytest.skip("Indexer dependencies not fully available")
+
+        from pathlib import Path
+        from unittest.mock import MagicMock, patch
+
+        config = MagicMock()
+        config.zotero_data_dir = Path("/fake")
+        config.chroma_db_path = Path("/fake/chroma")
+        config.chunk_size = 1000
+        config.chunk_overlap = 200
+        config.embedding_provider = "local"
+        config.embedding_dimensions = 384
+        config.embedding_model = "test"
+        config.ocr_language = "eng"
+        config.vision_enabled = False
+        config.anthropic_api_key = None
+        config.max_pages = 0
+        config.vision_max_tables_per_run = None
+        config.vision_max_cost_usd = None
+        config.oversample_multiplier = 2
+
+        with patch("zotpilot.indexer.ZoteroClient"), \
+             patch("zotpilot.indexer.create_embedder"), \
+             patch("zotpilot.indexer.VectorStore"), \
+             patch("zotpilot.indexer.JournalRanker"):
+            indexer = Indexer(config)
+        indexer.zotero.get_all_items_with_pdfs.return_value = items
+        indexer.store.get_indexed_doc_ids.return_value = set()
+        indexer.store.get_indexed_doc_ids = MagicMock(return_value=set())
+        return indexer
+
+    def _make_item(self, key, title, has_pdf):
+        from unittest.mock import MagicMock
+        item = MagicMock()
+        item.item_key = key
+        item.title = title
+        if has_pdf:
+            pdf = MagicMock()
+            pdf.exists.return_value = True
+            pdf.__str__ = lambda self: f"/fake/{key}.pdf"
+            item.pdf_path = pdf
+        else:
+            item.pdf_path = None
+        return item
+
+    def _patch_indexer(self, indexer):
+        """Patch filesystem-touching methods so tests run without real files."""
+        from unittest.mock import MagicMock
+        indexer._load_empty_docs = MagicMock(return_value={})
+        indexer._save_empty_docs = MagicMock()
+        indexer._config_hash_path = MagicMock()
+        indexer._config_hash_path.exists.return_value = False
+        indexer._config_hash_path.write_text = MagicMock()
+
+    def test_items_without_pdf_are_tracked(self):
+        """skipped_no_pdf list must contain items that have no pdf_path."""
+        from unittest.mock import MagicMock, patch
+
+        item_with_pdf = self._make_item("KEY_PDF", "Has PDF", has_pdf=True)
+        item_no_pdf = self._make_item("KEY_NOPDF", "No PDF", has_pdf=False)
+
+        indexer = self._make_indexer([item_with_pdf, item_no_pdf])
+        self._patch_indexer(indexer)
+
+        mock_extraction = MagicMock()
+        mock_extraction.pages = [MagicMock()]
+        mock_extraction.stats = {"total_pages": 1, "text_pages": 1, "ocr_pages": 0, "empty_pages": 0}
+        mock_extraction.quality_grade = "A"
+        mock_extraction.pending_vision = None
+
+        with patch("zotpilot.indexer.extract_document", return_value=mock_extraction), \
+             patch.object(indexer, "_index_extraction", return_value=(5, 0, "", {}, "A")):
+            result = indexer.index_all(batch_size=None)
+
+        skipped = result.get("skipped_no_pdf", [])
+        assert len(skipped) == 1
+        assert skipped[0]["item_key"] == "KEY_NOPDF"
+        assert skipped[0]["reason"] == "no_pdf_attachment"
+
+    def test_all_have_pdf_no_skipped(self):
+        """When all items have PDFs, skipped_no_pdf must be empty."""
+        from unittest.mock import MagicMock, patch
+
+        item1 = self._make_item("K1", "Paper A", has_pdf=True)
+        item2 = self._make_item("K2", "Paper B", has_pdf=True)
+
+        indexer = self._make_indexer([item1, item2])
+        self._patch_indexer(indexer)
+
+        mock_extraction = MagicMock()
+        mock_extraction.pages = [MagicMock()]
+        mock_extraction.stats = {"total_pages": 1, "text_pages": 1, "ocr_pages": 0, "empty_pages": 0}
+        mock_extraction.quality_grade = "B"
+        mock_extraction.pending_vision = None
+
+        with patch("zotpilot.indexer.extract_document", return_value=mock_extraction), \
+             patch.object(indexer, "_index_extraction", return_value=(3, 0, "", {}, "B")):
+            result = indexer.index_all(batch_size=None)
+
+        assert result.get("skipped_no_pdf", []) == []
+
+
 class TestVisionBudgetGuards:
     def test_skips_batch_vision_when_table_cap_is_exceeded(self):
         from zotpilot.indexer import Indexer
