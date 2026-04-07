@@ -962,30 +962,58 @@ def ingest_papers(
             monotonic_fn=time.monotonic,
         )
         if not preflight_report.get("all_clear", False):
+            # Collect blocked/errored domains so we only drop connector
+            # candidates from affected domains.  A single Elsevier URL blocked
+            # by Cloudflare must not cancel arXiv candidates in the same batch.
+            blocked_domains: set[str] = set()
             for blocked in preflight_report.get("blocked", []):
                 failed += 1
+                blocked_url = blocked.get("url") or ""
+                blocked_domains.add(ingestion_bridge.extract_publisher_domain(blocked_url))
+                error_code = blocked.get("error_code") or "anti_bot_detected"
                 results.append(
                     {
-                        "url": blocked.get("url"),
+                        "url": blocked_url,
                         "status": "failed",
+                        "error_code": error_code,
                         "error": blocked.get("error") or "preflight blocked",
                     }
                 )
             for error in preflight_report.get("errors", []):
                 failed += 1
+                error_url = error.get("url") or ""
+                blocked_domains.add(ingestion_bridge.extract_publisher_domain(error_url))
+                error_code = error.get("error_code") or "preflight_failed"
                 results.append(
                     {
-                        "url": error.get("url"),
+                        "url": error_url,
                         "status": "failed",
+                        "error_code": error_code,
                         "error": error.get("error") or "preflight failed",
                     }
                 )
-            # All connector candidates blocked — user must handle anti-bot/timeout then retry
-            connector_candidates = []
 
-            # If no API candidates remain either, return immediately so the agent
-            # surfaces the blocked/error list to the user instead of polling.
-            if not api_candidates:
+            # Drop only connector candidates whose domain was blocked/errored;
+            # candidates from other domains proceed normally.
+            remaining_candidates = [
+                c for c in connector_candidates
+                if ingestion_bridge.extract_publisher_domain(c["url"]) not in blocked_domains
+            ]
+            dropped_count = len(connector_candidates) - len(remaining_candidates)
+            if dropped_count:
+                logger.info(
+                    "Preflight: dropped %d connector candidate(s) from %d blocked domain(s); "
+                    "%d candidate(s) from other domains will continue.",
+                    dropped_count,
+                    len(blocked_domains),
+                    len(remaining_candidates),
+                )
+            connector_candidates = remaining_candidates
+
+            # If no connector or API candidates remain, return immediately so
+            # the agent surfaces the blocked/error list to the user instead of
+            # polling indefinitely.
+            if not connector_candidates and not api_candidates:
                 return {
                     "batch_id": None,
                     "is_final": True,

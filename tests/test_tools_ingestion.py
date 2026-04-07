@@ -153,7 +153,7 @@ class TestIngestPapers:
             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()),
             patch("zotpilot.tools.ingestion._get_writer"),
             patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True),
-            patch("zotpilot.tools.ingestion.ingestion_bridge.get_extension_status", return_value={"extension_connected": True}),
+            patch("zotpilot.tools.ingestion.ingestion_bridge.wait_for_extension", return_value={"extension_connected": True}),
             patch(
                 "zotpilot.tools.ingestion.save_urls",
                 return_value={
@@ -183,7 +183,7 @@ class TestIngestPapers:
             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config()),
             patch("zotpilot.tools.ingestion._get_writer"),
             patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True),
-            patch("zotpilot.tools.ingestion.ingestion_bridge.get_extension_status", return_value={"extension_connected": True}),
+            patch("zotpilot.tools.ingestion.ingestion_bridge.wait_for_extension", return_value={"extension_connected": True}),
             patch(
                 "zotpilot.tools.ingestion.save_urls",
                 return_value={
@@ -222,7 +222,7 @@ class TestIngestPapers:
                 return_value={"10.1000/test": "https://publisher.example/article"},
             ),
             patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True),
-            patch("zotpilot.tools.ingestion.ingestion_bridge.get_extension_status", return_value={"extension_connected": True}),
+            patch("zotpilot.tools.ingestion.ingestion_bridge.wait_for_extension", return_value={"extension_connected": True}),
             patch("zotpilot.tools.ingestion._run_save_worker"),
         ):
             result = ingest_papers([{"doi": "10.1000/test"}])
@@ -255,7 +255,7 @@ class TestIngestPapers:
             patch("zotpilot.tools.ingestion._lookup_local_item_key_by_doi", return_value=None),
             patch("zotpilot.tools.ingestion._ensure_inbox_collection", return_value="INBOX1"),
             patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True),
-            patch("zotpilot.tools.ingestion.ingestion_bridge.get_extension_status", return_value={"extension_connected": True}),
+            patch("zotpilot.tools.ingestion.ingestion_bridge.wait_for_extension", return_value={"extension_connected": True}),
             patch(
                 "zotpilot.tools.ingestion.save_urls",
                 return_value={
@@ -283,7 +283,7 @@ class TestIngestPapers:
             patch("zotpilot.tools.ingestion._get_writer"),
             patch("zotpilot.tools.ingestion._ensure_inbox_collection", return_value="INBOX1"),
             patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True),
-            patch("zotpilot.tools.ingestion.ingestion_bridge.get_extension_status", return_value={"extension_connected": True}),
+            patch("zotpilot.tools.ingestion.ingestion_bridge.wait_for_extension", return_value={"extension_connected": True}),
             patch(
                 "zotpilot.tools.ingestion.save_urls",
                 return_value={
@@ -340,7 +340,7 @@ class TestIngestPapers:
         with (
             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=True)),
             patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True),
-            patch("zotpilot.tools.ingestion.ingestion_bridge.get_extension_status", return_value={"extension_connected": True}),
+            patch("zotpilot.tools.ingestion.ingestion_bridge.wait_for_extension", return_value={"extension_connected": True}),
             patch(
                 "zotpilot.tools.ingestion.ingestion_bridge.preflight_urls",
                 return_value={
@@ -400,7 +400,7 @@ class TestIngestPapers:
         with (
             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=True)),
             patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True),
-            patch("zotpilot.tools.ingestion.ingestion_bridge.get_extension_status", return_value={"extension_connected": True}),
+            patch("zotpilot.tools.ingestion.ingestion_bridge.wait_for_extension", return_value={"extension_connected": True}),
             patch(
                 "zotpilot.tools.ingestion.ingestion_bridge.preflight_urls",
                 return_value={
@@ -428,7 +428,7 @@ class TestIngestPapers:
         with (
             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=False)),
             patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True),
-            patch("zotpilot.tools.ingestion.ingestion_bridge.get_extension_status", return_value={"extension_connected": True}),
+            patch("zotpilot.tools.ingestion.ingestion_bridge.wait_for_extension", return_value={"extension_connected": True}),
             patch(
                 "zotpilot.tools.ingestion.save_urls",
                 return_value={
@@ -454,7 +454,7 @@ class TestIngestPapers:
         with (
             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=False)),
             patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True),
-            patch("zotpilot.tools.ingestion.ingestion_bridge.get_extension_status", return_value={"extension_connected": True}),
+            patch("zotpilot.tools.ingestion.ingestion_bridge.wait_for_extension", return_value={"extension_connected": True}),
             patch(
                 "zotpilot.tools.ingestion.save_urls",
                 return_value={
@@ -483,7 +483,7 @@ class TestIngestPapers:
         with (
             patch("zotpilot.tools.ingestion._get_config", return_value=_make_config(preflight_enabled=False)),
             patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True),
-            patch("zotpilot.tools.ingestion.ingestion_bridge.get_extension_status", return_value={"extension_connected": True}),
+            patch("zotpilot.tools.ingestion.ingestion_bridge.wait_for_extension", return_value={"extension_connected": True}),
             patch(
                 "zotpilot.tools.ingestion.save_urls",
                 return_value={

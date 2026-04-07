@@ -104,8 +104,20 @@ def compute_save_result_poll_timeout_s(batch_size: int) -> float:
 
 
 def compute_save_result_poll_overall_timeout_s(batch_size: int) -> float:
+    """Compute the overall poll timeout for a batch of ``batch_size`` URLs.
+
+    Because the connector processes URLs sequentially (one at a time), the
+    overall wall-clock budget must cover the sum of all per-URL deadlines, not
+    just a single deadline plus a fixed grace window.  The formula is:
+
+        overall = max(600, batch_size * per_url_timeout + grace)
+
+    This ensures the last URL in the queue still has a full per-URL window
+    even if earlier URLs consumed their full budget.
+    """
+    n = max(batch_size, 1)
     per_url_timeout = compute_save_result_poll_timeout_s(batch_size)
-    return max(SAVE_RESULT_POLL_OVERALL_TIMEOUT_S, per_url_timeout + SAVE_RESULT_POLL_OVERALL_GRACE_S)
+    return max(SAVE_RESULT_POLL_OVERALL_TIMEOUT_S, n * per_url_timeout + SAVE_RESULT_POLL_OVERALL_GRACE_S)
 
 
 def looks_like_error_page_title(raw_title: str, item_key: str | None) -> bool:
@@ -186,27 +198,6 @@ def _cleanup_publisher_tags(item_key: str | None, url: str, writer, logger) -> N
         logger.warning("Failed to clean publisher tags for %s: %s", item_key, exc)
 
 
-def wait_for_extension(
-    bridge_url: str,
-    timeout: int = 35,
-    *,
-    sleep_fn=time.sleep,
-    monotonic_fn=time.monotonic,
-) -> bool:
-    """Poll GET /status until extension_connected is True or timeout expires."""
-    deadline = monotonic_fn() + timeout
-    while monotonic_fn() < deadline:
-        try:
-            response = urllib.request.urlopen(f"{bridge_url}/status", timeout=3)
-            data = json.loads(response.read())
-            if data.get("extension_connected"):
-                return True
-        except Exception:
-            pass
-        sleep_fn(1)
-    return False
-
-
 def get_extension_status(bridge_url: str) -> dict:
     """Query /status and return the parsed JSON, or an error dict."""
     try:
@@ -243,6 +234,63 @@ def wait_for_extension(
         if monotonic_fn() >= deadline:
             return last_status
         sleep_fn(poll_interval_s)
+
+
+def _classify_preflight_error_code(result: dict) -> str:
+    """Return a structured error code for a failed preflight result.
+
+    Classifies based on the connector-reported status, title, and any error
+    message fields.  This allows callers to distinguish between anti-bot pages
+    (user must complete CAPTCHA), subscription walls (user needs access), and
+    transient failures.
+
+    Priority order:
+      1. ``anti_bot_detected`` — connector explicitly flagged it, OR title/error
+         contains Cloudflare / CAPTCHA markers.
+      2. ``subscription_required`` — title/error contains paywall markers.
+      3. ``preflight_timeout`` — connector reported a timeout.
+      4. ``preflight_failed`` — everything else.
+    """
+    status = result.get("status", "")
+    title = (result.get("title") or "").lower()
+    error_msg = (result.get("error") or result.get("error_message") or "").lower()
+    combined = f"{title} {error_msg}"
+
+    if status == "anti_bot_detected":
+        return "anti_bot_detected"
+
+    _anti_bot_markers = (
+        "cloudflare",
+        "checking your browser",
+        "captcha",
+        "verify you are human",
+        "just a moment",
+        "please verify",
+        "robot check",
+        "security check",
+        "access denied",
+    )
+    if any(marker in combined for marker in _anti_bot_markers):
+        return "anti_bot_detected"
+
+    _subscription_markers = (
+        "subscribe",
+        "purchase access",
+        "full access",
+        "get access",
+        "sign in to access",
+        "login to access",
+        "log in to access",
+        "paywall",
+        "subscription required",
+    )
+    if any(marker in combined for marker in _subscription_markers):
+        return "subscription_required"
+
+    if "timeout" in error_msg:
+        return "preflight_timeout"
+
+    return "preflight_failed"
 
 
 def sample_preflight_urls(urls: list[str], sample_size: int) -> tuple[list[str], list[str]]:
@@ -329,7 +377,7 @@ def preflight_urls(
             monotonic_fn=monotonic_fn,
         ):
             err_msg = (
-                "Connector extension did not connect within 35 seconds. "
+                "Connector extension did not connect within 12 seconds. "
                 "Please ensure Chrome is running and the ZotPilot Connector extension is enabled."
             )
             report["errors"] = [{"url": url, "error": err_msg} for url in sample]
@@ -387,6 +435,7 @@ def preflight_urls(
                     "status": "error",
                     "url": url,
                     "error": "Timeout (60s) — page did not finish loading in time.",
+                    "error_code": "preflight_timeout",
                 }
                 pending_ids.remove(request_id)
                 continue
@@ -406,7 +455,8 @@ def preflight_urls(
         result = polled.get(request_id, {
             "status": "error",
             "url": url,
-            "error": "Timeout (120s) — preflight did not complete.",
+            "error": "Timeout (overall) — preflight did not complete.",
+            "error_code": "preflight_timeout",
         })
         status = result.get("status")
         if status == "accessible":
@@ -416,12 +466,17 @@ def preflight_urls(
                 "final_url": result.get("final_url", url),
             })
         elif status == "anti_bot_detected":
+            # Connector confirmed anti-bot; classify for downstream routing.
+            error_code = result.get("error_code") or _classify_preflight_error_code(result)
             report["blocked"].append({
                 "url": url,
                 "title": result.get("title", ""),
                 "final_url": result.get("final_url", url),
+                "error_code": error_code,
             })
         else:
+            # Connector returned an error or timed out locally.
+            error_code = result.get("error_code") or _classify_preflight_error_code(result)
             error_entry = {
                 "url": url,
                 "error": (
@@ -429,6 +484,7 @@ def preflight_urls(
                     or result.get("error_message")
                     or "unknown preflight error"
                 ),
+                "error_code": error_code,
             }
             if result.get("title"):
                 error_entry["title"] = result["title"]
@@ -523,11 +579,24 @@ def poll_batch_save_results(
     sleep_fn=time.sleep,
     monotonic_fn=time.monotonic,
 ) -> list[dict]:
-    """Poll batch save requests with anti-bot short-circuiting."""
+    """Poll batch save requests with anti-bot short-circuiting.
+
+    The connector processes URLs sequentially (``_busy = true`` while one save
+    is in flight).  Assigning every request the same ``t0 + per_url_timeout_s``
+    deadline would expire queue-tail URLs before the connector even starts them.
+
+    Instead we assign FIFO-position-based deadlines:
+        deadline_k = t0 + k * per_url_timeout_s   (k = 1-based position)
+
+    This gives each URL a full per-URL window *starting from when the connector
+    is likely to begin processing it*, matching the sequential save model.
+    """
     polled: dict[str, dict] = {}
     pending_ids = set(id_to_url)
+    # id_to_url preserves insertion order (Python 3.7+ dict).
     per_request_deadlines = {
-        request_id: monotonic_fn() + per_url_timeout_s for request_id in id_to_url
+        request_id: monotonic_fn() + k * per_url_timeout_s
+        for k, request_id in enumerate(id_to_url, start=1)
     }
     overall_deadline = monotonic_fn() + overall_timeout_s
     cancel_remaining = False

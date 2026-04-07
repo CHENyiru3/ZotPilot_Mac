@@ -51,7 +51,7 @@ Zotero.AgentAPI = new function() {
 	// Stability windows for JS-redirect detection in _waitForReady.
 	// After status=complete, wait this long with no new events before polling translators.
 	// Reliability-first values: better to be slow than to fire on the wrong page.
-	const STABILITY_WINDOW_MS          = 2000;  // all pages: covers CF/JS challenges that reload same URL
+	const STABILITY_WINDOW_MS          = 4000;  // all pages: 4s gives SPA hydration (React/ACS) time to complete
 	const STABILITY_WINDOW_REDIRECT_MS = 4000;  // JS-redirect pages: longer window for multi-hop (verify→article)
 
 	let _polling = false;
@@ -485,7 +485,22 @@ Zotero.AgentAPI = new function() {
 			tabId = tab.id;
 
 			// 3. Wait for page load + translator detection
-			await _waitForReady(tab.id, 30000);
+			let readyResult = await _waitForReady(tab.id, 30000);
+
+			// B1: If translator wait timed out with no match, fail fast — do not attempt
+			// a webpage-snapshot save. Python bridge will see error_code "no_translator"
+			// and can immediately fall back to the API metadata path if a DOI is available.
+			if (readyResult && readyResult.translatorFound === false) {
+				Zotero.debug("[ZotPilot] no translator found for tab " + tab.id + " — reporting no_translator");
+				await _postResult({
+					request_id,
+					success: false,
+					error_code: "no_translator",
+					error_message: "No Zotero translator matched this URL within 20s. Falling back to API metadata.",
+					url,
+				});
+				return;
+			}
 
 			// 4. Set up completion detection — keep local ref to entry so we can
 			//    read item_key/item_title after the promise resolves (the Map entry
@@ -508,7 +523,6 @@ Zotero.AgentAPI = new function() {
 			});
 
 			// 5. Trigger save — Task 1.2: catch synchronous throw → save_trigger_failed.
-			//    Do NOT fail early for missing translators — saveAsWebpage fallback handles those.
 			tab = await browser.tabs.get(tab.id);
 			// Capture tab title now (before tab closes) for use in _discoverItemKey
 			let tabTitleAtSave = tab.title || "";
@@ -725,12 +739,15 @@ Zotero.AgentAPI = new function() {
 			let stabilityTimer = null;
 			let redirectDetected = false;
 			let translatorTimer = null;
+			// Track whether a translator was found; defaults to true for non-save contexts
+			// (hard timeout and redirect paths) — only false when translator wait expires.
+			let translatorFound = true;
 
 			const hardTimer = setTimeout(() => {
 				if (!resolved) {
 					Zotero.debug("[ZotPilot] _waitForReady hard timeout for tab " + tabId);
 					_cleanup();
-					resolve();
+					resolve({ translatorFound });
 				}
 			}, timeout);
 
@@ -747,8 +764,12 @@ Zotero.AgentAPI = new function() {
 				browser.tabs.onUpdated.removeListener(onUpdated);
 			}
 
-			function _resolveNow() {
-				if (!resolved) { _cleanup(); resolve(); }
+			function _resolveNow(found) {
+				if (!resolved) {
+					if (found !== undefined) translatorFound = found;
+					_cleanup();
+					resolve({ translatorFound });
+				}
 			}
 
 			function _waitForTranslatorEvent() {
@@ -759,20 +780,20 @@ Zotero.AgentAPI = new function() {
 				let tabInfo = Zotero.Connector_Browser.getTabInfo(tabId);
 				if (tabInfo && tabInfo.translators && tabInfo.translators.length > 0) {
 					Zotero.debug("[ZotPilot] translator already ready for tab " + tabId);
-					_resolveNow();
+					_resolveNow(true);
 					return;
 				}
 
 				// Event-driven: wait for onTranslators hook to fire
 				Zotero.debug("[ZotPilot] waiting for onTranslators event for tab " + tabId);
-				_translatorWaiters.set(tabId, _resolveNow);
+				_translatorWaiters.set(tabId, () => _resolveNow(true));
 
 				// Timeout if translator never arrives (e.g. publisher has no Zotero translator)
 				translatorTimer = setTimeout(() => {
 					if (!resolved) {
-						Zotero.debug("[ZotPilot] translator wait timeout for tab " + tabId + " — proceeding anyway");
+						Zotero.debug("[ZotPilot] translator wait timeout for tab " + tabId + " — no translator found");
 						_translatorWaiters.delete(tabId);
-						_resolveNow();
+						_resolveNow(false);
 					}
 				}, TRANSLATOR_WAIT_MS);
 			}
