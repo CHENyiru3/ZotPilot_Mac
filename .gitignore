@@ -48,3 +48,6 @@ connector/dist/
 connector/build.log
 connector/cert/
 connector/config.sh
+
+# Local debug logs (per-session /ztp-research traces, not for repo)
+ztp-research-*.md

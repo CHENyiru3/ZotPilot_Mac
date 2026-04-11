@@ -89,8 +89,8 @@ def _lookup_local_item_key_by_doi(doi: str | None) -> str | None:
     if not doi:
         return None
     try:
-        zot = _get_zotero()
-        return zot.get_item_key_by_doi(doi)
+        _get_zotero()
+        return _get_zotero().get_item_key_by_doi(doi)
     except Exception:
         return None
 
@@ -101,27 +101,79 @@ def _lookup_local_item_key_by_doi(doi: str | None) -> str | None:
 
 @mcp.tool(tags=tool_tags("core", "ingestion"))
 def search_academic_databases(
-    query: Annotated[str, Field(description="Search query for academic papers")],
-    limit: Annotated[int, Field(ge=1, le=100, description="Max results")] = 20,
+    query: Annotated[
+        str,
+        Field(description=(
+            "Search query. MUST be structured (not fuzzy bag-of-words) UNLESS "
+            "you also pass concepts/venue/institutions. Allowed forms: DOI "
+            "('10.xxx/yyy'), author-anchored ('author:Radford CLIP'), "
+            "quoted phrase ('\"visual instruction tuning\"'), boolean "
+            "('\"LLaVA\" OR \"Flamingo\"'). Pass '' when filtering purely by "
+            "concept/venue."
+        )),
+    ],
+    limit: Annotated[int, Field(ge=1, le=100, description="Max results per page")] = 20,
     year_min: Annotated[int | None, Field(description="Minimum publication year")] = None,
     year_max: Annotated[int | None, Field(description="Maximum publication year")] = None,
-    min_citations: Annotated[int | None, Field(description="Minimum citation count")] = None,  # noqa: ARG001
+    min_citations: Annotated[
+        int | None,
+        Field(description="Minimum citation count (use to cut long tail)"),
+    ] = None,
     sort_by: Annotated[
         Literal["relevance", "citations", "date"],
         Field(description="Sort order"),
     ] = "relevance",
-    oa_only: Annotated[bool, Field(description="Only open access papers")] = False,  # noqa: ARG001
-) -> list[dict]:
-    """Search OpenAlex for papers NOT yet in your local library."""
+    oa_only: Annotated[
+        bool,
+        Field(description="Restrict to open access papers"),
+    ] = False,
+    concepts: Annotated[
+        list[str] | None,
+        Field(description=(
+            "Concept/topic names (human-readable, resolved server-side). "
+            "Examples: ['Computer vision', 'Natural language processing']. "
+            "Use to anchor topic searches and escape bag-of-words rejection."
+        )),
+    ] = None,
+    venue: Annotated[
+        str | None,
+        Field(description=(
+            "Venue/journal/conference name (resolved server-side). "
+            "Examples: 'CVPR', 'NeurIPS', 'IEEE TPAMI', 'ICLR'."
+        )),
+    ] = None,
+    institutions: Annotated[
+        list[str] | None,
+        Field(description=(
+            "Institution names (resolved server-side). "
+            "Examples: ['Stanford University', 'MIT', 'Google DeepMind']."
+        )),
+    ] = None,
+    cursor: Annotated[
+        str | None,
+        Field(description="Pagination cursor from previous call's next_cursor"),
+    ] = None,
+) -> dict:
+    """Search OpenAlex with full filter suite (concepts/venue/institutions).
+
+    Returns: {"results": [...], "next_cursor": str|None, "total_count": int,
+    "unresolved_filters": [...]}. Fuzzy queries are rejected unless a
+    structured filter narrows the space. Use concepts+venue+year_min for
+    precise topic discovery; use DOI or quoted phrase for known papers.
+    """
     config = _get_config()
     sort_map = {"relevance": "relevance", "citations": "citationCount", "date": "publicationDate"}
     return search.search_academic_databases_impl(
         config, query, limit=limit,
         year_min=year_min, year_max=year_max,
         sort_by=sort_map.get(sort_by, "relevance"),
-        high_quality=True,
-        httpx_module=httpx, tool_error_cls=ToolError,
-        logger=logger,
+        httpx_module=httpx, tool_error_cls=ToolError, logger=logger,
+        min_citations=min_citations,
+        oa_only=oa_only,
+        concepts=concepts,
+        institutions=institutions,
+        venue=venue,
+        cursor=cursor,
     )
 
 
@@ -151,7 +203,7 @@ def ingest_by_identifiers(
     """
     bridge_url = f"http://127.0.0.1:{DEFAULT_PORT}"
     get_writer = _get_writer
-    zot = _get_zotero()
+    _get_zotero()
 
     # Resolve collection
     collection_key = None

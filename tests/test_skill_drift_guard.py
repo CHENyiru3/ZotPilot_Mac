@@ -146,50 +146,50 @@ def test_local_first_step_exists() -> None:
 
 
 def test_search_sop_mentions_precise_anchor_strategies() -> None:
-    """Skill must call out DOI / author / phrase search planning explicitly."""
+    """Skill must call out DOI / author / quoted phrase / boolean / concept filters."""
     skill_text = SKILL_PATH.read_text()
-    assert "DOI direct lookup" in skill_text
+    # Canonical query forms
+    assert "DOI direct" in skill_text
     assert "Author-anchored" in skill_text
-    assert "Phrase boolean" in skill_text
-    assert "bag-of-words" in skill_text.lower()
+    assert "Quoted phrase" in skill_text
+    # OpenAlex-native filters (v0.5.0 enhancement)
+    assert "concepts" in skill_text
+    assert "venue" in skill_text
 
 
 # ---------------------------------------------------------------------------
-# Phase B: completion_status hard rule
-# ---------------------------------------------------------------------------
-
-def test_completion_status_hard_rule() -> None:
-    """Skill must reference completion_status and prohibit false completion claims."""
-    skill_text = SKILL_PATH.read_text()
-    assert "completion_status" in skill_text
-    # Must warn against claiming completion when status is not "complete"
-    assert "complete" in skill_text.lower()
-
-
-# ---------------------------------------------------------------------------
-# Phase 4: ingest_by_identifiers usage constraint + polling strategy
+# Phase 4: ingest_by_identifiers usage constraint
 # ---------------------------------------------------------------------------
 
 def test_ingest_by_identifiers_usage_constraint() -> None:
-    """Skill must constrain ingest_by_identifiers to explicit user-provided identifiers."""
+    """Skill must reference ingest_by_identifiers as the sync ingest tool."""
     skill_text = SKILL_PATH.read_text()
     assert "ingest_by_identifiers" in skill_text
-    # Must mention it's only for explicit identifiers
-    assert "explicit" in skill_text.lower() or "user-verified" in skill_text.lower()
+    # Phase 1 step 5 requires USER_REQUIRED gate before ingest
+    assert "[USER_REQUIRED]" in skill_text
+    # action_required must be recognized as a hard halt signal
+    assert "action_required" in skill_text
 
 
-def test_polling_strategy_guidance() -> None:
-    """Skill must include polling strategy guidance."""
+def test_action_required_hard_halt_rule() -> None:
+    """v0.5.0 replaces polling with sync action_required signals."""
     skill_text = SKILL_PATH.read_text()
-    assert "Polling strategy" in skill_text or "polling" in skill_text.lower()
-    assert "get_batch_status" in skill_text
+    assert "action_required" in skill_text
+    assert "STOP" in skill_text
+    # Must warn against working around the block
+    lowered = skill_text.lower()
+    assert "anti_bot" in lowered or "anti-bot" in lowered
 
 
-def test_transparency_report_template_updated() -> None:
-    """Skill should document the structured query transparency template."""
+def test_post_processing_covers_full_pipeline() -> None:
+    """ztp-research must cover tag cleanup, tag assignment, collection, index verification."""
     skill_text = SKILL_PATH.read_text()
-    assert "Issued N structured queries" in skill_text
-    assert "deduped to K unique candidates" in skill_text
+    # Phase 3 post-processing must exist and cover the whole pipeline
+    assert "Post-processing" in skill_text or "Phase 3" in skill_text
+    assert "manage_tags" in skill_text
+    assert "manage_collections" in skill_text
+    assert "index_library" in skill_text
+    assert "get_index_stats" in skill_text
 
 
 # ---------------------------------------------------------------------------

@@ -89,6 +89,28 @@ def format_openalex_paper(paper: dict) -> dict:
         "two_yr_mean_citedness": venue_two_yr_mean_citedness,
     }
 
+    # OA enrichment — merge best_oa_location (covers preprint servers / repos)
+    # so papers with arXiv preprints are not mis-reported as closed-access just
+    # because the published version is paywalled. OpenAlex's own
+    # `best_oa_location` is the authoritative cross-location OA pointer.
+    best_oa = paper.get("best_oa_location") or {}
+    best_oa_url = best_oa.get("pdf_url") or best_oa.get("landing_page_url")
+    best_oa_source = best_oa.get("source") or {}
+    best_oa_host = (
+        best_oa_source.get("display_name")
+        or best_oa_source.get("host_organization_name")
+    )
+    is_oa_published = bool(oa.get("is_oa", False))
+    is_oa = is_oa_published or bool(best_oa_url)
+    oa_url = oa.get("oa_url") or best_oa_url
+
+    # Back-fill arxiv_id from best_oa_location when the primary DOI isn't
+    # an arXiv DOI (e.g. CoCoOp published as CVPR with an arXiv preprint).
+    if not arxiv_id and best_oa_url and "arxiv.org" in best_oa_url.lower():
+        match = re.search(r"arxiv\.org/(?:abs|pdf)/([\w.\-]+?)(?:v\d+)?(?:\.pdf)?(?:[?#]|$)", best_oa_url)
+        if match:
+            arxiv_id = match.group(1)
+
     return {
         "title": paper.get("display_name"),
         "authors": authors,
@@ -104,8 +126,10 @@ def format_openalex_paper(paper: dict) -> dict:
             (venue_h_index is not None and venue_h_index >= 100) or cited_by_count >= 500
         ),
         "abstract_snippet": abstract[:300],
-        "is_oa": oa.get("is_oa", False),
-        "oa_url": oa.get("oa_url"),
+        "is_oa": is_oa,
+        "is_oa_published": is_oa_published,
+        "oa_url": oa_url,
+        "oa_host": best_oa_host if (not is_oa_published and best_oa_url) else None,
         "landing_page_url": primary.get("landing_page_url"),
         "journal": source.get("display_name"),
         "publisher": source.get("host_organization_name"),
@@ -138,9 +162,17 @@ def search_openalex(
     sort_by: str,
     *,
     client: OpenAlexClient,
-    high_quality: bool = True,
-) -> list[dict]:
-    """Single-path keyword search via OpenAlex /works?search=<query>."""
+    min_citations: int | None = None,
+    concept_ids: list[str] | None = None,
+    institution_ids: list[str] | None = None,
+    source_id: str | None = None,
+    oa_only: bool = False,
+    cursor: str | None = None,
+) -> dict:
+    """OpenAlex /works?search= with full filter suite.
+
+    Returns ``{"results": list[dict], "next_cursor": str | None, "total_count": int}``.
+    """
     sort_map = {
         "relevance": "relevance_score:desc",
         "publicationDate": "publication_date:desc",
@@ -148,19 +180,27 @@ def search_openalex(
     }
     sort_value = sort_map.get(sort_by, "relevance_score:desc")
 
-    min_citations = 10 if high_quality else None
     data = client.search_works(
         query,
         per_page=min(limit * 2, 200),
         min_citations=min_citations,
+        concepts=concept_ids,
+        institutions=institution_ids,
+        source=source_id,
+        oa_only=oa_only,
         year_min=year_min,
         year_max=year_max,
         sort=sort_value,
+        cursor=cursor,
     )
     papers = data.get("results", [])
-    results = [format_openalex_paper(p) for p in papers]
-    _mark_top_venue_relative(results)
-    return results[:limit]
+    formatted = [format_openalex_paper(p) for p in papers]
+    _mark_top_venue_relative(formatted)
+    return {
+        "results": formatted[:limit],
+        "next_cursor": data.get("next_cursor"),
+        "total_count": data.get("total_count", 0),
+    }
 
 
 _AUTHOR_PREFIX_RE = re.compile(r"^\s*author\s*:", re.IGNORECASE)
@@ -193,6 +233,83 @@ def _mark_top_venue_relative(results: list[dict], *, percentile: float = 0.75) -
             r["top_venue"] = True
 
 
+_FUZZY_REJECTION_MSG = (
+    "Fuzzy bag-of-words query rejected. OpenAlex keyword search returns noisy "
+    "results for unstructured queries (e.g. \"Chatting and cheating\" coming "
+    "back for a VLM search). Two paths forward — pick based on how familiar "
+    "you are with this topic:\n"
+    "\n"
+    "(A) You already know the canonical English term, seminal papers, venues, "
+    "and OpenAlex concepts for this topic:\n"
+    "  1. DOI direct      →  \"10.48550/arxiv.2103.00020\"\n"
+    "  2. Author-anchored →  \"author:Radford CLIP\"\n"
+    "  3. Quoted phrase   →  '\"visual instruction tuning\"'\n"
+    "  4. Boolean combo   →  '\"LLaVA\" OR \"Flamingo\" OR \"GPT-4V\"'\n"
+    "  Combine with filters: concepts=['Computer vision'], venue='CVPR', "
+    "year_min=2023, min_citations=50.\n"
+    "\n"
+    "(B) Topic is unfamiliar (non-English input like '调研XX', niche/new "
+    "term, ambiguous acronym, uncertain canonical spelling) — run "
+    "reconnaissance FIRST, then retry this tool:\n"
+    "  1. WebFetch one reference page to LEARN search vocabulary (not to "
+    "read papers). Preferred URLs:\n"
+    "     - https://en.wikipedia.org/wiki/<Topic>\n"
+    "     - https://paperswithcode.com/search?q=<term>\n"
+    "     - https://arxiv.org/list/<category>/<yyyy-mm>\n"
+    "  2. Extract from the page: (a) canonical English term, "
+    "(b) 2-3 seminal paper DOIs, (c) common venues, (d) related concept "
+    "names.\n"
+    "  3. Retry search_academic_databases with the learned vocabulary via "
+    "the path (A) forms above.\n"
+    "\n"
+    "Do NOT ask the user to provide the search plan — if they knew the "
+    "canonical terms they would not need your help. Do NOT retry with a "
+    "slightly different bag-of-words query — the rejection is structural.\n"
+    "\n"
+    "Rejected query: {query!r}"
+)
+
+
+def _resolve_names_to_ids(
+    client: OpenAlexClient,
+    *,
+    concepts: list[str] | None,
+    institutions: list[str] | None,
+    venue: str | None,
+    logger,
+) -> tuple[list[str], list[str], str | None, list[str]]:
+    """Resolve human-readable names → OpenAlex IDs, reporting unresolved names."""
+    concept_ids: list[str] = []
+    institution_ids: list[str] = []
+    source_id: str | None = None
+    unresolved: list[str] = []
+
+    if concepts:
+        for name in concepts:
+            cid = client.resolve_concept(name)
+            if cid:
+                concept_ids.append(cid.replace("https://openalex.org/", ""))
+            else:
+                unresolved.append(f"concept:{name}")
+    if institutions:
+        for name in institutions:
+            iid = client.resolve_institution(name)
+            if iid:
+                institution_ids.append(iid.replace("https://openalex.org/", ""))
+            else:
+                unresolved.append(f"institution:{name}")
+    if venue:
+        sid = client.resolve_source(venue)
+        if sid:
+            source_id = sid.replace("https://openalex.org/", "")
+        else:
+            unresolved.append(f"venue:{venue}")
+
+    if unresolved:
+        logger.info("OpenAlex name resolution missed: %s", ", ".join(unresolved))
+    return concept_ids, institution_ids, source_id, unresolved
+
+
 def search_academic_databases_impl(
     config,
     query: str,
@@ -200,49 +317,94 @@ def search_academic_databases_impl(
     year_min: int | None,
     year_max: int | None,
     sort_by: str,
-    high_quality: bool,
     httpx_module,
     tool_error_cls,
     logger,
-) -> list[dict]:
-    """Shared implementation for academic search tool."""
+    *,
+    min_citations: int | None = None,
+    oa_only: bool = False,
+    concepts: list[str] | None = None,
+    institutions: list[str] | None = None,
+    venue: str | None = None,
+    cursor: str | None = None,
+) -> dict:
+    """Shared implementation for the academic search tool.
+
+    Returns ``{"results": list[dict], "next_cursor": str | None,
+    "total_count": int, "unresolved_filters": list[str]}``.
+
+    Fuzzy bag-of-words queries are rejected ONLY when no structured filter
+    (concepts/institutions/venue) is supplied — those filters narrow the search
+    space enough that keyword-only queries become tolerable.
+    """
     client = OpenAlexClient(email=config.openalex_email)
 
-    detected_doi = is_doi_query(query)
-    try:
-        if detected_doi:
-            results = fetch_openalex_by_doi(detected_doi, client=client)
-        else:
-            results = search_openalex(
-                query, limit, year_min, year_max, sort_by,
-                client=client, high_quality=high_quality,
-            )
-    except httpx_module.TimeoutException:
-        error = "timeout"
-    except httpx_module.HTTPStatusError as exc:
-        error = f"http_{exc.response.status_code}"
-    except Exception as exc:
-        error = str(exc)
-    else:
-        if _is_fuzzy_nl_query(query) and sort_by == "relevance" and results:
-            results[0] = {
-                **results[0],
-                "_warnings": [
-                    {
-                        "code": "needs_structured_query_plan",
-                        "message": (
-                            "Fuzzy NL query detected. In the research workflow, "
-                            "bag-of-words queries should be upgraded into a structured "
-                            "query plan (DOI direct, author-anchored, or quoted/boolean "
-                            "phrase queries) before running external discovery."
-                        ),
-                    }
-                ],
-            }
-        return results
+    detected_doi = is_doi_query(query) if query else None
 
-    logger.info("OpenAlex search failed (%s)", error)
-    raise tool_error_cls(f"Academic search failed: OpenAlex ({error}).")
+    # DOI short-circuit: no filter resolution, no fuzzy check.
+    if detected_doi:
+        try:
+            results = fetch_openalex_by_doi(detected_doi, client=client)
+        except httpx_module.TimeoutException:
+            raise tool_error_cls("Academic search failed: OpenAlex (timeout).")
+        except httpx_module.HTTPStatusError as exc:
+            raise tool_error_cls(
+                f"Academic search failed: OpenAlex (http_{exc.response.status_code})."
+            )
+        return {
+            "results": results,
+            "next_cursor": None,
+            "total_count": len(results),
+            "unresolved_filters": [],
+        }
+
+    # Resolve name-based filters first so we know whether structured context exists.
+    concept_ids, institution_ids, source_id, unresolved = _resolve_names_to_ids(
+        client,
+        concepts=concepts,
+        institutions=institutions,
+        venue=venue,
+        logger=logger,
+    )
+    has_structured_filter = bool(
+        concept_ids or institution_ids or source_id
+    )
+
+    # Hard rejection of fuzzy bag-of-words queries WITHOUT structured filters.
+    # Rationale: OpenAlex keyword search returns garbage for fuzzy queries, but
+    # when the agent has narrowed by concept/institution/venue the keyword layer
+    # is allowed to be loose. A soft warning in the result payload is routinely
+    # ignored by agents, so the guardrail lives in code.
+    if query and _is_fuzzy_nl_query(query) and not has_structured_filter:
+        raise tool_error_cls(_FUZZY_REJECTION_MSG.format(query=query))
+
+    try:
+        payload = search_openalex(
+            query or "",
+            limit,
+            year_min,
+            year_max,
+            sort_by,
+            client=client,
+            min_citations=min_citations,
+            concept_ids=concept_ids or None,
+            institution_ids=institution_ids or None,
+            source_id=source_id,
+            oa_only=oa_only,
+            cursor=cursor,
+        )
+    except httpx_module.TimeoutException:
+        raise tool_error_cls("Academic search failed: OpenAlex (timeout).")
+    except httpx_module.HTTPStatusError as exc:
+        raise tool_error_cls(
+            f"Academic search failed: OpenAlex (http_{exc.response.status_code})."
+        )
+    except Exception as exc:
+        logger.info("OpenAlex search failed (%s)", exc)
+        raise tool_error_cls(f"Academic search failed: OpenAlex ({exc}).")
+
+    payload["unresolved_filters"] = unresolved
+    return payload
 
 
 # ---------------------------------------------------------------------------

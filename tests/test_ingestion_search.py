@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from zotpilot.openalex_client import WORK_SEARCH_SELECT, OpenAlexClient
 from zotpilot.tools.ingestion.search import (
     _is_fuzzy_nl_query,
@@ -125,42 +127,72 @@ def test_fuzzy_nl_query_emits_missing_priming_warning():
     assert _is_fuzzy_nl_query("CRISPR base editing") is True
 
 
-def test_search_academic_databases_injects_warning_for_fuzzy_nl(monkeypatch):
-    """Calling the MCP tool with fuzzy NL query attaches _warnings to first result."""
+def test_search_academic_databases_rejects_fuzzy_nl_without_filters():
+    """Fuzzy NL queries without structured filters must raise — hard guardrail."""
     from zotpilot.tools.ingestion import search as ingestion_search
 
-    fake_results = [{"id": "W1", "doi": "10.x/a", "title": "test"}]
+    class _Err(Exception):
+        pass
+
+    with pytest.raises(_Err) as excinfo:
+        ingestion_search.search_academic_databases_impl(
+            config=MagicMock(openalex_email="t@e.com"),
+            query="AI flow field reconstruction",
+            limit=10,
+            year_min=None,
+            year_max=None,
+            sort_by="relevance",
+            httpx_module=MagicMock(),
+            tool_error_cls=_Err,
+            logger=MagicMock(),
+        )
+    msg = str(excinfo.value)
+    assert "Fuzzy bag-of-words query rejected" in msg
+    assert "DOI direct" in msg and "Quoted phrase" in msg
+
+
+def test_search_academic_databases_accepts_fuzzy_with_concept_filter(monkeypatch):
+    """Concept filter narrows the search enough that fuzzy keywords are allowed."""
+    from zotpilot.tools.ingestion import search as ingestion_search
+
+    fake_payload = {
+        "results": [ingestion_search.format_openalex_paper({"id": "W1", "doi": "10.x/a", "title": "test"})],
+        "next_cursor": "abc",
+        "total_count": 42,
+    }
+    monkeypatch.setattr(ingestion_search, "search_openalex", lambda *a, **kw: fake_payload)
     monkeypatch.setattr(
-        ingestion_search,
-        "search_openalex",
-        lambda *a, **kw: [ingestion_search.format_openalex_paper(p) for p in fake_results],
+        ingestion_search.OpenAlexClient, "resolve_concept",
+        lambda self, name: "https://openalex.org/C41008148",
     )
     out = ingestion_search.search_academic_databases_impl(
         config=MagicMock(openalex_email="t@e.com"),
-        query="AI flow field reconstruction",
+        query="instruction tuning",  # fuzzy but concept-anchored
         limit=10,
         year_min=None,
         year_max=None,
         sort_by="relevance",
-        high_quality=True,
         httpx_module=MagicMock(),
         tool_error_cls=Exception,
         logger=MagicMock(),
+        concepts=["Computer vision"],
     )
-    assert out[0].get("_warnings"), "expected _warnings on first result for fuzzy NL"
-    assert out[0]["_warnings"][0]["code"] == "needs_structured_query_plan"
-    assert "structured query plan" in out[0]["_warnings"][0]["message"]
+    assert out["results"], "expected results when concept filter is provided"
+    assert out["total_count"] == 42
+    assert out["next_cursor"] == "abc"
+    assert out["unresolved_filters"] == []
 
 
-def test_anchored_query_does_not_inject_warning(monkeypatch):
+def test_anchored_query_passes_through_without_error(monkeypatch):
+    """Author-anchored queries bypass fuzzy rejection and return dict payload."""
     from zotpilot.tools.ingestion import search as ingestion_search
 
-    fake_results = [{"id": "W1", "doi": "10.x/a", "title": "test"}]
-    monkeypatch.setattr(
-        ingestion_search,
-        "search_openalex",
-        lambda *a, **kw: [ingestion_search.format_openalex_paper(p) for p in fake_results],
-    )
+    fake_payload = {
+        "results": [ingestion_search.format_openalex_paper({"id": "W1", "doi": "10.x/a", "title": "test"})],
+        "next_cursor": None,
+        "total_count": 1,
+    }
+    monkeypatch.setattr(ingestion_search, "search_openalex", lambda *a, **kw: fake_payload)
     out = ingestion_search.search_academic_databases_impl(
         config=MagicMock(openalex_email="t@e.com"),
         query="author:Raissi | flow field",
@@ -168,12 +200,12 @@ def test_anchored_query_does_not_inject_warning(monkeypatch):
         year_min=None,
         year_max=None,
         sort_by="relevance",
-        high_quality=True,
         httpx_module=MagicMock(),
         tool_error_cls=Exception,
         logger=MagicMock(),
     )
-    assert not out[0].get("_warnings"), "anchored query must not warn"
+    assert "results" in out and "next_cursor" in out and "total_count" in out
+    assert out["unresolved_filters"] == []
 
 
 def test_doi_fetch_returns_enriched_payload():

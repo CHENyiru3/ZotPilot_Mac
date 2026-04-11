@@ -10,8 +10,8 @@ logger = logging.getLogger(__name__)
 OPENALEX_API = "https://api.openalex.org"
 WORK_SEARCH_SELECT = (
     "id,doi,title,display_name,publication_year,cited_by_count,type,"
-    "is_retracted,authorships,primary_location,abstract_inverted_index,"
-    "open_access,ids,relevance_score"
+    "is_retracted,authorships,primary_location,best_oa_location,"
+    "abstract_inverted_index,open_access,ids,relevance_score"
 )
 
 
@@ -202,7 +202,7 @@ class OpenAlexClient:
         cursor: str | None = None,
     ) -> dict:
         """Search OpenAlex works using top-level search plus quality filters.
-        
+
         Returns a dict: {"results": [...], "next_cursor": str | None, "total_count": int}
         """
         author_filter: str | None = None
@@ -288,6 +288,26 @@ class OpenAlexClient:
                 return results[0].get("id")
         except Exception as e:
             logger.debug(f"Institution resolve failed for {name}: {e}")
+        return None
+
+    def resolve_source(self, name: str) -> str | None:
+        """期刊/会议/来源名 → OpenAlex source ID。调用 /sources?search=name。
+
+        支持常见别名如 "CVPR" / "NeurIPS" / "IEEE TPAMI" / "Nature"。
+        返回形如 "https://openalex.org/S123456789"。
+        """
+        try:
+            resp = self._request(
+                "/sources",
+                params={"search": name, "per-page": 1, "select": "id,display_name"},
+                timeout=5.0,
+            )
+            resp.raise_for_status()
+            results = resp.json().get("results", [])
+            if results:
+                return results[0].get("id")
+        except Exception as e:
+            logger.debug(f"Source resolve failed for {name}: {e}")
         return None
 
     @staticmethod

@@ -113,7 +113,12 @@ def _should_clean_publisher_tags(url: str) -> bool:
 
 
 def _cleanup_publisher_tags(item_key: str | None, url: str, writer, _logger) -> None:
-    """Clear publisher-injected tags after a successful save."""
+    """Clear publisher-injected tags after a successful save.
+
+    Note: called immediately after Connector save, so pyzotero Web API may
+    404 due to sync lag. This is a cosmetic cleanup — failures are logged
+    at debug level since the save itself succeeded.
+    """
     if not item_key or not _should_clean_publisher_tags(url):
         return
     try:
@@ -124,7 +129,8 @@ def _cleanup_publisher_tags(item_key: str | None, url: str, writer, _logger) -> 
         writer.set_item_tags(item_key, [])
         _logger.info("Cleared %d publisher auto-tags for %s", len(current_tags), item_key)
     except Exception as exc:
-        _logger.warning("Failed to clean publisher tags for %s: %s", item_key, exc)
+        _logger.debug("Skipped publisher tag cleanup for %s (likely sync lag): %s",
+                      item_key, exc)
 
 
 def apply_collection_tag_routing(
@@ -808,6 +814,45 @@ def save_via_api(
 # v0.5.0 new: validation and synchronous save+verify
 # ---------------------------------------------------------------------------
 
+def _fetch_item_via_local_api(
+    item_key: str,
+    *,
+    timeout_s: float = 5.0,
+    max_retries: int = 3,
+    _logger=None,
+) -> dict | None:
+    """Fetch item data from local Zotero Desktop HTTP API (port 23119).
+
+    Local API is instant (no Web API sync lag). Retries briefly for cases
+    where Zotero is still flushing the new item to its local index.
+
+    Returns the 'data' dict from the item payload, or None on failure.
+    """
+    if _logger is None:
+        _logger = logger
+    url = f"{_ZOTERO_LOCAL_API_ITEMS_URL}/{item_key}"
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"Accept": "application/json", "Zotero-Allowed-Request": "1"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                payload = json.loads(resp.read())
+            # Zotero local API returns either {"data": {...}} or the data directly
+            return payload.get("data", payload)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404 and attempt < max_retries - 1:
+                time.sleep(1.0 * (attempt + 1))  # small backoff for flush lag
+                continue
+            _logger.debug("local API fetch %s: HTTP %s", item_key, exc.code)
+            return None
+        except Exception as exc:
+            _logger.debug("local API fetch %s failed: %s", item_key, exc)
+            return None
+    return None
+
+
 def validate_saved_item(
     item_key: str,
     *,
@@ -816,38 +861,55 @@ def validate_saved_item(
 ) -> dict:
     """验证 Connector save 后的 item 质量。
 
+    优先使用本地 Zotero Desktop API (port 23119) — 无同步延迟。
+    仅当本地 API 完全不可用时，降级到 pyzotero Web API（有 ~10s 同步延迟）。
+
     返回 {"valid": bool, "item_type": str, "title": str, "reason": str | None}。
     """
     if _logger is None:
         _logger = logger
-    try:
-        writer = get_writer()
-        item = writer._zot.item(item_key)
-        data = item.get("data", {})
-        item_type = data.get("itemType", "unknown")
-        title = data.get("title", "")
 
-        if item_type not in VALID_ACADEMIC_ITEM_TYPES:
-            return {"valid": False, "item_type": item_type, "title": title,
-                    "reason": f"invalid_item_type:{item_type}"}
+    # Primary path: local Zotero API (instant after Connector save)
+    data = _fetch_item_via_local_api(item_key, _logger=_logger)
+    source = "local_api"
 
-        if title.startswith(("http://", "https://")):
-            return {"valid": False, "item_type": item_type, "title": title,
-                    "reason": "title_is_url"}
+    # Fallback: Web API (only if local API unavailable, e.g. Zotero closed)
+    if data is None:
+        try:
+            writer = get_writer()
+            item = writer._zot.item(item_key)
+            data = item.get("data", {})
+            source = "web_api"
+        except Exception as exc:
+            _logger.warning(
+                "validate_saved_item: both local and web API failed for %s: %s",
+                item_key, exc,
+            )
+            return {"valid": False, "item_type": "unknown", "title": "",
+                    "reason": f"validation_error:{exc}"}
 
-        if title.lower().strip() == "snapshot":
-            return {"valid": False, "item_type": item_type, "title": title,
-                    "reason": "title_is_snapshot"}
+    item_type = data.get("itemType", "unknown")
+    title = data.get("title", "")
+    _logger.debug("validate_saved_item %s via %s: type=%s title=%r",
+                  item_key, source, item_type, title[:50])
 
-        if looks_like_error_page_title(title, item_key):
-            return {"valid": False, "item_type": item_type, "title": title,
-                    "reason": "error_page_title"}
+    if item_type not in VALID_ACADEMIC_ITEM_TYPES:
+        return {"valid": False, "item_type": item_type, "title": title,
+                "reason": f"invalid_item_type:{item_type}"}
 
-        return {"valid": True, "item_type": item_type, "title": title, "reason": None}
-    except Exception as exc:
-        _logger.warning("validate_saved_item failed for %s: %s", item_key, exc)
-        return {"valid": False, "item_type": "unknown", "title": "",
-                "reason": f"validation_error:{exc}"}
+    if title.startswith(("http://", "https://")):
+        return {"valid": False, "item_type": item_type, "title": title,
+                "reason": "title_is_url"}
+
+    if title.lower().strip() == "snapshot":
+        return {"valid": False, "item_type": item_type, "title": title,
+                "reason": "title_is_snapshot"}
+
+    if looks_like_error_page_title(title, item_key):
+        return {"valid": False, "item_type": item_type, "title": title,
+                "reason": "error_page_title"}
+
+    return {"valid": True, "item_type": item_type, "title": title, "reason": None}
 
 
 def delete_item_safe(
@@ -856,46 +918,130 @@ def delete_item_safe(
     get_writer,
     _logger=None,
 ) -> bool:
-    """Best-effort 删除 Zotero item。返回 True 表示成功。"""
+    """Best-effort 删除 Zotero item via Web API with sync-lag retry.
+
+    Zotero Desktop local API (port 23119) does NOT support DELETE (501).
+    The only reliable path is pyzotero Web API, which requires the item
+    to have synced from Desktop → api.zotero.org. Sync typically takes
+    ~10s. Retries with exponential backoff up to ~30s total.
+    """
     if _logger is None:
         _logger = logger
+
+    delays = (0, 5, 10, 15)  # 0s, 5s, 15s, 30s cumulative
+    last_exc = None
+    for attempt, delay in enumerate(delays):
+        if delay:
+            _logger.debug("Delete retry %d/%d for %s (waiting %ds for sync)",
+                          attempt + 1, len(delays), item_key, delay)
+            time.sleep(delay)
+        try:
+            writer = get_writer()
+            item = writer._zot.item(item_key)
+            writer._zot.delete_item(item)
+            _logger.info("Deleted item %s (attempt %d)", item_key, attempt + 1)
+            return True
+        except Exception as exc:
+            last_exc = exc
+            continue
+
+    _logger.warning(
+        "Failed to delete item %s after %d attempts: %s. "
+        "Item may remain in library and require manual cleanup.",
+        item_key, len(delays), last_exc,
+    )
+    return False
+
+
+def _check_has_pdf_via_local_api(
+    item_key: str,
+    *,
+    timeout_s: float = 5.0,
+    _logger=None,
+) -> bool | None:
+    """Check PDF attachment via local Zotero Desktop API (port 23119).
+
+    Returns True/False when local API answers, None when local API is
+    unreachable (caller should fall back to Web API).
+    """
+    if _logger is None:
+        _logger = logger
+    url = f"{_ZOTERO_LOCAL_API_ITEMS_URL}/{item_key}/children"
     try:
-        writer = get_writer()
-        item = writer._zot.item(item_key)
-        writer._zot.delete_item(item)
-        _logger.info("Deleted garbage item %s", item_key)
-        return True
+        req = urllib.request.Request(
+            url,
+            headers={"Accept": "application/json", "Zotero-Allowed-Request": "1"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            payload = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            # Item exists locally but has no children yet — treat as False,
+            # retry handled by caller.
+            return False
+        _logger.debug("local API children fetch %s: HTTP %s", item_key, exc.code)
+        return None
+    except (urllib.error.URLError, ConnectionRefusedError, OSError) as exc:
+        _logger.debug("local API unavailable for %s: %s", item_key, exc)
+        return None
     except Exception as exc:
-        _logger.warning("Failed to delete item %s: %s", item_key, exc)
-        return False
+        _logger.debug("local API children fetch %s failed: %s", item_key, exc)
+        return None
+
+    # Zotero local API returns a list of child item payloads
+    children = payload if isinstance(payload, list) else payload.get("results", [])
+    for child in children:
+        data = child.get("data", child) if isinstance(child, dict) else {}
+        if data.get("contentType") == "application/pdf":
+            return True
+        # Some attachment types report contentType on the top-level dict
+        if child.get("contentType") == "application/pdf":
+            return True
+    return False
 
 
 def check_pdf_status(
     item_key: str,
     *,
     get_writer,
-    timeout_s: float = 15.0,
+    timeout_s: float = 30.0,
     _logger=None,
 ) -> str:
     """检查 item 是否有 PDF 附件。
+
+    优先使用本地 Zotero Desktop API（无同步延迟），仅在本地 API 完全不可达
+    时降级到 pyzotero Web API（有 ~10-60s 同步延迟）。
 
     返回: "attached" | "none" | "pending" | "check_failed"
     """
     if _logger is None:
         _logger = logger
+
     deadline = time.monotonic() + timeout_s
+    local_api_unavailable = False
     while time.monotonic() < deadline:
-        try:
-            writer = get_writer()
-            has = writer.check_has_pdf(item_key)
-            if has:
+        # Primary path: local API (instant for Connector-saved PDFs)
+        if not local_api_unavailable:
+            local_result = _check_has_pdf_via_local_api(item_key, _logger=_logger)
+            if local_result is True:
                 return "attached"
-            if time.monotonic() + 3 < deadline:
-                time.sleep(3)
-            else:
-                break
-        except Exception:
-            return "check_failed"
+            if local_result is None:
+                local_api_unavailable = True  # stop trying local on this call
+
+        # Fallback: Web API (only when local unreachable, e.g. Zotero closed)
+        if local_api_unavailable:
+            try:
+                writer = get_writer()
+                if writer.check_has_pdf(item_key):
+                    return "attached"
+            except Exception:
+                return "check_failed"
+
+        remaining = deadline - time.monotonic()
+        if remaining < 2:
+            break
+        time.sleep(min(2.0, remaining))
+
     return "none"
 
 
