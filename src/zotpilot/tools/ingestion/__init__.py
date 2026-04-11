@@ -190,10 +190,15 @@ def ingest_by_identifiers(
             "Examples: ['10.1234/abc', '2301.00001', 'https://...']"
         )),
     ],
-    collection: Annotated[str | None, Field(description="Target collection name (default: INBOX)")] = None,
-    tags: Annotated[list[str] | None, Field(description="Tags to apply")] = None,
 ) -> dict:
-    """Ingest papers into Zotero. Returns per-paper status synchronously.
+    """Ingest papers into Zotero's INBOX collection. Per-paper status, synchronous.
+
+    Destination and tagging are **not** caller-controlled:
+      - All new items land in the INBOX collection (auto-created on first use).
+      - Tags are NEVER applied at save time. Topic tagging and reclassification
+        happen in Phase 3 via `manage_tags` / `manage_collections` through the
+        plan-then-execute workflow in ztp-research — this prevents drive-by
+        tagging that bypasses user vocabulary review.
 
     Internal flow: normalize → dedup → connector check → preflight →
     sequential save+verify → API fallback on failure → PDF check.
@@ -205,26 +210,16 @@ def ingest_by_identifiers(
     get_writer = _get_writer
     _get_zotero()
 
-    # Resolve collection
-    collection_key = None
-    if collection:
-        try:
-            writer = _get_writer()
-            with _writer_lock:
-                all_colls = writer._zot.collections()
-            for coll in all_colls:
-                data = coll.get("data", {})
-                if data.get("name") == collection:
-                    collection_key = data.get("key") or coll.get("key")
-                    break
-            if not collection_key:
-                raise ToolError(f"Collection '{collection}' not found. Create it first.")
-        except ToolError:
-            raise
-        except Exception as exc:
-            logger.warning("Collection lookup failed: %s", exc)
-    else:
-        collection_key = _ensure_inbox_collection()
+    # Destination is hardcoded to INBOX. _ensure_inbox_collection auto-creates
+    # it on first use; returns None only when ZOTERO_API_KEY is missing or the
+    # writer init fails — in that case the tool cannot function at all.
+    collection_key = _ensure_inbox_collection()
+    if not collection_key:
+        raise ToolError(
+            "INBOX collection unavailable. ingest_by_identifiers requires "
+            "ZOTERO_API_KEY and ZOTERO_USER_ID so it can create and route "
+            "items into the INBOX collection. Configure credentials and retry."
+        )
 
     # Step 1: Normalize identifiers → candidates
     candidates: list[dict] = []
@@ -319,17 +314,17 @@ def ingest_by_identifiers(
         title = candidate.get("title")
 
         if ext_ok and url:
-            # Connector route
+            # Connector route. tags=None is invariant — see tool docstring.
             result = connector.save_single_and_verify(
                 url, doi, title,
-                collection_key=collection_key, tags=tags,
+                collection_key=collection_key, tags=None,
                 bridge_url=bridge_url, get_writer=get_writer,
                 writer_lock=_writer_lock, _logger=logger,
             )
         elif doi:
-            # API-only route
+            # API-only route. tags=None is invariant — see tool docstring.
             result = connector._doi_api_fallback(
-                doi, title, collection_key=collection_key, tags=tags,
+                doi, title, collection_key=collection_key, tags=None,
                 get_writer=get_writer, writer_lock=_writer_lock, _logger=logger,
             )
         else:
