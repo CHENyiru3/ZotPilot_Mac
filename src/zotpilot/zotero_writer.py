@@ -165,6 +165,28 @@ class ZoteroWriter:
                 break
         return results
 
+    def get_item_tags(self, item_key: str) -> list[str]:
+        """Return current tag strings for an item via the Web API."""
+        try:
+            item = self._zot.item(item_key)
+            return sorted(
+                tag["tag"]
+                for tag in (item.get("data") or {}).get("tags", [])
+                if tag.get("tag")
+            )
+        except Exception as e:
+            logger.warning("get_item_tags(%s) failed: %s", item_key, e)
+            return []
+
+    def get_item_collection_keys(self, item_key: str) -> list[str]:
+        """Return current collection keys for an item via the Web API."""
+        try:
+            item = self._zot.item(item_key)
+            return sorted((item.get("data") or {}).get("collections", []) or [])
+        except Exception as e:
+            logger.warning("get_item_collection_keys(%s) failed: %s", item_key, e)
+            return []
+
     # =========================================================
     # Ingestion helpers
     # =========================================================

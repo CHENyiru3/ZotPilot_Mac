@@ -153,6 +153,7 @@ def index_library(
     force_reindex: Annotated[bool, Field(description="Delete and rebuild index for matching items")] = False,
     limit: Annotated[int | None, Field(description="Max items to index, None for all")] = None,
     item_key: Annotated[str | None, Field(description="Index only this specific item key")] = None,
+    item_keys: Annotated[list[str] | None, Field(description="Index only these specific item keys")] = None,
     title_pattern: Annotated[str | None, Field(description="Regex to filter items by title (case-insensitive)")] = None,
     no_vision: Annotated[bool, Field(description="Disable vision-based table extraction")] = False,
     batch_size: Annotated[int, Field(description="Items per batch (default 20). Set 0 for all at once. Call repeatedly until has_more=false. Vision extraction is auto-disabled in batch mode; use batch_size=0 for vision.")] = 20,  # noqa: E501
@@ -180,36 +181,8 @@ def index_library(
     from dataclasses import replace as dc_replace
 
     from ..indexer import Indexer
-    from .ingestion import _batch_store
 
     _config = _get_config()
-
-    # Gate: refuse to index when an unresolved metadata_only_choice exists,
-    # unless the caller has explicitly acknowledged.
-    # Bypassed entirely in no-RAG mode (no embedder to run regardless).
-    if _config.embedding_provider != "none":
-        found = _batch_store.find_unresolved_metadata_only(None)
-        if found is not None and not acknowledge_metadata_only:
-            decision, _batch = found
-            return {
-                "status": "blocked",
-                "blocking_decision": "metadata_only_choice",
-                "batch_id": decision.batch_id,
-                "item_keys": list(decision.item_keys),
-                "description": decision.description,
-                "user_consent_required": True,
-                "resolution_parameter": "acknowledge_metadata_only",
-            }
-        if acknowledge_metadata_only and found is not None:
-            decision, batch = found
-            decision.resolved = True
-            _batch_store.put(batch)
-            logger.info(
-                "metadata_only_choice resolved via acknowledge_metadata_only=True "
-                "(batch=%s, items=%d)",
-                decision.batch_id,
-                len(decision.item_keys),
-            )
 
     errors = _config.validate()
     if errors:
@@ -230,6 +203,7 @@ def index_library(
         force_reindex=force_reindex,
         limit=limit,
         item_key=item_key,
+        item_keys=item_keys,
         title_pattern=title_pattern,
         max_pages=effective_max_pages,
         batch_size=batch_size if batch_size > 0 else None,

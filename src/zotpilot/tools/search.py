@@ -53,9 +53,23 @@ def search_papers(
         Literal["minimal", "standard", "full"],
         Field(description="Response detail level"),
     ] = "minimal",
+    section_type: Annotated[Literal["text", "tables", "figures"] | None, Field(description="Filter by content type (tables or figures)")] = None,
 ) -> list[dict]:
     """Semantic search over paper chunks. Returns passages ranked by composite score (similarity × section × journal). Use chunk_types for content type, section_weights for paper location, required_terms for exact keyword filtering."""  # noqa: E501
     start = time.perf_counter()
+
+    if section_type == "tables":
+        return search_tables(
+            query=query, top_k=top_k, year_min=year_min, year_max=year_max,
+            author=author, tag=tag, collection=collection,
+            journal_weights=journal_weights, verbosity=verbosity
+        )
+    if section_type == "figures":
+        return search_figures(
+            query=query, top_k=top_k, year_min=year_min, year_max=year_max,
+            author=author, tag=tag, collection=collection,
+            verbosity=verbosity
+        )
 
     # Validate chunk_types if provided
     if chunk_types is not None:
@@ -317,7 +331,6 @@ def search_boolean(
     return results
 
 
-@mcp.tool(tags=tool_tags("extended", "search"))
 def search_tables(
     query: Annotated[str, Field(description="Search query for table content")],
     top_k: Annotated[int, Field(description="Number of tables to return", ge=1, le=30)] = 10,
@@ -406,7 +419,6 @@ def search_tables(
     return output
 
 
-@mcp.tool(tags=tool_tags("extended", "search"))
 def search_figures(
     query: Annotated[str, Field(description="Search query for figure captions")],
     top_k: Annotated[int, Field(description="Number of figures to return", ge=1, le=30)] = 10,

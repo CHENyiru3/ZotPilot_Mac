@@ -133,35 +133,15 @@ ZotPilot — AI-powered Zotero research assistant. Tool selection guide:
 
 | User intent                                             | Tool                        |
 |---------------------------------------------------------|-----------------------------|
-| Find specific passages or claims                        | search_papers               |
-| Survey a topic / find papers                            | search_topic                |
-| Find paper by exact terms                               | search_boolean              |
-| Filter by year/author/tag/etc.                          | advanced_search             |
-| Find data tables                                        | search_tables               |
-| Find figures or diagrams                                | search_figures              |
-| Search external academic databases (OpenAlex)            | search_academic_databases   |
-| Directly ingest explicit DOI/arXiv/URL lists            | ingest_by_identifiers       |
-| Confirm selected search candidates                      | confirm_candidates          |
-| Resolve blocked preflight and rerun checks              | resolve_preflight           |
-| Approve ingest after preflight                          | approve_ingest             |
-| Check research batch progress                           | get_batch_status           |
-| Save browser pages into Zotero via Connector            | save_urls                   |
+| Find specific passages or claims                        | `search_papers`             |
+| Survey a topic / find papers                            | `search_topic`              |
+| Find paper by exact terms                               | `search_boolean`            |
+| Filter by year/author/tag/etc.                          | `advanced_search`           |
 
 **Note**: `search_topic` searches your LOCAL indexed Zotero library \
-(requires prior `index_library`). `search_academic_databases` queries \
-EXTERNAL databases (OpenAlex) and finds papers not yet in your library.
+(requires prior `index_library`).
 
-**Default `core` profile tools:**
-`search_topic`, `search_papers`, `get_passage_context`, `advanced_search`,
-`get_paper_details`, `search_academic_databases`, `ingest_by_identifiers`,
-`confirm_candidates`, `resolve_preflight`, `approve_ingest`, `get_batch_status`,
-`approve_post_ingest`, `authorize_taxonomy_changes`, `approve_post_process`,
-`reindex_degraded`, `get_index_stats`
-
-Set `ZOTPILOT_TOOL_PROFILE=extended` to expose advanced browse/write/admin tools,
-or `ZOTPILOT_TOOL_PROFILE=all` for the complete tool surface.
-
-**Default research flow:**
+**Default flow:**
 1. `search_topic` to discover what is already in the local library
 2. Optionally `search_papers` for supporting passages
 3. Optionally `get_passage_context` for surrounding text
@@ -175,17 +155,9 @@ set `context_chunks=1` only when adjacent context is useful. \
 `doc_id` is the canonical identifier in search and library results. \
 `browse_library` and `get_paper_details` return `doc_id` instead of `key`.
 
-**Typical literature collection workflow:**
-1. `search_academic_databases` → review candidates
-2. `confirm_candidates` → preflight
-3. `approve_ingest` → background ingest
-4. `get_batch_status` → poll until post-ingest verification is ready
-5. `approve_post_ingest` → background post-process
-6. `approve_post_process` → finalize
-
-advanced_search works without indexing — use for precise metadata \
-filters. Extended profile adds browse/write/admin tools such as \
-`browse_library`, `manage_tags`, `index_library`, and `switch_library`. \
+`advanced_search` works without indexing — use for precise metadata \
+filters. The default core profile provides browse/write/indexing tools such as \
+`browse_library`, `manage_tags`, and `index_library`. \
 Use `browse_library(view="feeds")` for RSS feeds. `get_index_stats` also \
 handles unindexed-paper pagination plus optional reranking and vision-cost details. \
 Write operations (tags, collections, notes) require ZOTERO_API_KEY \

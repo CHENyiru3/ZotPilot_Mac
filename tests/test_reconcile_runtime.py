@@ -125,11 +125,19 @@ def test_cmd_sync_runs_reconcile_runtime(capsys):
     fake_result = MagicMock()
     fake_result.applied = ApplyResult(("codex",), ("codex",), True)
     with (
+        patch("zotpilot.cli.Config.load") as mock_load,
         patch("zotpilot.cli._import_runtime_env_to_config", return_value={}),
         patch("zotpilot._platforms.reconcile_runtime", return_value=fake_result) as mock_reconcile,
     ):
+        mock_cfg = mock_load.return_value
+        mock_cfg.gemini_api_key = "k"
+        mock_cfg.dashscope_api_key = None
+        mock_cfg.zotero_api_key = "z"
+        mock_cfg.zotero_user_id = "1"
         assert cmd_sync(args) == 0
     assert mock_reconcile.call_args.kwargs["apply"] is True
+    assert mock_reconcile.call_args.kwargs["gemini_key"] == "k"
+    assert mock_reconcile.call_args.kwargs["zotero_api_key"] == "z"
 
 
 def test_run_py_register_bootstraps_then_delegates(tmp_path):
@@ -147,7 +155,14 @@ def test_run_py_register_bootstraps_then_delegates(tmp_path):
     ):
         assert module._handle_register(["--platform", "codex"]) == 0
 
-    assert mock_run.call_args.args[0] == [
+    assert mock_run.call_args_list[0].args[0] == [
+        "uv",
+        "tool",
+        "install",
+        "--reinstall",
+        str(run_path.parents[1]),
+    ]
+    assert mock_run.call_args_list[1].args[0] == [
         "uv",
         "tool",
         "run",

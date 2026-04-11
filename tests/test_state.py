@@ -305,16 +305,9 @@ class TestMCPInstructions:
         registered = _registered_tool_names()
 
         expected = {
-            "approve_ingest",
-            "approve_post_ingest",
-            "approve_post_process",
             "advanced_search",
-            "authorize_taxonomy_changes",
             "browse_library",
-            "confirm_candidates",
-            "create_collection",
             "create_note",
-            "get_batch_status",
             "get_annotations",
             "get_citations",
             "get_index_stats",
@@ -326,16 +319,10 @@ class TestMCPInstructions:
             "manage_collections",
             "manage_tags",
             "profile_library",
-            "reindex_degraded",
-            "resolve_preflight",
-            "save_urls",
             "search_academic_databases",
             "search_boolean",
-            "search_figures",
             "search_papers",
-            "search_tables",
             "search_topic",
-            "switch_library",
         }
 
         assert registered == expected

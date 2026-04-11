@@ -190,22 +190,45 @@ class OpenAlexClient:
         query: str | None,
         *,
         per_page: int = 25,
-        high_quality: bool = True,
+        min_citations: int | None = None,
+        concepts: list[str] | None = None,
+        institutions: list[str] | None = None,
+        source: str | None = None,
+        oa_only: bool = False,
+        type_filter: str | None = None,
         year_min: int | None = None,
         year_max: int | None = None,
         sort: str | None = None,
-    ) -> list[dict]:
-        """Search OpenAlex works using top-level search plus hard quality filters."""
+        cursor: str | None = None,
+    ) -> dict:
+        """Search OpenAlex works using top-level search plus quality filters.
+        
+        Returns a dict: {"results": [...], "next_cursor": str | None, "total_count": int}
+        """
         author_filter: str | None = None
         search_query = query
         if query:
             author_filter, search_query = self._split_author_query(query)
 
-        filters = ["is_retracted:false", "type:article|review", "has_doi:true"]
+        filters = ["is_retracted:false", "has_doi:true"]
+        if type_filter:
+            filters.append(f"type:{type_filter}")
+        else:
+            filters.append("type:article|review")
+
+        if oa_only:
+            filters.append("open_access.is_oa:true")
+        if min_citations is not None:
+            filters.append(f"cited_by_count:>{min_citations}")
+        if source:
+            filters.append(f"primary_location.source.id:{source}")
+        if concepts:
+            filters.append(f"concepts.id:{'|'.join(concepts)}")
+        if institutions:
+            filters.append(f"institutions.id:{'|'.join(institutions)}")
+
         if author_filter is not None:
             filters.append(f"raw_author_name.search:{author_filter}")
-        if high_quality:
-            filters.append("cited_by_count:>10")
         if year_min is not None:
             filters.append(f"from_publication_date:{year_min}-01-01")
         if year_max is not None:
@@ -216,6 +239,8 @@ class OpenAlexClient:
             "per-page": str(min(per_page, 200)),
             "select": WORK_SEARCH_SELECT,
         }
+        if cursor is not None:
+            params["cursor"] = cursor
         if search_query:
             params["search"] = search_query
         if sort:
@@ -223,7 +248,47 @@ class OpenAlexClient:
 
         response = self._request("/works", params=params, timeout=15.0)
         response.raise_for_status()
-        return response.json().get("results", [])
+        data = response.json()
+        return {
+            "results": data.get("results", []),
+            "next_cursor": data.get("meta", {}).get("next_cursor"),
+            "total_count": data.get("meta", {}).get("count", 0),
+        }
+
+    def get_related_works(self, openalex_id: str, limit: int = 20) -> list[dict]:
+        """获取相关论文，用于 seed-expansion 搜索策略。"""
+        try:
+            params = {"filter": f"related_to:{openalex_id}", "per-page": min(limit, 200)}
+            resp = self._request("/works", params=params, timeout=10.0)
+            resp.raise_for_status()
+            return resp.json().get("results", [])
+        except Exception as e:
+            logger.warning(f"Failed to get related works: {e}")
+            return []
+
+    def resolve_concept(self, name: str) -> str | None:
+        """自然语言概念名 → OpenAlex concept ID。调用 /concepts?search=name。"""
+        try:
+            resp = self._request("/concepts", params={"search": name, "per-page": 1}, timeout=5.0)
+            resp.raise_for_status()
+            results = resp.json().get("results", [])
+            if results:
+                return results[0].get("id")
+        except Exception as e:
+            logger.debug(f"Concept resolve failed for {name}: {e}")
+        return None
+
+    def resolve_institution(self, name: str) -> str | None:
+        """机构名 → OpenAlex institution ID。调用 /institutions?search=name。"""
+        try:
+            resp = self._request("/institutions", params={"search": name, "per-page": 1}, timeout=5.0)
+            resp.raise_for_status()
+            results = resp.json().get("results", [])
+            if results:
+                return results[0].get("id")
+        except Exception as e:
+            logger.debug(f"Institution resolve failed for {name}: {e}")
+        return None
 
     @staticmethod
     def format_work(work: dict) -> dict:

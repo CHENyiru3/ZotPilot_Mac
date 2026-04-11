@@ -24,7 +24,10 @@ from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
-import tomllib
+try:  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - older runtime envs
+    import tomli as tomllib
 
 # ---------------------------------------------------------------------------
 # Platform definitions
@@ -143,17 +146,24 @@ def _zotpilot_command(allow_fallback: bool = True) -> str:
     """Return the reliable absolute path to the zotpilot binary.
 
     Resolution order:
-    1. shutil.which() — works when binary is already on PATH
-    2. uv tool dir --bin — finds uv's bin directory even right after
+    1. Stable user-level bin path (`~/.local/bin/zotpilot` on Unix) when present
+    2. shutil.which() — works when binary is already on PATH
+    3. uv tool dir --bin — finds uv's bin directory even right after
        a fresh `uv tool install` in the same process (PATH not yet updated)
-    3. Falls back to bare 'zotpilot' as last resort
+    4. Falls back to bare 'zotpilot' as last resort
     """
-    # 1. Try PATH lookup
+    # 1. Prefer stable user-level install path over transient uv archive paths.
+    if not _is_windows():
+        stable_user_bin = Path.home() / ".local" / "bin" / "zotpilot"
+        if stable_user_bin.exists():
+            return str(stable_user_bin)
+
+    # 2. Try PATH lookup
     path = shutil.which("zotpilot")
     if path:
         return path
 
-    # 2. Windows: pip --user installs to %APPDATA%\Python\PythonXYY\Scripts\
+    # 3. Windows: pip --user installs to %APPDATA%\Python\PythonXYY\Scripts\
     if _is_windows():
         appdata = os.environ.get("APPDATA", "")
         if appdata:
@@ -164,7 +174,7 @@ def _zotpilot_command(allow_fallback: bool = True) -> str:
                 if candidate.exists():
                     return str(candidate)
 
-    # 3. Ask uv where it installs tool binaries
+    # 4. Ask uv where it installs tool binaries
     uv = shutil.which("uv")
     if not uv:
         # uv may have been installed via pip and not be in PATH on Windows
@@ -193,7 +203,7 @@ def _zotpilot_command(allow_fallback: bool = True) -> str:
                 if candidate.exists():
                     return str(candidate)
 
-    # 4. Last resort
+    # 5. Last resort
     if not allow_fallback:
         raise RuntimeError(
             "zotpilot binary not found. Install first: "
@@ -437,6 +447,21 @@ def _skill_state_for_platform(plat: str) -> tuple[tuple[str, ...], bool]:
     return tuple(deployed), all_ok
 
 
+def _commands_equivalent(actual: str | None, desired: str) -> bool:
+    if actual is None:
+        return False
+    if actual == desired:
+        return True
+    try:
+        actual_path = Path(actual)
+        desired_path = Path(desired)
+        if actual_path.name == desired_path.name == "zotpilot" and actual_path.exists():
+            return True
+    except OSError:
+        return False
+    return False
+
+
 def inspect_current_state(
     config_env: dict[str, str] | None = None,
     targets: list[str] | None = None,
@@ -495,7 +520,7 @@ def plan_runtime_changes(desired: DesiredRuntime, current: RuntimeState) -> Chan
         if not state.registered:
             register.append(plat)
             platform_reasons.append("not-registered")
-        elif state.command != desired.command or tuple(state.args) != desired.args:
+        elif not _commands_equivalent(state.command, desired.command) or tuple(state.args) != desired.args:
             register.append(plat)
             platform_reasons.append("command-drift")
         elif any(state.env.get(k) != v for k, v in desired.env.items()):

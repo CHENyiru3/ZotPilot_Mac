@@ -1,0 +1,24 @@
+# Context Snapshot: fix-post-process-worker
+
+- Task statement: Execute the plan in `.omc/plans/fix-post-process-worker.md` under the `ralph` workflow.
+- Desired outcome: Fix the post-process worker so saved items are enriched from Zotero metadata, taxonomy changes pause for authorization when needed, INBOX behaves as a staging collection, and post-process notes use real metadata.
+- Known facts/evidence:
+  - `src/zotpilot/workflow/worker.py` currently performs note/tag/collection work in `_sync_item_post_process_truth()` without enriching `item.paper_payload` after ingest.
+  - `_pick_collection()` and `_pick_tags()` query Zotero taxonomy internally and only auto-apply existing matches; there is no pending-taxonomy pause path.
+  - `Batch` already supports `AwaitingTaxonomyAuthorization`, `with_pending_taxonomy()`, and `with_authorizations()`.
+  - `authorize_taxonomy_changes()` already resumes batches from `AwaitingTaxonomyAuthorization`.
+  - Existing tests in `tests/test_workflow_post_process_truth.py` assert the current "no inference" behavior and basic matched taxonomy behavior; these will need to change.
+  - `ZoteroClient` already provides `get_item()`, `get_item_abstract()`, `get_all_collections()`, `get_all_tags()`, and `get_item_collections()`.
+  - `ZoteroWriter` already provides `add_to_collection()`, `remove_from_collection()`, `create_collection()`, `add_item_tags()`, `get_item_collection_keys()`, and `get_item_tags()`.
+- Constraints:
+  - Work in the existing dirty tree without reverting unrelated changes.
+  - No new dependencies.
+  - Keep tool/workflow boundary intact: worker may use state singletons, but should not import tool-layer modules directly.
+  - Ralph verification requires fresh tests/lint/typecheck plus architect verification and a deslop pass unless explicitly skipped.
+- Unknowns/open questions:
+  - Whether additional tests outside `tests/test_workflow_post_process_truth.py` need updates for pending taxonomy payloads or INBOX cleanup semantics.
+  - Whether note generation should prefer existing `abstract_snippet` over enriched abstract when both exist.
+- Likely codebase touchpoints:
+  - `src/zotpilot/workflow/worker.py`
+  - `tests/test_workflow_post_process_truth.py`
+  - Possibly `tests/test_research_workflow_post_process_report.py` or related workflow tests if phase/output semantics change.

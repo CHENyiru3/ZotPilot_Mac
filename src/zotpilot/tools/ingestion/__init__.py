@@ -1,108 +1,327 @@
-"""Ingestion package — thin re-export shim.
-
-Sub-modules hold all implementation and @mcp.tool registrations.
-Importing this package triggers registration of all MCP tools as a side-effect.
-All public names are re-exported here so that test patches on
-'zotpilot.tools.ingestion.X' work correctly at call time.
-"""
-
+"""Ingestion MCP tools: search_academic_databases + ingest_by_identifiers (v0.5.0)."""
 from __future__ import annotations
 
-import time as time  # noqa: PLC0414  re-exported for test patching
+import logging
+import threading
+from typing import Annotated, Literal
 
-import httpx as httpx  # noqa: PLC0414  re-exported for test patching
+import httpx
+from pydantic import Field
 
-from ...bridge import DEFAULT_PORT as DEFAULT_PORT  # noqa: F401  re-exported for test patching
-from ...bridge import BridgeServer as BridgeServer  # noqa: F401  re-exported for test patching
-from ...state import _get_config, _get_writer, _get_zotero  # noqa: F401  re-exported for test patching
-from .. import ingestion_bridge, ingestion_search  # noqa: F401  re-exported
-from ..ingest_state import BatchStore as BatchStore  # noqa: F401
-from ..ingest_state import IngestItemState as IngestItemState  # noqa: F401
+from ...bridge import DEFAULT_PORT, BridgeServer
+from ...state import (
+    ToolError,
+    _get_config,
+    _get_writer,
+    _get_zotero,
+    mcp,
+    register_reset_callback,
+)
+from ..profiles import tool_tags
+from . import connector, search
 
-# Sub-module imports trigger @mcp.tool registration as side-effects.
-from . import _ingest, _save, _shared  # noqa: F401
-from ._ingest import (
-    _apply_bridge_result_routing,
-    _batch_store,
-    _clear_batch_store,
-    _clear_inbox_cache,
-    _ensure_inbox_collection,
-    _executor,
-    _inbox_collection_key,  # noqa: F401  re-exported for test patching
-    _resolve_dois_concurrent,
-    _update_session_after_ingest,
-    get_ingest_status,
-    ingest_papers,
-    search_academic_databases,
-)
-from ._ingest import (
-    get_ingest_status as get_ingest_status_impl,  # noqa: PLC0414
-)
-from ._ingest import (
-    ingest_papers as ingest_papers_impl,  # noqa: PLC0414
-)
-from ._ingest import (
-    search_academic_databases as search_academic_databases_impl,  # noqa: PLC0414
-)
-from ._save import _run_save_worker, _save_via_api, save_urls
-from ._shared import (
-    _coerce_json_list,
-    _discover_via_local_api,
-    _discover_via_web_api,
-    _is_pdf_or_doi_url,
-    _lookup_local_item_key_by_doi,
-    _lookup_suspected_local_duplicates_by_title,
-    _route_via_local_api,
-    _writer_lock,
-    classify_ingest_candidate,
-    logger,
-    resolve_doi_to_landing_url,
-)
+logger = logging.getLogger(__name__)
+_writer_lock = threading.Lock()
 
-__all__ = [
-    # state accessors (for test patching via this namespace)
-    "_get_config",
-    "_get_writer",
-    "_get_zotero",
-    "ingestion_bridge",
-    "ingestion_search",
-    "time",
-    "httpx",
-    "BridgeServer",
-    "DEFAULT_PORT",
-    # shared
-    "classify_ingest_candidate",
-    "logger",
-    "resolve_doi_to_landing_url",
-    "_coerce_json_list",
-    "_discover_via_local_api",
-    "_discover_via_web_api",
-    "_is_pdf_or_doi_url",
-    "_lookup_local_item_key_by_doi",
-    "_lookup_suspected_local_duplicates_by_title",
-    "_resolve_dois_concurrent",
-    "_route_via_local_api",
-    "_writer_lock",
-    # ingest
-    "_apply_bridge_result_routing",
-    "_batch_store",
-    "_clear_batch_store",
-    "_clear_inbox_cache",
-    "_ensure_inbox_collection",
-    "_executor",
-    "_update_session_after_ingest",
-    "get_ingest_status",
-    "ingest_papers",
-    "search_academic_databases",
-    # save
-    "_run_save_worker",
-    "_save_via_api",
-    "save_urls",
-    # store types
-    "BatchStore",
-    "IngestItemState",
-    # aliases
-    "get_ingest_status_impl",
-    "ingest_papers_impl",
-    "search_academic_databases_impl",
-]
+# ---------------------------------------------------------------------------
+# INBOX collection cache
+# ---------------------------------------------------------------------------
+_inbox_collection_key: str | None = None
+_inbox_lock = threading.Lock()
+_INBOX_COLLECTION_NAME = "INBOX"
+
+
+def _clear_inbox_cache() -> None:
+    global _inbox_collection_key
+    _inbox_collection_key = None
+    import sys as _sys
+    _pkg = _sys.modules.get("zotpilot.tools.ingestion")
+    if _pkg is not None and hasattr(_pkg, "_inbox_collection_key"):
+        _pkg._inbox_collection_key = None  # type: ignore[attr-defined]
+
+
+register_reset_callback(_clear_inbox_cache)
+
+
+def _ensure_inbox_collection() -> str | None:
+    """Return the INBOX collection key, creating it if absent when possible."""
+    global _inbox_collection_key
+    if _inbox_collection_key is not None:
+        return _inbox_collection_key
+    with _inbox_lock:
+        if _inbox_collection_key is not None:
+            return _inbox_collection_key
+        try:
+            writer = _get_writer()
+        except Exception:
+            return None
+        if not _get_config().zotero_api_key:
+            return None
+        try:
+            with _writer_lock:
+                collections = writer._zot.collections()
+            for coll in collections:
+                data = coll.get("data", {})
+                if data.get("name") == _INBOX_COLLECTION_NAME:
+                    _inbox_collection_key = data.get("key") or coll.get("key")
+                    return _inbox_collection_key
+            with _writer_lock:
+                response = writer._zot.create_collections([{"name": _INBOX_COLLECTION_NAME}])
+            if response and "successful" in response:
+                for value in response["successful"].values():
+                    _inbox_collection_key = value.get("key") or value.get("data", {}).get("key")
+                    if _inbox_collection_key:
+                        return _inbox_collection_key
+            with _writer_lock:
+                collections = writer._zot.collections()
+            for coll in collections:
+                data = coll.get("data", {})
+                if data.get("name") == _INBOX_COLLECTION_NAME:
+                    _inbox_collection_key = data.get("key") or coll.get("key")
+                    return _inbox_collection_key
+        except Exception as exc:
+            logger.warning("_ensure_inbox_collection failed: %s", exc)
+    return None
+
+
+def _lookup_local_item_key_by_doi(doi: str | None) -> str | None:
+    """Check if a DOI already exists in the local Zotero library."""
+    if not doi:
+        return None
+    try:
+        zot = _get_zotero()
+        return zot.get_item_key_by_doi(doi)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# MCP Tool: search_academic_databases
+# ---------------------------------------------------------------------------
+
+@mcp.tool(tags=tool_tags("core", "ingestion"))
+def search_academic_databases(
+    query: Annotated[str, Field(description="Search query for academic papers")],
+    limit: Annotated[int, Field(ge=1, le=100, description="Max results")] = 20,
+    year_min: Annotated[int | None, Field(description="Minimum publication year")] = None,
+    year_max: Annotated[int | None, Field(description="Maximum publication year")] = None,
+    min_citations: Annotated[int | None, Field(description="Minimum citation count")] = None,  # noqa: ARG001
+    sort_by: Annotated[
+        Literal["relevance", "citations", "date"],
+        Field(description="Sort order"),
+    ] = "relevance",
+    oa_only: Annotated[bool, Field(description="Only open access papers")] = False,  # noqa: ARG001
+) -> list[dict]:
+    """Search OpenAlex for papers NOT yet in your local library."""
+    config = _get_config()
+    sort_map = {"relevance": "relevance", "citations": "citationCount", "date": "publicationDate"}
+    return search.search_academic_databases_impl(
+        config, query, limit=limit,
+        year_min=year_min, year_max=year_max,
+        sort_by=sort_map.get(sort_by, "relevance"),
+        high_quality=True,
+        httpx_module=httpx, tool_error_cls=ToolError,
+        logger=logger,
+    )
+
+
+# ---------------------------------------------------------------------------
+# MCP Tool: ingest_by_identifiers
+# ---------------------------------------------------------------------------
+
+@mcp.tool(tags=tool_tags("core", "ingestion"))
+def ingest_by_identifiers(
+    identifiers: Annotated[
+        list[str],
+        Field(description=(
+            "DOI, arXiv ID, or URL list. "
+            "Examples: ['10.1234/abc', '2301.00001', 'https://...']"
+        )),
+    ],
+    collection: Annotated[str | None, Field(description="Target collection name (default: INBOX)")] = None,
+    tags: Annotated[list[str] | None, Field(description="Tags to apply")] = None,
+) -> dict:
+    """Ingest papers into Zotero. Returns per-paper status synchronously.
+
+    Internal flow: normalize → dedup → connector check → preflight →
+    sequential save+verify → API fallback on failure → PDF check.
+
+    Statuses: saved_with_pdf, saved_metadata_only, blocked, duplicate, failed.
+    When action_required is non-empty, surface to user and wait.
+    """
+    bridge_url = f"http://127.0.0.1:{DEFAULT_PORT}"
+    get_writer = _get_writer
+    zot = _get_zotero()
+
+    # Resolve collection
+    collection_key = None
+    if collection:
+        try:
+            writer = _get_writer()
+            with _writer_lock:
+                all_colls = writer._zot.collections()
+            for coll in all_colls:
+                data = coll.get("data", {})
+                if data.get("name") == collection:
+                    collection_key = data.get("key") or coll.get("key")
+                    break
+            if not collection_key:
+                raise ToolError(f"Collection '{collection}' not found. Create it first.")
+        except ToolError:
+            raise
+        except Exception as exc:
+            logger.warning("Collection lookup failed: %s", exc)
+    else:
+        collection_key = _ensure_inbox_collection()
+
+    # Step 1: Normalize identifiers → candidates
+    candidates: list[dict] = []
+    for ident in identifiers:
+        ident = ident.strip()
+        candidate: dict = {"identifier": ident, "url": None, "doi": None, "title": None}
+
+        # DOI check
+        doi = search.normalize_doi(ident)
+        if doi:
+            candidate["doi"] = doi
+            # Resolve DOI → landing URL
+            landing = connector.resolve_doi_to_landing_url(doi)
+            if landing:
+                candidate["url"] = landing
+
+        # arXiv check
+        elif ident.lower().startswith("arxiv:") or _looks_like_arxiv_id(ident):
+            arxiv_id = ident.replace("arxiv:", "").strip()
+            candidate["doi"] = f"10.48550/arxiv.{arxiv_id}"
+            candidate["url"] = f"https://arxiv.org/abs/{arxiv_id}"
+
+        # URL
+        elif ident.startswith(("http://", "https://")):
+            candidate["url"] = ident
+            # Try to extract DOI from URL
+            doi_from_url = search.is_doi_query(ident)
+            if doi_from_url:
+                candidate["doi"] = search.normalize_doi(doi_from_url)
+
+        else:
+            candidate["status"] = "failed"
+            candidate["error"] = "unrecognized_identifier"
+
+        candidates.append(candidate)
+
+    # Step 2: Local dedup — check DOIs against Zotero
+    for candidate in candidates:
+        if candidate.get("status"):
+            continue  # already failed
+        doi = candidate.get("doi")
+        if doi:
+            existing_key = _lookup_local_item_key_by_doi(doi)
+            if existing_key:
+                candidate["status"] = "duplicate"
+                candidate["item_key"] = existing_key
+
+    # Step 3: Check Connector availability
+    active_candidates = [c for c in candidates if not c.get("status") and c.get("url")]
+    ext_ok = False
+    if active_candidates:
+        ext_ok, ext_error, _ = connector.check_connector_availability(
+            active_candidates, DEFAULT_PORT, BridgeServer,
+        )
+
+    # Step 4: Preflight (if Connector online)
+    if ext_ok and active_candidates:
+        urls = [c["url"] for c in active_candidates if c.get("url")]
+        if urls:
+            remaining, preflight_failures, blocking = connector.run_preflight_check(
+                [{"url": u} for u in urls], DEFAULT_PORT, BridgeServer, logger,
+            )
+            if blocking:
+                return {
+                    "total": len(identifiers),
+                    "results": [
+                        {**c, "status": c.get("status", "blocked"),
+                         "error": "batch_halted_by_preflight"}
+                        for c in candidates
+                    ],
+                    "action_required": [{
+                        "type": "preflight_blocked",
+                        "message": (
+                            "Anti-bot protection detected. "
+                            "Complete browser verification in Chrome, then retry."
+                        ),
+                        "blocked_urls": [f.get("url") for f in preflight_failures],
+                    }],
+                }
+
+    # Step 5: Sequential save + verify
+    results: list[dict] = []
+    action_required: list[dict] = []
+    for i, candidate in enumerate(candidates):
+        # Already resolved (failed, duplicate)
+        if candidate.get("status"):
+            results.append(candidate)
+            continue
+
+        url = candidate.get("url")
+        doi = candidate.get("doi")
+        title = candidate.get("title")
+
+        if ext_ok and url:
+            # Connector route
+            result = connector.save_single_and_verify(
+                url, doi, title,
+                collection_key=collection_key, tags=tags,
+                bridge_url=bridge_url, get_writer=get_writer,
+                writer_lock=_writer_lock, _logger=logger,
+            )
+        elif doi:
+            # API-only route
+            result = connector._doi_api_fallback(
+                doi, title, collection_key=collection_key, tags=tags,
+                get_writer=get_writer, writer_lock=_writer_lock, _logger=logger,
+            )
+        else:
+            result = {
+                "status": "failed", "error": "no_usable_identifier",
+                "item_key": None, "has_pdf": False, "title": title or "",
+                "action_required": None, "warning": None,
+            }
+
+        results.append({**result, "identifier": candidate.get("identifier", "")})
+
+        # Anti-bot: halt remaining
+        if result.get("status") == "blocked":
+            action_required.append({
+                "type": "anti_bot_detected",
+                "message": result.get("action_required", ""),
+                "identifier": candidate.get("identifier", ""),
+            })
+            # Mark remaining as blocked
+            for rem in candidates[i + 1:]:
+                if not rem.get("status"):
+                    results.append({
+                        "identifier": rem.get("identifier", ""),
+                        "status": "blocked",
+                        "error": "batch_halted_by_anti_bot",
+                        "item_key": None, "has_pdf": False,
+                        "title": rem.get("title", ""),
+                        "action_required": None, "warning": None,
+                    })
+            break
+
+    return {
+        "total": len(identifiers),
+        "results": results,
+        "action_required": action_required,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_ARXIV_ID_RE = __import__("re").compile(r"^\d{4}\.\d{4,5}(v\d+)?$")
+
+
+def _looks_like_arxiv_id(s: str) -> bool:
+    return bool(_ARXIV_ID_RE.match(s.strip()))

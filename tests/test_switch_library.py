@@ -214,13 +214,3 @@ class TestResetSingletons:
             state._reset_callbacks.remove(callback)
 
         assert called == [True]
-
-    def test_reset_clears_ingestion_process_caches(self):
-        import zotpilot.state as state
-        import zotpilot.tools.ingestion as ingestion
-
-        ingestion._inbox_collection_key = "INBOX123"
-
-        state._reset_singletons()
-
-        assert ingestion._inbox_collection_key is None

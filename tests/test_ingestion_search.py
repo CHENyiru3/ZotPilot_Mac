@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from zotpilot.openalex_client import WORK_SEARCH_SELECT, OpenAlexClient
-from zotpilot.tools.ingestion_search import (
+from zotpilot.tools.ingestion.search import (
     _is_fuzzy_nl_query,
     fetch_openalex_by_doi,
     format_openalex_paper,
@@ -108,7 +108,7 @@ def test_no_query_omits_search_param(monkeypatch):
 
 def test_doi_query_routes_to_direct_fetch():
     """DOI direct lookup is already supported — verify wrapper works."""
-    from zotpilot.tools.ingestion_search import is_doi_query
+    from zotpilot.tools.ingestion.search import is_doi_query
 
     assert is_doi_query("10.1126/science.aaw4741") == "10.1126/science.aaw4741"
     assert is_doi_query("doi:10.1126/science.aaw4741") == "10.1126/science.aaw4741"
@@ -117,7 +117,7 @@ def test_doi_query_routes_to_direct_fetch():
 
 
 def test_fuzzy_nl_query_emits_missing_priming_warning():
-    """Hybrid enforcement: server warns when SKILL SOP not followed."""
+    """Low-level search warns when a structured query plan is missing."""
     assert _is_fuzzy_nl_query("AI flow field reconstruction") is True
     assert _is_fuzzy_nl_query("10.1126/science.aaw4741") is False
     assert _is_fuzzy_nl_query("author:Raissi | flow") is False
@@ -127,7 +127,7 @@ def test_fuzzy_nl_query_emits_missing_priming_warning():
 
 def test_search_academic_databases_injects_warning_for_fuzzy_nl(monkeypatch):
     """Calling the MCP tool with fuzzy NL query attaches _warnings to first result."""
-    from zotpilot.tools import ingestion_search
+    from zotpilot.tools.ingestion import search as ingestion_search
 
     fake_results = [{"id": "W1", "doi": "10.x/a", "title": "test"}]
     monkeypatch.setattr(
@@ -148,11 +148,12 @@ def test_search_academic_databases_injects_warning_for_fuzzy_nl(monkeypatch):
         logger=MagicMock(),
     )
     assert out[0].get("_warnings"), "expected _warnings on first result for fuzzy NL"
-    assert out[0]["_warnings"][0]["code"] == "missing_priming"
+    assert out[0]["_warnings"][0]["code"] == "needs_structured_query_plan"
+    assert "structured query plan" in out[0]["_warnings"][0]["message"]
 
 
 def test_anchored_query_does_not_inject_warning(monkeypatch):
-    from zotpilot.tools import ingestion_search
+    from zotpilot.tools.ingestion import search as ingestion_search
 
     fake_results = [{"id": "W1", "doi": "10.x/a", "title": "test"}]
     monkeypatch.setattr(

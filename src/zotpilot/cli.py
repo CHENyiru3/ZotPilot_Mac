@@ -831,16 +831,7 @@ def _deployment_status(config: Config | None = None) -> dict:
     try:
         from ._platforms import reconcile_runtime
 
-        desired_keys = {}
-        if config is not None:
-            if config.gemini_api_key:
-                desired_keys["GEMINI_API_KEY"] = config.gemini_api_key
-            if config.dashscope_api_key:
-                desired_keys["DASHSCOPE_API_KEY"] = config.dashscope_api_key
-            if config.zotero_api_key:
-                desired_keys["ZOTERO_API_KEY"] = config.zotero_api_key
-            if config.zotero_user_id:
-                desired_keys["ZOTERO_USER_ID"] = config.zotero_user_id
+        desired_keys = _desired_env_from_config(config)
 
         reconcile = reconcile_runtime(
             gemini_key=desired_keys.get("GEMINI_API_KEY"),
@@ -893,6 +884,21 @@ def _deployment_status(config: Config | None = None) -> dict:
             "restart_required": False,
             "deployment_warning": str(exc),
         }
+
+
+def _desired_env_from_config(config: Config | None) -> dict[str, str]:
+    desired_keys: dict[str, str] = {}
+    if config is None:
+        return desired_keys
+    if config.gemini_api_key:
+        desired_keys["GEMINI_API_KEY"] = config.gemini_api_key
+    if config.dashscope_api_key:
+        desired_keys["DASHSCOPE_API_KEY"] = config.dashscope_api_key
+    if config.zotero_api_key:
+        desired_keys["ZOTERO_API_KEY"] = config.zotero_api_key
+    if config.zotero_user_id:
+        desired_keys["ZOTERO_USER_ID"] = config.zotero_user_id
+    return desired_keys
 
 
 def _is_windows_lock_error(stderr: str) -> bool:
@@ -1016,6 +1022,8 @@ def cmd_update(args):
         )
         if imported:
             print(f"Imported existing runtime config: {', '.join(sorted(imported))}")
+        runtime_config = Config.load(config_path)
+        desired_keys = _desired_env_from_config(runtime_config)
 
         if installer == "editable":
             print("Dev install detected — code update remains manual, but runtime will be synchronized")
@@ -1023,7 +1031,14 @@ def cmd_update(args):
 
         if args.dry_run:
             try:
-                reconcile = reconcile_runtime(platforms=None, apply=False)
+                reconcile = reconcile_runtime(
+                    platforms=None,
+                    gemini_key=desired_keys.get("GEMINI_API_KEY"),
+                    dashscope_key=desired_keys.get("DASHSCOPE_API_KEY"),
+                    zotero_api_key=desired_keys.get("ZOTERO_API_KEY"),
+                    zotero_user_id=desired_keys.get("ZOTERO_USER_ID"),
+                    apply=False,
+                )
                 print(f"[dry-run] Drift: {reconcile.changes.drift_state}")
                 for plat, reasons in sorted(reconcile.changes.reasons.items()):
                     print(f"[dry-run] {plat}: {', '.join(reasons)}")
@@ -1032,7 +1047,14 @@ def cmd_update(args):
                 errors.append("runtime reconcile failed")
         else:
             try:
-                reconcile = reconcile_runtime(platforms=None, apply=True)
+                reconcile = reconcile_runtime(
+                    platforms=None,
+                    gemini_key=desired_keys.get("GEMINI_API_KEY"),
+                    dashscope_key=desired_keys.get("DASHSCOPE_API_KEY"),
+                    zotero_api_key=desired_keys.get("ZOTERO_API_KEY"),
+                    zotero_user_id=desired_keys.get("ZOTERO_USER_ID"),
+                    apply=True,
+                )
                 if reconcile.applied and reconcile.applied.restart_required:
                     print(
                         "Runtime synchronized for: "
@@ -1066,10 +1088,16 @@ def cmd_sync(args):
     )
     if imported:
         print(f"Imported existing runtime config: {', '.join(sorted(imported))}")
+    runtime_config = Config.load(config_path)
+    desired_keys = _desired_env_from_config(runtime_config)
 
     try:
         reconcile = reconcile_runtime(
             platforms=None,
+            gemini_key=desired_keys.get("GEMINI_API_KEY"),
+            dashscope_key=desired_keys.get("DASHSCOPE_API_KEY"),
+            zotero_api_key=desired_keys.get("ZOTERO_API_KEY"),
+            zotero_user_id=desired_keys.get("ZOTERO_USER_ID"),
             apply=not getattr(args, "dry_run", False),
         )
         if getattr(args, "dry_run", False):

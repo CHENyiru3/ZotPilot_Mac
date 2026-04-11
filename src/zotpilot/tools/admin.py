@@ -16,7 +16,6 @@ from .profiles import tool_tags
 _batch_store = BatchStore()
 
 
-@mcp.tool(tags=tool_tags("admin", "admin"))
 def switch_library(
     library_id: Annotated[str | None, Field(description="Library/group ID. None to list available.")] = None,
     library_type: Annotated[Literal["user", "group", "default"], Field(description="'default' resets to user library")] = "group",  # noqa: E501

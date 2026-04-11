@@ -6,14 +6,12 @@ import os
 
 from ..state import mcp
 
-DEFAULT_TOOL_PROFILE = "extended"
-VALID_TOOL_PROFILES = {"core", "extended", "all", "research"}
+DEFAULT_TOOL_PROFILE = "core"
+VALID_TOOL_PROFILES = {"core", "full"}
 
 PROFILE_VISIBLE_TAGS: dict[str, set[str] | None] = {
-    "core": {"core"},
-    "extended": {"core", "extended", "admin"},
-    "research": {"core", "extended", "admin", "research"},
-    "all": None,
+    "core": None,
+    "full": None,
 }
 
 
@@ -50,11 +48,14 @@ def parse_disabled_tools(raw: str | None = None) -> set[str]:
 def apply_tool_profile() -> str:
     """Apply runtime tool visibility based on the configured profile."""
     profile = get_tool_profile_name()
-    visible_tags = PROFILE_VISIBLE_TAGS[profile]
+    visible_tags = PROFILE_VISIBLE_TAGS.get(profile)
     if visible_tags is not None:
         mcp.enable(tags=visible_tags, components={"tool"}, only=True)
 
     disabled_tools = parse_disabled_tools()
+    if profile == "core":
+        disabled_tools.add("profile_library")
+
     if disabled_tools:
         mcp.disable(names=disabled_tools, components={"tool"})
 

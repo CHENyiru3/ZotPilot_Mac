@@ -211,6 +211,13 @@ def _handle_register(argv: list[str]) -> int:
     """Ensure CLI exists, then delegate to `zotpilot register`."""
     uv = _ensure_uv()
     pip_cmd = _ensure_zotpilot(uv)
+    if pip_cmd is None:
+        subprocess.run(
+            _uv_args(uv) + ["tool", "install", "--reinstall", str(SKILL_DIR)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
     if pip_cmd is not None:
         return subprocess.run(pip_cmd + ["register", *argv]).returncode
     return subprocess.run(_uv_args(uv) + ["tool", "run", "zotpilot", "register", *argv]).returncode

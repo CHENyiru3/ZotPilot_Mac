@@ -3,61 +3,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from time import time
 from typing import Any, Literal
 from uuid import uuid4
 
-Phase = Literal[
-    "candidate",
-    "candidates_confirmed",
-    "preflighting",
-    "preflight_blocked",
-    "approved",
-    "ingesting",
-    "post_ingest_verified",
-    "post_ingest_approved",
-    "post_processing",
-    "AwaitingTaxonomyAuthorization",
-    "taxonomy_authorized",
-    "post_ingest_skipped",
-    "post_process_verified",
-    "done",
-    "aborted",
-]
 
-TERMINAL_PHASES: set[Phase] = {"done", "aborted"}
-ACTIVE_PHASES: set[Phase] = {
-    "candidate",
-    "candidates_confirmed",
-    "preflighting",
-    "preflight_blocked",
-    "approved",
-    "ingesting",
-    "post_ingest_verified",
-    "post_ingest_approved",
-    "post_processing",
-    "AwaitingTaxonomyAuthorization",
-    "taxonomy_authorized",
-    "post_ingest_skipped",
-    "post_process_verified",
-}
+class Phase(str, Enum):
+    SEARCH = "search"        # 候选搜索完成
+    CONFIRMED = "confirmed"  # 用户已确认选择
+    INGESTING = "ingesting"  # 入库进行中
+    DONE = "done"            # 完成（成功或失败）
+
+
+TERMINAL_PHASES: set[str] = {Phase.DONE}
+ACTIVE_PHASES: set[str] = {Phase.SEARCH, Phase.CONFIRMED, Phase.INGESTING}
 
 _ALLOWED_TRANSITIONS: dict[Phase, set[Phase]] = {
-    "candidate": {"candidates_confirmed", "aborted"},
-    "candidates_confirmed": {"preflighting"},
-    "preflighting": {"preflight_blocked", "approved", "aborted"},
-    "preflight_blocked": {"preflighting"},
-    "approved": {"ingesting", "aborted"},
-    "ingesting": {"post_ingest_verified", "aborted"},
-    "post_ingest_verified": {"post_ingest_approved", "aborted"},
-    "post_ingest_approved": {"post_processing"},
-    "post_processing": {"AwaitingTaxonomyAuthorization", "post_process_verified", "aborted"},
-    "AwaitingTaxonomyAuthorization": {"taxonomy_authorized", "post_ingest_skipped", "aborted"},
-    "taxonomy_authorized": {"post_processing"},
-    "post_ingest_skipped": {"post_process_verified"},
-    "post_process_verified": {"done", "aborted"},
-    "done": set(),
-    "aborted": set(),
+    Phase.SEARCH: {Phase.CONFIRMED, Phase.DONE},
+    Phase.CONFIRMED: {Phase.INGESTING, Phase.DONE},
+    Phase.INGESTING: {Phase.DONE},
+    Phase.DONE: set(),
 }
 
 REINDEX_ELIGIBLE_REASONS: frozenset[str] = frozenset({
@@ -284,7 +250,7 @@ class Batch:
     def assert_phase(self, expected: Phase | set[Phase]) -> None:
         if isinstance(expected, set):
             if self.phase not in expected:
-                allowed = ", ".join(sorted(expected))
+                allowed = ", ".join(sorted(str(p) for p in expected))
                 raise InvalidPhaseError(f"Expected phase in {{{allowed}}}, got {self.phase!r}")
             return
         if self.phase != expected:
@@ -317,43 +283,6 @@ class Batch:
     def with_engine_batch_id(self, engine_batch_id: str) -> "Batch":
         return self.mark_engine_batch(engine_batch_id)
 
-    def mark_approved(self) -> "Batch":
-        if self.preflight_result is None or not self.preflight_result.all_clear:
-            raise InvalidPhaseError("Batch cannot be approved without a successful preflight result")
-        return self.transition_to("approved")
-
-    def with_authorizations(
-        self,
-        *,
-        new_tags: list[str] | None = None,
-        new_collections: list[str] | None = None,
-    ) -> "Batch":
-        return replace(
-            self,
-            authorized_new_tags=self.authorized_new_tags | frozenset(new_tags or []),
-            authorized_new_collections=self.authorized_new_collections | frozenset(new_collections or []),
-            pending_taxonomy_tags=(),
-            pending_taxonomy_collections=(),
-        )
-
-    def with_pending_taxonomy(
-        self,
-        *,
-        tags: list[str] | tuple[str, ...] = (),
-        collections: list[str] | tuple[str, ...] = (),
-    ) -> "Batch":
-        return replace(
-            self,
-            pending_taxonomy_tags=tuple(tags),
-            pending_taxonomy_collections=tuple(collections),
-        )
-
-    def has_authorized_tags(self, proposed: list[str]) -> bool:
-        return all(tag in self.authorized_new_tags for tag in proposed)
-
-    def has_authorized_collections(self, proposed: list[str]) -> bool:
-        return all(name in self.authorized_new_collections for name in proposed)
-
     def find_item(self, key: str) -> Item | None:
         for item in self.items:
             if item.doc_id == key or item.zotero_item_key == key or item.identifier == key:
@@ -367,85 +296,12 @@ class Batch:
             if item.status == "degraded" and item.is_reindex_eligible()
         ]
 
-    def next_action_payload(self) -> dict[str, Any] | None:
-        if self.phase in TERMINAL_PHASES:
-            return None
-        if self.phase == "candidates_confirmed":
-            return {
-                "tool": "get_batch_status",
-                "args_hint": {"batch_id": self.batch_id},
-                "why": "Candidates confirmed; preflight is running. Poll for updated status.",
-                "blocks_on": "worker",
-            }
-        if self.phase == "candidate":
-            return {
-                "tool": "confirm_candidates",
-                "args_hint": {"batch_id": self.batch_id, "selected_ids": "<user choice>"},
-                "why": "Review and confirm which candidates to ingest.",
-                "blocks_on": "user",
-            }
-        if self.phase == "preflight_blocked":
-            urls = [decision.payload.get("url") for decision in self.blocking_decisions if decision.payload.get("url")]
-            return {
-                "tool": "resolve_preflight",
-                "args_hint": {"batch_id": self.batch_id, "urls": urls},
-                "why": "Resolve browser verification and rerun preflight.",
-                "blocks_on": "user",
-            }
-        if self.phase == "preflighting":
-            return {
-                "tool": "approve_ingest",
-                "args_hint": {"batch_id": self.batch_id},
-                "why": "Preflight is clear. User approval is required before ingest starts.",
-                "blocks_on": "user",
-            }
-        if self.phase in {
-            "approved",
-            "ingesting",
-            "post_processing",
-            "taxonomy_authorized",
-            "post_ingest_skipped",
-            "post_ingest_approved",
-        }:
-            return {
-                "tool": "get_batch_status",
-                "args_hint": {"batch_id": self.batch_id},
-                "why": "Worker is running. Poll for updated status.",
-                "blocks_on": "worker",
-            }
-        if self.phase == "post_ingest_verified":
-            return {
-                "tool": "approve_post_ingest",
-                "args_hint": {"batch_id": self.batch_id},
-                "why": "Post-ingest verification is ready for review.",
-                "blocks_on": "user",
-            }
-        if self.phase == "AwaitingTaxonomyAuthorization":
-            return {
-                "tool": "authorize_taxonomy_changes",
-                "args_hint": {
-                    "batch_id": self.batch_id,
-                    "authorized_new_tags": list(self.pending_taxonomy_tags),
-                    "authorized_new_collections": list(self.pending_taxonomy_collections),
-                },
-                "why": "New taxonomy proposals require explicit user authorization.",
-                "blocks_on": "user",
-            }
-        if self.phase == "post_process_verified":
-            return {
-                "tool": "approve_post_process",
-                "args_hint": {"batch_id": self.batch_id},
-                "why": "Final verification is ready for acceptance.",
-                "blocks_on": "user",
-            }
-        return None
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "batch_id": self.batch_id,
             "library_id": self.library_id,
             "query": self.query,
-            "phase": self.phase,
+            "phase": self.phase.value if isinstance(self.phase, Phase) else self.phase,
             "items": [item.to_dict() for item in self.items],
             "preflight_result": self.preflight_result.to_dict() if self.preflight_result else None,
             "authorized_new_tags": sorted(self.authorized_new_tags),
@@ -463,11 +319,35 @@ class Batch:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Batch":
         preflight_raw = data.get("preflight_result")
+        # Handle legacy phase string values
+        raw_phase = str(data["phase"])
+        try:
+            phase = Phase(raw_phase)
+        except ValueError:
+            # Map legacy phases to new simplified phases
+            _LEGACY_PHASE_MAP = {
+                "candidate": Phase.SEARCH,
+                "candidates_confirmed": Phase.CONFIRMED,
+                "preflighting": Phase.CONFIRMED,
+                "preflight_blocked": Phase.CONFIRMED,
+                "approved": Phase.CONFIRMED,
+                "ingesting": Phase.INGESTING,
+                "post_ingest_verified": Phase.DONE,
+                "post_ingest_approved": Phase.DONE,
+                "post_processing": Phase.DONE,
+                "AwaitingTaxonomyAuthorization": Phase.DONE,
+                "taxonomy_authorized": Phase.DONE,
+                "post_ingest_skipped": Phase.DONE,
+                "post_process_verified": Phase.DONE,
+                "done": Phase.DONE,
+                "aborted": Phase.DONE,
+            }
+            phase = _LEGACY_PHASE_MAP.get(raw_phase, Phase.DONE)
         return cls(
             batch_id=str(data["batch_id"]),
             library_id=str(data["library_id"]),
             query=str(data.get("query", "")),
-            phase=str(data["phase"]),  # type: ignore[arg-type]
+            phase=phase,
             items=tuple(Item.from_dict(item) for item in data.get("items") or ()),
             preflight_result=PreflightResult.from_dict(preflight_raw) if preflight_raw else None,
             authorized_new_tags=frozenset(data.get("authorized_new_tags") or ()),

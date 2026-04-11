@@ -9,16 +9,8 @@ import pytest
 
 WORKFLOW_DIR = Path(__file__).parent.parent / "src" / "zotpilot" / "workflow"
 TOOLS_DIR = Path(__file__).parent.parent / "src" / "zotpilot" / "tools"
-RESEARCH_WORKFLOW = TOOLS_DIR / "research_workflow.py"
 
 _FORBIDDEN_FROM_WORKFLOW = ("zotpilot.tools", "zotpilot.skills")
-_ALLOWED_IN_RESEARCH_WORKFLOW = (
-    "zotpilot.workflow",
-    "zotpilot.tools",
-    "zotpilot.state",
-    "fastmcp",
-    "pydantic",
-)
 
 
 def _resolve_relative(path: Path, level: int, module: str | None) -> str:
@@ -80,34 +72,4 @@ def test_workflow_file_does_not_import_tools_or_skills(py_file: Path) -> None:
     ]
     assert violations == [], (
         f"{py_file.name} has forbidden imports into tools/skills layer: {violations}"
-    )
-
-
-def test_research_workflow_only_imports_allowed_modules() -> None:
-    """research_workflow.py may only import from workflow/*, tools peers, fastmcp, stdlib."""
-    assert RESEARCH_WORKFLOW.exists(), f"Missing: {RESEARCH_WORKFLOW}"
-    imports = _collect_imports(RESEARCH_WORKFLOW)
-
-    stdlib_prefixes = (
-        "os", "sys", "re", "json", "time", "logging", "typing", "dataclasses",
-        "pathlib", "threading", "collections", "functools", "itertools",
-        "contextlib", "abc", "enum", "io", "math", "copy", "uuid",
-        "__future__", "concurrent", "asyncio",
-    )
-
-    violations = []
-    for m in imports:
-        # stdlib
-        if any(m == p or m.startswith(p + ".") for p in stdlib_prefixes):
-            continue
-        # allowed zotpilot namespaces
-        if any(m == p or m.startswith(p + ".") for p in _ALLOWED_IN_RESEARCH_WORKFLOW):
-            continue
-        # third-party that's expected
-        if m in ("pydantic",):
-            continue
-        violations.append(m)
-
-    assert violations == [], (
-        f"research_workflow.py has unexpected imports: {violations}"
     )

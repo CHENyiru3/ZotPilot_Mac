@@ -5,8 +5,8 @@ from . import (  # noqa: F401
     citations,
     context,
     indexing,
+    ingestion,
     library,
-    research_workflow,
     search,
     write_ops,
 )

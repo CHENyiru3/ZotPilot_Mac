@@ -134,7 +134,6 @@ def _remove_from_collection_impl(item_key: str, collection_key: str) -> dict:
 
 
 
-@mcp.tool(tags=tool_tags("extended", "write"))
 def create_collection(
     name: Annotated[str, Field(description="Display name for the collection")],
     parent_key: Annotated[str | None, Field(description="Parent collection key for nesting, None for top-level")] = None,  # noqa: E501
@@ -332,16 +331,16 @@ def batch_collections(
 @mcp.tool(tags=tool_tags("extended", "write"))
 def manage_collections(
     action: Annotated[
-        Literal["add", "remove"],
-        Field(description="'add' puts items into a collection; 'remove' removes them from a collection"),
+        Literal["add", "remove", "create"],
+        Field(description="'add' puts items into a collection; 'remove' removes them from a collection; 'create' creates a new collection"),
     ],
     item_keys: Annotated[
-        str | list[str],
-        Field(description="Single Zotero item key or list of item keys (max 100 for batch)"),
-    ],
+        str | list[str] | None,
+        Field(description="Single Zotero item key or list of item keys (max 100 for batch). Optional for action='create'."),
+    ] = None,
     collection_key: Annotated[
         str | None,
-        Field(description="Target collection key. Required for both add and remove actions."),
+        Field(description="Target collection key for add/remove. For create, acts as parent_key (optional)."),
     ] = None,
     auto_cleanup_inbox: Annotated[
         bool,
@@ -352,17 +351,30 @@ def manage_collections(
             )
         ),
     ] = True,
+    name: Annotated[
+        str | None, 
+        Field(description="Display name for the new collection (required only if action='create')")
+    ] = None,
 ) -> dict:
-    """Manage collection membership for one or more Zotero items.
+    """Manage collection membership for one or more Zotero items, or create new collections.
 
     Use action='add' or action='remove' with a target collection key.
+    Use action='create' with 'name' (and optional collection_key as parent) to create a new folder.
     Single-item add preserves INBOX auto-cleanup; list input routes to batch processing.
     """
+    if action == "create":
+        if not name:
+            raise ToolError("manage_collections requires 'name' when action='create'.")
+        return create_collection(name, collection_key)
+
     if not collection_key:
         raise ToolError(
-            "manage_collections requires collection_key. "
+            "manage_collections requires collection_key for add/remove. "
             "Call browse_library(view='collections') or list_collections() first to choose a target collection."
         )
+    if not item_keys:
+        raise ToolError("manage_collections requires item_keys for add/remove.")
+        
     keys = _normalize_item_keys(item_keys)
     if len(keys) == 1:
         key = keys[0]

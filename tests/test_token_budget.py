@@ -449,35 +449,3 @@ class TestLibraryIdentifierContracts:
         assert "authors" not in minimal["papers"][0]
         assert "authors" in full["papers"][0]
         assert "citation_key" in full["papers"][0]
-
-class TestIngestionPreflightContracts:
-    def test_preflight_blocked_returns_failed_results(self):
-        """Preflight blocked URLs appear as failed in simplified result format."""
-        from zotpilot.tools.ingestion import ingest_papers
-
-        report = {
-            "checked": 2,
-            "accessible": [{"url": "https://arxiv.org/abs/2401.0001"}],
-            "blocked": [{"url": "https://arxiv.org/abs/2401.0002", "error": "anti-bot"}],
-            "skipped": [],
-            "errors": [],
-            "all_clear": False,
-        }
-
-        mock_config = type("C", (), {"preflight_enabled": True, "zotero_api_key": None})()
-        with (
-            patch("zotpilot.tools.ingestion._get_config", return_value=mock_config),
-            patch("zotpilot.tools.ingestion.BridgeServer.is_running", return_value=True),
-            patch("zotpilot.tools.ingestion.ingestion_bridge.get_extension_status",
-                  return_value={"extension_connected": True}),
-            patch("zotpilot.tools.ingestion.ingestion_bridge.preflight_urls", return_value=report),
-            patch("zotpilot.tools.ingestion._lookup_local_item_key_by_doi", return_value=None),
-        ):
-            result = ingest_papers([
-                {"arxiv_id": "2401.0001"},
-                {"arxiv_id": "2401.0002"},
-            ])
-
-        assert result["failed"] >= 1
-        failed_results = [r for r in result["results"] if r["status"] == "failed"]
-        assert any("anti-bot" in r.get("error", "") for r in failed_results)
