@@ -640,36 +640,13 @@ def resolve_dois_concurrent(dois: list[str]) -> dict[str, str | None]:
     return results
 
 
-def route_via_local_api(item_key: str, collection_key: str) -> bool:
-    """Route an item into a collection via Zotero Desktop local API."""
-    try:
-        req = urllib.request.Request(
-            f"{_ZOTERO_LOCAL_API_ITEMS_URL}/{item_key}",
-            headers={"Accept": "application/json", "Zotero-Allowed-Request": "1"},
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            item = json.loads(resp.read())
-        version = item.get("version", 0)
-        data = item.get("data", item)
-        collections = set(data.get("collections", []))
-        collections.add(collection_key)
-        patch_req = urllib.request.Request(
-            f"{_ZOTERO_LOCAL_API_ITEMS_URL}/{item_key}",
-            data=json.dumps({"collections": sorted(collections)}).encode(),
-            headers={
-                "Content-Type": "application/json",
-                "Zotero-Allowed-Request": "1",
-                "If-Unmodified-Since-Version": str(version),
-            },
-            method="PATCH",
-        )
-        with urllib.request.urlopen(patch_req, timeout=5):
-            return True
-    except (urllib.error.URLError, ConnectionRefusedError, OSError):
-        return False
-    except Exception as exc:
-        logger.warning("Local API routing failed for %s: %s", item_key, exc)
-        return False
+# NOTE: route_via_local_api() was removed 2026-04-11.
+# It attempted to PATCH /api/users/0/items/<key> via the Zotero Desktop local
+# HTTP API to add items to collections post-save. That endpoint returns
+# 501 Not Implemented (verified against Zotero 7.x) — the local API is
+# effectively read-only for items. All collection / tag routing now goes
+# through apply_collection_tag_routing() which uses pyzotero Web API
+# (subject to Desktop sync lag, but actually works).
 
 
 def discover_item_via_local_api(url: str, title: str | None) -> str | None:
@@ -1097,6 +1074,28 @@ def save_single_and_verify(
     # Step 2: Poll result
     save_result = poll_single_save_result(bridge_url, request_id, timeout_s=60.0)
 
+    # Step 2.5: Timeout recovery.
+    # Slow publishers (AIP, Cloudflare-protected sites, JS-heavy pages) can
+    # push the Connector save past our 60s poll window. The browser translator
+    # often completes the save anyway — we just miss the bridge confirmation.
+    # Falling straight to _doi_api_fallback here would lose the Connector's
+    # browser-session PDF and degrade to a metadata-only record. Instead,
+    # try to discover the newly-saved item by URL+title and upgrade the
+    # save_result so the validation path can take it from here.
+    if (not save_result.get("success")
+            and save_result.get("status") == "timeout_likely_saved"):
+        _logger.info("Connector poll timed out for %s — attempting discovery", url)
+        discovered_key = discover_item_via_local_api(url, title)
+        if not discovered_key:
+            time.sleep(5.0)  # give Zotero a few more seconds to finalize
+            discovered_key = discover_item_via_local_api(url, title)
+        if discovered_key:
+            _logger.info(
+                "Recovered timed-out Connector save: item_key=%s for %s",
+                discovered_key, url,
+            )
+            save_result = {"success": True, "item_key": discovered_key}
+
     if not save_result.get("success"):
         error_text = save_result.get("error", "unknown")
         result_title = save_result.get("title", "")
@@ -1163,13 +1162,60 @@ def save_single_and_verify(
         except Exception:
             pass
 
-    if collection_key and not save_result.get("routing_applied"):
+    # Collection/tag routing via pyzotero Web API.
+    # NOTE: Zotero Desktop local API (port 23119) rejects PATCH with
+    # 501 Not Implemented, so we cannot route locally. pyzotero Web API
+    # works reliably (subject to ~10-30s Desktop sync lag — routing is
+    # visible in Zotero UI after the sync completes).
+    if (collection_key or tags) and not save_result.get("routing_applied"):
+        from ...state import _get_config
         try:
-            route_via_local_api(item_key, collection_key)
+            routing_error = apply_collection_tag_routing(
+                item_key, collection_key, tags,
+                get_writer(), _get_config,
+            )
+            if routing_error:
+                _logger.warning(
+                    "Collection/tag routing for %s: %s", item_key, routing_error,
+                )
         except Exception as exc:
-            _logger.debug("Local API routing failed for %s: %s", item_key, exc)
+            _logger.warning("Routing failed for %s: %s", item_key, exc)
 
     pdf_status = check_pdf_status(item_key, get_writer=get_writer, _logger=_logger)
+
+    # OA PDF fallback: when the Connector's translator didn't attach a PDF
+    # (paywalled with no session cookies, translator bug, JS-rendered page,
+    # preflight-accessible but PDF URL hidden, etc.), try the Unpaywall /
+    # arXiv fallback used by the API path. We resolve the DOI through
+    # IdentifierResolver first so we get arxiv_id + oa_url hints — passing
+    # only the DOI to try_attach_oa_pdf misses papers whose published
+    # version has no Unpaywall record but whose arXiv preprint is free
+    # (e.g. IJCV-published CLIP-Adapter resolves only via its arXiv id).
+    if pdf_status != "attached" and doi:
+        try:
+            from ...state import _get_resolver
+            resolver = _get_resolver()
+            metadata = resolver.resolve(doi)
+            with writer_lock:
+                attach_status = get_writer().try_attach_oa_pdf(
+                    item_key,
+                    doi=metadata.doi or doi,
+                    oa_url=metadata.oa_url,
+                    arxiv_id=metadata.arxiv_id,
+                )
+            if attach_status == "attached":
+                _logger.info(
+                    "OA PDF fallback attached to %s (arxiv=%s oa_url=%s)",
+                    item_key, metadata.arxiv_id, metadata.oa_url,
+                )
+                pdf_status = "attached"
+            else:
+                _logger.debug(
+                    "OA PDF fallback for %s: %s (arxiv=%s oa_url=%s)",
+                    item_key, attach_status, metadata.arxiv_id, metadata.oa_url,
+                )
+        except Exception as exc:
+            _logger.debug("OA PDF fallback failed for %s: %s", item_key, exc)
 
     status = "saved_with_pdf" if pdf_status == "attached" else "saved_metadata_only"
     warning = None if pdf_status == "attached" else "PDF not attached (paywall or download pending)"
