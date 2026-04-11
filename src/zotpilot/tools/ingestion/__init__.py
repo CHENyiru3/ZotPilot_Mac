@@ -1,7 +1,8 @@
-"""Ingestion MCP tools: search_academic_databases + ingest_by_identifiers (v0.5.0)."""
+"""Ingestion MCP tools: search_academic_databases + ingest_by_identifiers."""
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from typing import Annotated, Literal
 
@@ -19,6 +20,7 @@ from ...state import (
 )
 from ..profiles import tool_tags
 from . import connector, search
+from .models import IngestCandidate
 
 logger = logging.getLogger(__name__)
 _writer_lock = threading.Lock()
@@ -89,10 +91,154 @@ def _lookup_local_item_key_by_doi(doi: str | None) -> str | None:
     if not doi:
         return None
     try:
-        _get_zotero()
-        return _get_zotero().get_item_key_by_doi(doi)
+        zotero = _get_zotero()
+        return zotero.get_item_key_by_doi(doi)
     except Exception:
         return None
+
+
+def _lookup_local_item_key_by_arxiv_extra(arxiv_id: str | None) -> str | None:
+    """Check whether an arXiv ID appears in a local Zotero item's extra field."""
+    if not arxiv_id:
+        return None
+    try:
+        zotero = _get_zotero()
+        return zotero.get_item_key_by_arxiv_id(arxiv_id)
+    except Exception:
+        return None
+
+
+def _normalize_arxiv_id(arxiv_id: str | None) -> str | None:
+    """Normalize an arXiv ID by trimming prefixes and version suffixes."""
+    if not arxiv_id:
+        return None
+    cleaned = arxiv_id.strip()
+    if cleaned.lower().startswith("arxiv:"):
+        cleaned = cleaned.split(":", 1)[1].strip()
+    cleaned = re.sub(r"v\d+$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned or None
+
+
+def _arxiv_doi(arxiv_id: str) -> str:
+    return f"10.48550/arxiv.{arxiv_id}"
+
+
+def _doi_to_landing_url(doi: str) -> str:
+    return f"https://doi.org/{doi}"
+
+
+def _candidates_to_internal(input_candidates: list[IngestCandidate]) -> list[dict]:
+    """Convert structured candidates into the internal ingestion representation."""
+    internal: list[dict] = []
+    for index, candidate in enumerate(input_candidates):
+        source_doi = search.normalize_doi(candidate.doi)
+        arxiv_id = _normalize_arxiv_id(candidate.arxiv_id)
+        entry: dict = {
+            "identifier": source_doi or arxiv_id or candidate.landing_page_url or "",
+            "title": candidate.title,
+            "arxiv_id": arxiv_id,
+            "source_doi": source_doi,
+            "_index": index,
+            "url": None,
+            "doi": None,
+        }
+
+        doi_is_arxiv = bool(source_doi and source_doi.startswith("10.48550/arxiv."))
+        if candidate.is_oa_published and source_doi and not doi_is_arxiv:
+            entry["doi"] = source_doi
+            entry["url"] = _doi_to_landing_url(source_doi)
+        elif arxiv_id:
+            entry["doi"] = _arxiv_doi(arxiv_id)
+            entry["url"] = f"https://arxiv.org/abs/{arxiv_id}"
+        elif source_doi:
+            entry["doi"] = source_doi
+            entry["url"] = _doi_to_landing_url(source_doi)
+        elif candidate.landing_page_url:
+            entry["url"] = candidate.landing_page_url
+        else:
+            entry["status"] = "failed"
+            entry["error"] = "no_usable_identifier"
+
+        internal.append(entry)
+    return internal
+
+
+def _identifiers_to_internal(identifiers: list[str]) -> list[dict]:
+    """Convert deprecated identifier strings into the internal ingestion representation."""
+    internal: list[dict] = []
+    for index, raw_identifier in enumerate(identifiers):
+        identifier = raw_identifier.strip()
+        arxiv_id: str | None = None
+        source_doi: str | None = None
+        candidate: dict = {
+            "identifier": identifier,
+            "title": None,
+            "url": None,
+            "doi": None,
+            "arxiv_id": None,
+            "source_doi": None,
+            "_index": index,
+        }
+
+        source_doi = search.normalize_doi(identifier)
+        if source_doi:
+            candidate["source_doi"] = source_doi
+            candidate["doi"] = source_doi
+            candidate["url"] = connector.resolve_doi_to_landing_url(source_doi)
+            if source_doi.startswith("10.48550/arxiv."):
+                arxiv_id = _normalize_arxiv_id(source_doi[len("10.48550/arxiv."):])
+                candidate["arxiv_id"] = arxiv_id
+        elif identifier.lower().startswith("arxiv:") or _looks_like_arxiv_id(identifier):
+            arxiv_id = _normalize_arxiv_id(identifier)
+            candidate["arxiv_id"] = arxiv_id
+            if arxiv_id:
+                candidate["source_doi"] = _arxiv_doi(arxiv_id)
+                candidate["doi"] = _arxiv_doi(arxiv_id)
+                candidate["url"] = f"https://arxiv.org/abs/{arxiv_id}"
+        elif identifier.startswith(("http://", "https://")):
+            candidate["url"] = identifier
+            doi_from_url = search.is_doi_query(identifier)
+            if doi_from_url:
+                source_doi = search.normalize_doi(doi_from_url)
+                candidate["source_doi"] = source_doi
+                candidate["doi"] = source_doi
+                if source_doi and source_doi.startswith("10.48550/arxiv."):
+                    candidate["arxiv_id"] = _normalize_arxiv_id(
+                        source_doi[len("10.48550/arxiv."):]
+                    )
+        else:
+            candidate["status"] = "failed"
+            candidate["error"] = "unrecognized_identifier"
+
+        internal.append(candidate)
+    return internal
+
+
+def _result_from_candidate(
+    candidate: dict,
+    *,
+    status: str | None = None,
+    error: str | None = None,
+    item_key: str | None = None,
+    has_pdf: bool = False,
+    title: str | None = None,
+    action_required=None,
+    warning: str | None = None,
+    **extra,
+) -> dict:
+    """Format a public result row from an internal candidate + save result fields."""
+    return {
+        "identifier": candidate.get("identifier", ""),
+        "candidate_index": candidate.get("_index"),
+        "status": status or candidate.get("status", "failed"),
+        "item_key": item_key if item_key is not None else candidate.get("item_key"),
+        "has_pdf": has_pdf,
+        "title": title if title is not None else candidate.get("title", "") or "",
+        "error": error if error is not None else candidate.get("error"),
+        "action_required": action_required,
+        "warning": warning,
+        **extra,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +320,8 @@ def search_academic_databases(
         institutions=institutions,
         venue=venue,
         cursor=cursor,
+        lookup_by_doi=_lookup_local_item_key_by_doi,
+        lookup_by_arxiv_extra=_lookup_local_item_key_by_arxiv_extra,
     )
 
 
@@ -183,13 +331,22 @@ def search_academic_databases(
 
 @mcp.tool(tags=tool_tags("core", "ingestion"))
 def ingest_by_identifiers(
-    identifiers: Annotated[
-        list[str],
+    candidates: Annotated[
+        list[IngestCandidate] | None,
         Field(description=(
-            "DOI, arXiv ID, or URL list. "
-            "Examples: ['10.1234/abc', '2301.00001', 'https://...']"
+            "**Preferred path.** Structured candidates from "
+            "search_academic_databases. Pass each selected search result dict "
+            "directly. Extra fields are ignored. Do not reconstruct identifier "
+            "strings from memory."
         )),
-    ],
+    ] = None,
+    identifiers: Annotated[
+        list[str] | None,
+        Field(description=(
+            "_Deprecated._ Direct DOI/arXiv/URL string list kept only for "
+            "backward compatibility. Use candidates= instead."
+        )),
+    ] = None,
 ) -> dict:
     """Ingest papers into Zotero's INBOX collection. Per-paper status, synchronous.
 
@@ -206,9 +363,31 @@ def ingest_by_identifiers(
     Statuses: saved_with_pdf, saved_metadata_only, blocked, duplicate, failed.
     When action_required is non-empty, surface to user and wait.
     """
+    # Empty lists count as "absent": calling ingest with zero candidates is
+    # almost always an upstream filter bug (e.g. `local_duplicate` wiped the
+    # selection). Fail loudly instead of silently returning total=0.
+    has_candidates = bool(candidates)
+    has_identifiers = bool(identifiers)
+    if not has_candidates and not has_identifiers:
+        raise ToolError(
+            "ingest_by_identifiers requires at least one candidate. Pass "
+            "`candidates` (preferred — structured dicts from "
+            "search_academic_databases results) or `identifiers` "
+            "(deprecated — raw DOI/URL strings). Empty or missing inputs "
+            "are not a valid call — this usually means an upstream filter "
+            "removed every selection. Pass the search result object "
+            "directly without modification."
+        )
+    if has_candidates and has_identifiers:
+        raise ToolError(
+            "ingest_by_identifiers accepts only one of `candidates` or "
+            "`identifiers`, not both. Prefer `candidates`."
+        )
+
     bridge_url = f"http://127.0.0.1:{DEFAULT_PORT}"
     get_writer = _get_writer
     _get_zotero()
+    total_inputs = len(candidates) if has_candidates else len(identifiers or [])
 
     # Destination is hardcoded to INBOX. _ensure_inbox_collection auto-creates
     # it on first use; returns None only when ZOTERO_API_KEY is missing or the
@@ -221,57 +400,53 @@ def ingest_by_identifiers(
             "items into the INBOX collection. Configure credentials and retry."
         )
 
-    # Step 1: Normalize identifiers → candidates
-    candidates: list[dict] = []
-    for ident in identifiers:
-        ident = ident.strip()
-        candidate: dict = {"identifier": ident, "url": None, "doi": None, "title": None}
+    # Step 1: Normalize inputs → internal candidates
+    if candidates is not None:
+        candidates_internal = _candidates_to_internal(candidates)
+    else:
+        logger.warning(
+            "ingest_by_identifiers called with deprecated identifiers=<list[str]>. "
+            "Prefer candidates=<list[dict]> forwarded from "
+            "search_academic_databases results. The str branch will be removed "
+            "in 0.6.0."
+        )
+        candidates_internal = _identifiers_to_internal(identifiers or [])
 
-        # DOI check
-        doi = search.normalize_doi(ident)
-        if doi:
-            candidate["doi"] = doi
-            # Resolve DOI → landing URL
-            landing = connector.resolve_doi_to_landing_url(doi)
-            if landing:
-                candidate["url"] = landing
-
-        # arXiv check
-        elif ident.lower().startswith("arxiv:") or _looks_like_arxiv_id(ident):
-            arxiv_id = ident.replace("arxiv:", "").strip()
-            candidate["doi"] = f"10.48550/arxiv.{arxiv_id}"
-            candidate["url"] = f"https://arxiv.org/abs/{arxiv_id}"
-
-        # URL
-        elif ident.startswith(("http://", "https://")):
-            candidate["url"] = ident
-            # Try to extract DOI from URL
-            doi_from_url = search.is_doi_query(ident)
-            if doi_from_url:
-                candidate["doi"] = search.normalize_doi(doi_from_url)
-
-        else:
-            candidate["status"] = "failed"
-            candidate["error"] = "unrecognized_identifier"
-
-        candidates.append(candidate)
-
-    # Step 2: Local dedup — check DOIs against Zotero
-    for candidate in candidates:
+    # Step 2: Local dedup — check journal DOI, arXiv DOI variant, and extra field
+    for candidate in candidates_internal:
         if candidate.get("status"):
-            continue  # already failed
-        doi = candidate.get("doi")
-        if doi:
-            existing_key = _lookup_local_item_key_by_doi(doi)
+            continue
+
+        doi_candidates: list[str] = []
+        for value in (candidate.get("source_doi"), candidate.get("doi")):
+            normalized = search.normalize_doi(value)
+            if normalized and normalized not in doi_candidates:
+                doi_candidates.append(normalized)
+
+        arxiv_id = _normalize_arxiv_id(candidate.get("arxiv_id"))
+        existing_key: str | None = None
+        for doi_value in doi_candidates:
+            existing_key = _lookup_local_item_key_by_doi(doi_value)
             if existing_key:
-                candidate["status"] = "duplicate"
-                candidate["item_key"] = existing_key
+                break
+
+        if not existing_key and arxiv_id:
+            arxiv_doi_variant = _arxiv_doi(arxiv_id)
+            if arxiv_doi_variant not in doi_candidates:
+                existing_key = _lookup_local_item_key_by_doi(arxiv_doi_variant)
+
+        if not existing_key and arxiv_id:
+            existing_key = _lookup_local_item_key_by_arxiv_extra(arxiv_id)
+
+        if existing_key:
+            candidate["status"] = "duplicate"
+            candidate["item_key"] = existing_key
 
     # Step 3: Check Connector availability
-    active_candidates = [c for c in candidates if not c.get("status") and c.get("url")]
+    active_candidates = [c for c in candidates_internal if not c.get("status") and c.get("url")]
     ext_ok = False
     if active_candidates:
-        ext_ok, ext_error, _ = connector.check_connector_availability(
+        ext_ok, _ext_error, _ = connector.check_connector_availability(
             active_candidates, DEFAULT_PORT, BridgeServer,
         )
 
@@ -283,13 +458,21 @@ def ingest_by_identifiers(
                 [{"url": u} for u in urls], DEFAULT_PORT, BridgeServer, logger,
             )
             if blocking:
+                blocked_results = []
+                for candidate in candidates_internal:
+                    if candidate.get("status"):
+                        blocked_results.append(_result_from_candidate(candidate))
+                    else:
+                        blocked_results.append(
+                            _result_from_candidate(
+                                candidate,
+                                status="blocked",
+                                error="batch_halted_by_preflight",
+                            )
+                        )
                 return {
-                    "total": len(identifiers),
-                    "results": [
-                        {**c, "status": c.get("status", "blocked"),
-                         "error": "batch_halted_by_preflight"}
-                        for c in candidates
-                    ],
+                    "total": total_inputs,
+                    "results": blocked_results,
                     "action_required": [{
                         "type": "preflight_blocked",
                         "message": (
@@ -303,10 +486,10 @@ def ingest_by_identifiers(
     # Step 5: Sequential save + verify
     results: list[dict] = []
     action_required: list[dict] = []
-    for i, candidate in enumerate(candidates):
+    for index, candidate in enumerate(candidates_internal):
         # Already resolved (failed, duplicate)
         if candidate.get("status"):
-            results.append(candidate)
+            results.append(_result_from_candidate(candidate))
             continue
 
         url = candidate.get("url")
@@ -334,7 +517,11 @@ def ingest_by_identifiers(
                 "action_required": None, "warning": None,
             }
 
-        results.append({**result, "identifier": candidate.get("identifier", "")})
+        results.append({
+            **result,
+            "identifier": candidate.get("identifier", ""),
+            "candidate_index": candidate.get("_index", index),
+        })
 
         # Anti-bot: halt remaining
         if result.get("status") == "blocked":
@@ -344,20 +531,19 @@ def ingest_by_identifiers(
                 "identifier": candidate.get("identifier", ""),
             })
             # Mark remaining as blocked
-            for rem in candidates[i + 1:]:
+            for rem in candidates_internal[index + 1:]:
                 if not rem.get("status"):
-                    results.append({
-                        "identifier": rem.get("identifier", ""),
-                        "status": "blocked",
-                        "error": "batch_halted_by_anti_bot",
-                        "item_key": None, "has_pdf": False,
-                        "title": rem.get("title", ""),
-                        "action_required": None, "warning": None,
-                    })
+                    results.append(
+                        _result_from_candidate(
+                            rem,
+                            status="blocked",
+                            error="batch_halted_by_anti_bot",
+                        )
+                    )
             break
 
     return {
-        "total": len(identifiers),
+        "total": total_inputs,
         "results": results,
         "action_required": action_required,
     }
@@ -367,7 +553,7 @@ def ingest_by_identifiers(
 # Helpers
 # ---------------------------------------------------------------------------
 
-_ARXIV_ID_RE = __import__("re").compile(r"^\d{4}\.\d{4,5}(v\d+)?$")
+_ARXIV_ID_RE = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$", re.IGNORECASE)
 
 
 def _looks_like_arxiv_id(s: str) -> bool:

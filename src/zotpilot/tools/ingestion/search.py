@@ -52,6 +52,17 @@ def normalize_doi(doi: str | None) -> str | None:
     return result.lower() if result else None
 
 
+def normalize_arxiv_id(arxiv_id: str | None) -> str | None:
+    """Return an arXiv ID without prefix or version suffix, else None."""
+    if not arxiv_id:
+        return None
+    cleaned = arxiv_id.strip()
+    if cleaned.lower().startswith("arxiv:"):
+        cleaned = cleaned.split(":", 1)[1].strip()
+    cleaned = re.sub(r"v\d+$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned or None
+
+
 # ---------------------------------------------------------------------------
 # OpenAlex formatting
 # ---------------------------------------------------------------------------
@@ -327,6 +338,8 @@ def search_academic_databases_impl(
     institutions: list[str] | None = None,
     venue: str | None = None,
     cursor: str | None = None,
+    lookup_by_doi=None,
+    lookup_by_arxiv_extra=None,
 ) -> dict:
     """Shared implementation for the academic search tool.
 
@@ -352,7 +365,11 @@ def search_academic_databases_impl(
                 f"Academic search failed: OpenAlex (http_{exc.response.status_code})."
             )
         return {
-            "results": results,
+            "results": annotate_local_duplicates(
+                results,
+                lookup_by_doi=lookup_by_doi,
+                lookup_by_arxiv_extra=lookup_by_arxiv_extra,
+            ),
             "next_cursor": None,
             "total_count": len(results),
             "unresolved_filters": [],
@@ -403,6 +420,11 @@ def search_academic_databases_impl(
         logger.info("OpenAlex search failed (%s)", exc)
         raise tool_error_cls(f"Academic search failed: OpenAlex ({exc}).")
 
+    payload["results"] = annotate_local_duplicates(
+        payload.get("results", []),
+        lookup_by_doi=lookup_by_doi,
+        lookup_by_arxiv_extra=lookup_by_arxiv_extra,
+    )
     payload["unresolved_filters"] = unresolved
     return payload
 
@@ -608,43 +630,47 @@ def merge_search_hits(
     return merged_results[:limit]
 
 
+def annotate_local_duplicate(
+    result: dict[str, Any],
+    *,
+    lookup_by_doi,
+    lookup_by_arxiv_extra,
+) -> dict[str, Any]:
+    """Annotate one search result with authoritative local duplicate state."""
+    doi = normalize_doi(result.get("doi"))
+    arxiv_id = normalize_arxiv_id(result.get("arxiv_id"))
+
+    existing_item_key: str | None = None
+    try:
+        if doi and lookup_by_doi is not None:
+            existing_item_key = lookup_by_doi(doi)
+        if not existing_item_key and arxiv_id and lookup_by_doi is not None:
+            existing_item_key = lookup_by_doi(f"10.48550/arxiv.{arxiv_id}")
+        if not existing_item_key and arxiv_id and lookup_by_arxiv_extra is not None:
+            existing_item_key = lookup_by_arxiv_extra(arxiv_id)
+    except Exception:
+        existing_item_key = None
+
+    annotated = dict(result)
+    annotated["local_duplicate"] = existing_item_key is not None
+    annotated["existing_item_key"] = existing_item_key
+    return annotated
+
+
 def annotate_local_duplicates(
     papers: list[dict[str, Any]],
     *,
-    audit: dict[str, Any],
     lookup_by_doi,
-    lookup_by_title,
+    lookup_by_arxiv_extra,
 ) -> list[dict[str, Any]]:
-    """标注本地已有的论文。"""
+    """Annotate search results with local duplicate state."""
     annotated: list[dict[str, Any]] = []
-    duplicate_hits: list[dict[str, Any]] = []
     for paper in papers:
-        normalized_doi_val = normalize_doi(paper.get("doi"))
-        exact_key = lookup_by_doi(normalized_doi_val)
-        suspected = lookup_by_title(paper.get("title"), normalized_doi_val, limit=5)
-        local_duplicate = {
-            "status": "none",
-            "item_keys": [],
-            "matches": suspected,
-        }
-        if exact_key:
-            local_duplicate["status"] = "exact"
-            local_duplicate["item_keys"] = [exact_key]
-        elif suspected:
-            local_duplicate["status"] = "suspected"
-            local_duplicate["item_keys"] = [
-                match["item_key"] for match in suspected if match.get("item_key")
-            ]
-        if local_duplicate["status"] != "none":
-            duplicate_hits.append({
-                "doc_id": (
-                    paper.get("openalex_id") or paper.get("doi") or paper.get("title")
-                ),
-                "status": local_duplicate["status"],
-                "item_keys": local_duplicate["item_keys"],
-            })
-        annotated_paper = dict(paper)
-        annotated_paper["local_duplicate"] = local_duplicate
-        annotated.append(annotated_paper)
-    audit["local_duplicate_hits"] = duplicate_hits
+        annotated.append(
+            annotate_local_duplicate(
+                paper,
+                lookup_by_doi=lookup_by_doi,
+                lookup_by_arxiv_extra=lookup_by_arxiv_extra,
+            )
+        )
     return annotated

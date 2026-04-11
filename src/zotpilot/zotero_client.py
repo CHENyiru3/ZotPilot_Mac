@@ -1,4 +1,5 @@
 """Zotero SQLite database client."""
+import re
 import sqlite3
 from html.parser import HTMLParser
 from pathlib import Path
@@ -33,6 +34,28 @@ def _sqlite_uri(path: Path) -> str:
     On Unix, it produces 'file:///home/...' which also works.
     """
     return path.as_uri() + "?mode=ro&immutable=1"
+
+
+def _normalize_doi_text(doi: str | None) -> str | None:
+    """Normalize stored DOI text for exact lookups."""
+    if not doi:
+        return None
+    cleaned = doi.strip().lower()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):].strip()
+    return cleaned or None
+
+
+def _normalize_arxiv_id_text(arxiv_id: str | None) -> str | None:
+    """Normalize an arXiv ID for extra-field lookups."""
+    if not arxiv_id:
+        return None
+    cleaned = arxiv_id.strip()
+    if cleaned.lower().startswith("arxiv:"):
+        cleaned = cleaned.split(":", 1)[1].strip()
+    cleaned = re.sub(r"v\d+$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned or None
 
 
 class ZoteroClient:
@@ -541,6 +564,68 @@ class ZoteroClient:
 
         citation_keys = self._load_citation_keys()
         return self._row_to_item(row, citation_keys)
+
+    def get_item_key_by_doi(self, doi: str | None) -> str | None:
+        """Return the first non-deleted top-level item key matching a DOI."""
+        normalized = _normalize_doi_text(doi)
+        if not normalized:
+            return None
+
+        conn = sqlite3.connect(_sqlite_uri(self.db_path), uri=True)
+        try:
+            row = conn.execute(
+                """
+                SELECT i.key
+                FROM items i
+                JOIN itemData id ON id.itemID = i.itemID
+                JOIN itemDataValues idv ON idv.valueID = id.valueID
+                JOIN fields f ON f.fieldID = id.fieldID
+                WHERE f.fieldName = 'DOI'
+                  AND replace(
+                        replace(
+                            replace(lower(trim(idv.value)), 'https://doi.org/', ''),
+                            'http://doi.org/', ''
+                        ),
+                        'doi:', ''
+                      ) = ?
+                  AND i.itemTypeID NOT IN (1, 14)
+                  AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+                  AND i.libraryID = ?
+                LIMIT 1
+                """,
+                (normalized, self.library_id),
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    def get_item_key_by_arxiv_id(self, arxiv_id: str | None) -> str | None:
+        """Return the first non-deleted top-level item key whose extra field mentions an arXiv ID."""
+        normalized = _normalize_arxiv_id_text(arxiv_id)
+        if not normalized:
+            return None
+
+        conn = sqlite3.connect(_sqlite_uri(self.db_path), uri=True)
+        try:
+            row = conn.execute(
+                """
+                SELECT i.key
+                FROM items i
+                JOIN itemData id ON id.itemID = i.itemID
+                JOIN itemDataValues idv ON idv.valueID = id.valueID
+                JOIN fields f ON f.fieldID = id.fieldID
+                WHERE f.fieldName = 'extra'
+                  AND lower(idv.value) LIKE ?
+                  AND i.itemTypeID NOT IN (1, 14)
+                  AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+                  AND i.libraryID = ?
+                LIMIT 1
+                """,
+                (f"%arxiv:{normalized.lower()}%", self.library_id),
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
 
     def get_notes(self, item_key: str | None = None, query: str | None = None, limit: int = 20) -> list[dict]:
         """Get notes, optionally filtered by parent item or content search."""
