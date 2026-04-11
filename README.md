@@ -309,62 +309,29 @@ zotpilot sync
 
 ---
 
-## 主要 MCP 工具
+## 主要 MCP 工具（v0.5.0：18 个原子工具）
 
-默认启动是 `core` profile，只暴露 9 个工作流主工具，给 Skill 驱动客户端用来避免工具列表被截断：
-`search_topic`、`search_papers`、`get_passage_context`、`advanced_search`、`get_paper_details`、`search_academic_databases`、`ingest_papers`、`get_ingest_status`、`get_index_stats`。
+v0.5.0 将工具从 33 个精简到 18 个原子操作，每个工具对应一个不可再分解的操作。按功能分类：
 
-需要更多浏览、写操作或完整工具面时，设置环境变量：
-
-```bash
-export ZOTPILOT_TOOL_PROFILE=extended   # 聚合浏览/写操作/admin 工具
-# 或
-export ZOTPILOT_TOOL_PROFILE=all        # 完整工具面
-```
-
-<details>
-<summary>默认 Core Profile（9 个）</summary>
-
-| 工具 | 说明 |
+| 类别 | 工具 |
 |------|------|
-| `search_papers` | 语义搜索，可以按章节、期刊加权 |
-| `search_topic` | 按主题找论文，结果按文档去重 |
-| `advanced_search` | 多条件元数据搜索（年份/作者/标签/集合等），无需索引 |
-| `get_passage_context` | 展开某个结果的上下文 |
-| `get_paper_details` | 看一篇论文的完整元数据 |
-| `search_academic_databases` | 搜外部学术数据库，不直接入库 |
-| `ingest_papers` | 将候选论文批量加入 Zotero |
-| `get_ingest_status` | 轮询异步入库进度 |
-| `get_index_stats` | 看索引就绪状态，也可带出未索引论文分页 |
+| 搜索 | `search_papers`（含 `section_type` tables/figures）、`search_topic`、`search_boolean`、`advanced_search` |
+| 阅读 | `get_passage_context`、`get_paper_details`、`get_notes`、`get_annotations`、`browse_library`、`profile_library` |
+| 发现 | `search_academic_databases`（OpenAlex 外部搜索） |
+| 入库 | `ingest_by_identifiers`（同步原子入库：DOI/arXiv/URL → 完整结果） |
+| 整理 | `manage_tags`、`manage_collections`（含 `action="create"`）、`create_note` |
+| 引用 | `get_citations`（refs/citing/count） |
+| 索引 | `index_library`（含 `item_keys` 局部重索引）、`get_index_stats` |
 
-</details>
+**核心变化**：
+- `ingest_by_identifiers` 是同步的 — 返回前就完成 Connector save → 验证 → 失败时 DOI API fallback → PDF 验证，不需要轮询 `get_batch_status`
+- 响应中 `action_required` 非空时（anti-bot / connector_offline），Agent 停下等用户处理
+- 无 `confirm_candidates` / `approve_ingest` 等状态机工具——Agent 通过 Skill 引导和 `[USER_REQUIRED]` 节点自然停下
+- `search_tables` / `search_figures` 合并到 `search_papers(section_type=...)`
 
-<details>
-<summary>Extended Profile（聚合 + Admin）</summary>
+v0.5.0 删除的工具（已吸收或功能裁剪）：`confirm_candidates` / `resolve_preflight` / `approve_ingest` / `get_batch_status` / `approve_post_ingest` / `authorize_taxonomy_changes` / `approve_post_process` / `reindex_degraded` / `search_tables` / `search_figures` / `save_urls` / `create_collection` / `switch_library` / `get_reranking_config` / `get_vision_costs`。详见 [CHANGELOG](CHANGELOG.md#050---2026-04-11)。
 
-| 工具 | 说明 |
-|------|------|
-| `browse_library` | 统一浏览 overview / tags / collections / papers / feeds |
-| `search_boolean` | 精确词匹配（AND/OR） |
-| `search_tables` | 搜表格内容 |
-| `search_figures` | 搜图表标题 |
-| `get_notes` | 读取和搜索笔记 |
-| `get_annotations` | 读取高亮和评论（需要 ZOTERO_API_KEY） |
-| `profile_library` | 对当前文献库做概览分析 |
-| `get_citations` | 统一返回引用/被引/计数 |
-| `manage_tags` | 统一标签增删改（单篇或批量） |
-| `create_collection` | 建文件夹 |
-| `manage_collections` | 统一文件夹增删（单篇或批量） |
-| `create_note` | 给论文添加笔记（需要 ZOTERO_API_KEY） |
-| `index_library` | 索引新论文（增量，支持分批：`batch_size=20`，循环调用直到 `has_more=false`） |
-| `save_urls` | 通过 Connector 从真实浏览器页面保存论文 |
-| `switch_library` | 切换 metadata/write 工具的目标 library |
-
-</details>
-
-`get_index_stats` 现在合并了旧的未索引论文、重排配置和视觉费用查询能力；`browse_library(view="feeds")` 合并了原来的 feed 工具。
-
-完整工具面和参数说明以 [docs/tools-reference.md](docs/tools-reference.md) 为准；若文档与默认工具数量不一致，以 profile 配置为准。
+**Profile**：`core`（17 个，日常使用）/ `full`（18 个，含耗时的 `profile_library`）。通过 `ZOTPILOT_TOOL_PROFILE=full` 启用完整工具面。
 
 ---
 

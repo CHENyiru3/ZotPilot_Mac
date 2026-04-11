@@ -12,39 +12,61 @@ zotpilot update --dry-run    # 预览操作，不执行
 
 ---
 
-## [Unreleased]
+## [0.5.0] - 2026-04-11
 
-### Changed
-- Install/update runtime reconciliation now treats deployed skill content as part of version state; same-version skill edits will redeploy instead of being skipped as "up-to-date".
-- API keys are now persisted in the local ZotPilot config JSON (`~/.config/zotpilot/config.json` on Unix, `%APPDATA%\\zotpilot\\config.json` on Windows) as the v0.5.0 source of truth.
+**架构重构版本 / Architectural refactor** — 不破不立，彻底简化入库路由、工具层和 skill 系统。
 
-### Security / UX Notes
-- Local config files containing API keys are written with restrictive permissions on Unix (`0600`). Users should still avoid syncing the config file into public repos or shared dotfile backups.
-
----
-
-## [0.5.0] - 2026-04-07
+### ✨ Highlights
+- **入库路由 Plan C**：Connector save → 本地 API 验证 → DOI API fallback，彻底解决 IEEE/Springer translator 失败导致的 webpage snapshot 垃圾 item 问题
+- **工具层从 33 → 18 个原子操作**：每个工具对应一个不可再分解的原子操作，从用户场景推导而非拍脑袋删减
+- **Skill 系统重写**：4 个声明式 skill (`ztp-research` / `ztp-review` / `ztp-profile` / `ztp-setup`)，删除路由器 Skill，由平台原生机制根据 `description` 自动选择
+- **代码量减少 30%**：~31,400 行 → ~22,000 行，测试覆盖率从 15.78% → 46.00%
+- **仅支持三大 agent 平台**：Claude Code / Codex CLI / OpenCode（Gemini / Cursor / Windsurf 不再维护适配）
 
 ### Added
-- **Packaged workflow skills / 内置工作流 skill**：新增 `src/zotpilot/skills/`，`zotpilot register` / `zotpilot update` 现在会部署打包后的 `ztp-research`、`ztp-setup`、`ztp-review`、`ztp-profile`
-- **Research session guardrail / 研究会话护栏**：新增 `research_session` 工具、JSON session 持久化、ingest/write gate，以及 `create_note(idempotent=True)` 幂等模式
-- **Research profile / research 工具档位**：新增 `ZOTPILOT_TOOL_PROFILE=research`
+- **`ingest_by_identifiers`**：同步原子入库工具，内部完成 DOI/arXiv/URL 规范化 → 本地去重 → Connector preflight → 逐条 save + 即时验证 → 失败时 DOI API fallback → PDF 验证，返回每篇论文的最终状态（`saved_with_pdf` / `saved_metadata_only` / `blocked` / `duplicate` / `failed`）
+- **`validate_saved_item`**：Connector save 后通过**本地 Zotero API (port 23119)** 即时验证 itemType + title，规避 Web API 同步延迟
+- **`zotpilot upgrade` 命令**：一键升级 CLI + skill，`aliases=["update"]` 向后兼容
+- **版本漂移检测**：MCP server 启动时检测已部署 skill 版本，不匹配时在 instructions 中提示运行 `zotpilot register`
+- **OpenAlex 检索增强**：参数化 `min_citations`、cursor-based pagination，支持 `concepts` / `institutions` / `source` filter
+- **arXiv DOI fast-path**：`10.48550/arXiv.xxx` 规范 DOI 自动路由到 arXiv API（CrossRef 不索引 arXiv DOI）
 
 ### Changed
-- **MCP tool surface 收敛到 v0.5.0 目标**：移除 deprecated 别名，合并 `get_feeds` 到 `browse_library(view="feeds")`，合并 `get_unindexed_papers` / `get_reranking_config` / `get_vision_costs` 到 `get_index_stats(...)`
-- **Profile 调整**：`index_library` 提升到 `extended`，`get_index_stats` 提升到 `core`
-- **CLI lifecycle / 安装更新生命周期**：`zotpilot update` 对非 editable 安装改为部署包内 skill 文件；editable 安装提示在源码仓库执行 `git pull`
+- **Ingestion 子系统从 7 文件 3146 行 → 3 文件 ~1200 行**：
+  - 新建 `tools/ingestion/connector.py`（~1100 行）— Connector 通信 + 验证 + DOI API fallback
+  - 新建 `tools/ingestion/search.py`（~490 行）— OpenAlex 搜索 + query 构建
+  - 重写 `tools/ingestion/__init__.py`（~330 行）— 只注册 2 个 MCP 工具
+- **18 个 MCP 工具（从 33 精简）**：
+  - `search_papers` 吸收 `search_tables` / `search_figures`（新增 `section_type` 参数）
+  - `ingest_by_identifiers` 吸收 `save_urls`（URL 自动识别）
+  - `manage_collections` 吸收 `create_collection`（`action="create"`）
+  - `index_library` 吸收 `reindex_degraded`（`item_keys` 参数）
+- **Skill 系统**：4 个 skill 替代原有 5 个，删除 `zotpilot` 路由器 skill（由平台原生机制处理），`ztp-research` 完整覆盖 4-Phase 流程（Discovery → Ingestion → Post-processing → Final Report）
+- **平台支持收敛**：从 6 个平台降到 3 个（Claude Code / Codex / OpenCode），移除 Gemini / Cursor / Windsurf 适配代码
+
+### Removed
+- **10 个状态机 phase gate 工具**：`confirm_candidates` / `resolve_preflight` / `approve_ingest` / `get_batch_status` / `approve_post_ingest` / `authorize_taxonomy_changes` / `approve_post_process` — 全部删除，Agent 在 Skill 引导下通过 `action_required` 字段自然处理用户介入
+- **整个 `tools/research_workflow.py`**（1202 行）— 状态机 MCP 工具层被 Skill 声明式编排替代
+- **整个 `workflow/worker.py`**（660 行）— 后台 worker 线程模型被同步执行替代
+- **`tools/ingest_state.py`**（427 行）— 旧的 `BatchStore` 系统，与 `workflow/batch.py` 合并为单一来源
+- **`tools/ingestion_bridge.py`**（1654 行）— 拆分到 `tools/ingestion/connector.py`
+- **`switch_library` MCP 工具**：v0.5.0 仅支持单文献库，多库切换推迟到未来版本
+- **旧的 `skills/SKILL.md` 路由器** + **`skills/references/` 目录**：内容内化到工具逻辑和各 skill 硬规则
+- **`test_research_workflow_*.py`** / **`test_post_process_gate.py`** 等依赖旧状态机的测试
 
 ### Fixed
-- **ingest_papers collection 路由竞态修复**：Connector 通过本地 API 路由后，后端不再通过 Web API 重复写入（解决双重路由覆写问题）
-- **item_key 发现窗口扩大**：`RECENT_ITEMS_LIMIT` 10→50，`MAX_ATTEMPTS` 15→45，批量入库时 item 发现更稳定
-- **出版商自动标签清理**：arXiv/bioRxiv/medRxiv 来源论文入库后自动清除出版商注入的 subject tags
-- **Post-batch reconciliation**：批次完成后对未路由条目通过本地 API 补路由，兜底 Web API
+- **40% Connector 垃圾率根治**：之前 Connector `success=True` 信号不可信，IEEE 等翻车 publisher 的 translator 会保存成 webpage snapshot；现在通过 `validate_saved_item` 检查 itemType + title，失败自动 delete 并走 DOI API fallback
+- **item_key Web API 同步延迟竞态**：`validate_saved_item` 和 `_fetch_item_via_local_api` 使用本地 Zotero HTTP API (port 23119)，无需等待 Zotero Desktop → api.zotero.org 同步
+- **`delete_item_safe` 加入重试退避**：Web API delete 针对刚 save 的 item 加入 0/5/10/15s 退避重试，处理 Zotero 同步延迟
+- **arXiv DOI fallback 路由修复**：`identifier_resolver._resolve_doi` 识别 `10.48550/arXiv.xxx` 并路由到 arXiv API，避免 CrossRef 404
 
-### Added
-- `routing_applied` 协议：Connector 显式标记路由状态，后端据此决定是否跳过 Web API 路由
-- `routing_status` 字段：`get_ingest_status` 返回每个条目的路由状态（`routed_by_connector`/`routed_by_backend`/`routing_failed` 等）
-- SKILL.md Step 8 新增 INBOX 清理步骤：归类后必须从 INBOX 移除（closes #3）
+### Docs
+- `docs/prd-v0.5.0.md` — 产品需求文档（重构动机、产品定位、工具表、任务分解）
+- `docs/tech-design-v0.5.0.md` — 技术实施规格（入库路由决策、Task 级别的实施指令）
+- `scripts/ingest_routing_test.py` — 入库路由基准测试脚本（可复用）
+
+### Migration Notes
+v0.5.0 从未发布到 PyPI，现有用户直接升级即可。使用新命令 `zotpilot upgrade` 一键同步 CLI + skill。Agent 在新版本中不再需要调用 `confirm_candidates` / `approve_ingest` 等 phase gate 工具——直接调用 `ingest_by_identifiers`，响应中 `action_required` 非空时停下等用户。
 
 ---
 
