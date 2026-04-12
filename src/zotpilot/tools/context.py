@@ -4,7 +4,8 @@ from typing import Annotated
 
 from pydantic import Field
 
-from ..state import ToolError, _get_config, _get_store, mcp
+from ..index_authority import current_library_pdf_doc_ids
+from ..state import ToolError, _get_config, _get_store, _get_zotero, mcp
 from .profiles import tool_tags
 
 
@@ -25,6 +26,8 @@ def get_passage_context(
             "Passage context requires indexing. "
             "Configure an embedding provider and run index_library() first."
         )
+    if doc_id not in current_library_pdf_doc_ids(_get_zotero()):
+        raise ToolError(f"Document not found: {doc_id}")
     store = _get_store()
 
     # Handle table context lookup

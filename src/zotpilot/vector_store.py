@@ -370,22 +370,40 @@ class VectorStore:
 
         doc_ids = set()
         for chunk_id in results['ids']:
-            # Handle text chunks, table chunks, and figure chunks
-            if '_chunk_' in chunk_id:
-                parts = chunk_id.rsplit('_chunk_', 1)
-            elif '_table_' in chunk_id:
-                parts = chunk_id.rsplit('_table_', 1)
-            elif '_fig_' in chunk_id:
-                parts = chunk_id.rsplit('_fig_', 1)
-            else:
-                continue
-            if len(parts) == 2:
-                doc_ids.add(parts[0])
+            doc_id = self._doc_id_from_chunk_id(chunk_id)
+            if doc_id:
+                doc_ids.add(doc_id)
         return doc_ids
+
+    @staticmethod
+    def _doc_id_from_chunk_id(chunk_id: str) -> str | None:
+        """Extract the logical document ID from a chunk/table/figure row ID."""
+        if '_chunk_' in chunk_id:
+            parts = chunk_id.rsplit('_chunk_', 1)
+        elif '_table_' in chunk_id:
+            parts = chunk_id.rsplit('_table_', 1)
+        elif '_fig_' in chunk_id:
+            parts = chunk_id.rsplit('_fig_', 1)
+        else:
+            return None
+        return parts[0] if len(parts) == 2 else None
 
     def count(self) -> int:
         """Return total number of chunks."""
         return self.collection.count()
+
+    def count_chunks_for_doc_ids(self, doc_ids: set[str]) -> int:
+        """Count chunks belonging to the provided logical document IDs."""
+        if not doc_ids:
+            return 0
+        results = self.collection.get(include=[])  # IDs only, no documents/metadata
+        if not results["ids"]:
+            return 0
+        return sum(
+            1
+            for chunk_id in results["ids"]
+            if self._doc_id_from_chunk_id(chunk_id) in doc_ids
+        )
 
     def get_document_meta(self, doc_id: str) -> dict | None:
         """Get metadata for a document's first chunk.

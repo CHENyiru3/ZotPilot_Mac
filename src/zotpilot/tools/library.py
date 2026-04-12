@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from ..index_authority import authoritative_indexed_doc_ids, current_library_pdf_doc_ids
 from ..state import ToolError, _get_api_reader, _get_store_optional, _get_writer, _get_zotero, mcp
 from ..zotero_client import _sqlite_uri
 from .profiles import tool_tags
@@ -100,11 +101,12 @@ def get_paper_details(
         raise ToolError(f"Item not found: {doc_id}")
 
     abstract = zotero.get_item_abstract(doc_id)
+    current_doc_ids = current_library_pdf_doc_ids(zotero)
 
     # Check if indexed in vector store
     try:
         store = _get_store_optional()
-        if store is not None:
+        if store is not None and doc_id in current_doc_ids:
             meta = store.get_document_meta(doc_id)
             indexed = meta is not None
             quality_grade = meta.get("quality_grade", "") if meta else ""
@@ -140,11 +142,12 @@ def _get_library_overview_impl(
 ) -> dict:
     zotero = _get_zotero()
     all_items = zotero.get_all_items_with_pdfs()
+    current_doc_ids = {item.item_key for item in all_items if item.pdf_path and item.pdf_path.exists()}
 
     # Get indexed doc IDs for the "indexed" flag
     try:
         store = _get_store_optional()
-        indexed_ids = store.get_indexed_doc_ids() if store is not None else set()
+        indexed_ids = authoritative_indexed_doc_ids(store, current_doc_ids) if store is not None else set()
     except Exception:
         indexed_ids = set()
 
@@ -373,7 +376,7 @@ def profile_library(
         topic_density = {"indexed": False}
     else:
         try:
-            doc_count = len(store.get_indexed_doc_ids())
+            doc_count = len(authoritative_indexed_doc_ids(store, current_library_pdf_doc_ids(zotero)))
             topic_density = {"indexed": True, "doc_count": doc_count}
         except Exception as e:
             logger.warning("Could not get index doc count: %s", e)

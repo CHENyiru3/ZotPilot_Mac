@@ -52,15 +52,34 @@ def _make_result(doc_id: str, idx: int, *, with_context: bool = False) -> Retrie
 
 
 def _make_item(idx: int) -> ZoteroItem:
+    pdf_path = MagicMock()
+    pdf_path.exists.return_value = True
     return ZoteroItem(
         item_key=f"KEY{idx}",
         title=f"Paper {idx}",
         authors="Auth",
         year=2020 + idx,
-        pdf_path=None,
+        pdf_path=pdf_path,
         citation_key=f"auth{idx}",
         publication="Journal",
         doi=f"10.1000/{idx}",
+        tags="ml",
+        collections="AI",
+    )
+
+
+def _make_pdf_item_with_key(key: str):
+    pdf_path = MagicMock()
+    pdf_path.exists.return_value = True
+    return ZoteroItem(
+        item_key=key,
+        title=f"Paper {key}",
+        authors="Auth",
+        year=2024,
+        pdf_path=pdf_path,
+        citation_key=f"{key.lower()}2024",
+        publication="Journal",
+        doi=f"10.1000/{key.lower()}",
         tags="ml",
         collections="AI",
     )
@@ -87,6 +106,14 @@ class TestSearchContracts:
             patch("zotpilot.tools.search._get_retriever", return_value=retriever),
             patch("zotpilot.tools.search._get_reranker", return_value=reranker),
             patch("zotpilot.tools.search._get_config", return_value=config),
+            patch(
+                "zotpilot.tools.search._get_zotero",
+                return_value=MagicMock(
+                    get_all_items_with_pdfs=MagicMock(
+                        return_value=[_make_pdf_item_with_key(f"DOC{i}") for i in range(10)]
+                    )
+                ),
+            ),
         ):
             minimal = search_papers("test query", top_k=10)
             with_context_minimal = search_papers("test query", top_k=1, context_chunks=1)
@@ -121,6 +148,14 @@ class TestSearchContracts:
             patch("zotpilot.tools.search._get_retriever", return_value=retriever),
             patch("zotpilot.tools.search._get_reranker", return_value=reranker),
             patch("zotpilot.tools.search._get_config", return_value=config),
+            patch(
+                "zotpilot.tools.search._get_zotero",
+                return_value=MagicMock(
+                    get_all_items_with_pdfs=MagicMock(
+                        return_value=[_make_pdf_item_with_key(f"DOC{i}") for i in range(10)]
+                    )
+                ),
+            ),
         ):
             minimal = search_topic("topic", num_papers=10)
             full = search_topic("topic", num_papers=10, verbosity="full")
@@ -212,6 +247,17 @@ class TestSearchContracts:
             patch("zotpilot.tools.search._get_store", return_value=store),
             patch("zotpilot.tools.search._get_reranker", return_value=reranker),
             patch("zotpilot.tools.search._get_config", return_value=config),
+            patch(
+                "zotpilot.tools.search._get_zotero",
+                return_value=MagicMock(
+                    get_all_items_with_pdfs=MagicMock(
+                        return_value=[
+                            _make_pdf_item_with_key("DOC1"),
+                            _make_pdf_item_with_key("DOC2"),
+                        ]
+                    )
+                ),
+            ),
         ):
             minimal_table = search_tables("tables")
             full_table = search_tables("tables", verbosity="full")
@@ -253,6 +299,12 @@ class TestContextAndIndexingContracts:
         with (
             patch("zotpilot.tools.context._get_config", return_value=config),
             patch("zotpilot.tools.context._get_store", return_value=store),
+            patch(
+                "zotpilot.tools.context._get_zotero",
+                return_value=MagicMock(
+                    get_all_items_with_pdfs=MagicMock(return_value=[_make_pdf_item_with_key("DOC1")])
+                ),
+            ),
         ):
             compact = get_passage_context("DOC1", 2)
             merged = get_passage_context("DOC1", 2, include_merged=True)
@@ -289,6 +341,12 @@ class TestContextAndIndexingContracts:
         with (
             patch("zotpilot.tools.context._get_config", return_value=config),
             patch("zotpilot.tools.context._get_store", return_value=store),
+            patch(
+                "zotpilot.tools.context._get_zotero",
+                return_value=MagicMock(
+                    get_all_items_with_pdfs=MagicMock(return_value=[_make_pdf_item_with_key("DOC1")])
+                ),
+            ),
         ):
             result = get_passage_context("DOC1", 0, table_page=1, table_index=1)
 
@@ -301,7 +359,7 @@ class TestContextAndIndexingContracts:
 
         store = MagicMock()
         store.get_indexed_doc_ids.return_value = {"KEY0"}
-        store.count.return_value = 120
+        store.count_chunks_for_doc_ids.return_value = 120
         store.collection.get.return_value = {"metadatas": []}
         zotero = MagicMock()
         zotero.get_all_items_with_pdfs.return_value = [_make_item(i) for i in range(200)]
@@ -358,6 +416,37 @@ class TestContextAndIndexingContracts:
         assert "quality_distribution" not in compact
         assert "quality_distribution" in full
 
+    def test_index_library_accepts_item_keys_json_string(self):
+        from zotpilot.tools.indexing import index_library
+
+        index_result = {
+            "results": [],
+            "indexed": 1,
+            "failed": 0,
+            "empty": 0,
+            "skipped": 0,
+            "already_indexed": 0,
+            "has_more": False,
+        }
+        config = MagicMock()
+        config.validate.return_value = []
+        config.max_pages = 40
+        config.vision_enabled = True
+
+        with (
+            patch("zotpilot.tools.indexing._get_config", return_value=config),
+            patch("zotpilot.tools.indexing._get_store") as mock_store,
+            patch("zotpilot.indexer.Indexer") as mock_indexer_cls,
+            patch("dataclasses.replace", side_effect=lambda obj, **kwargs: obj),
+        ):
+            mock_store.return_value.clear_query_cache = MagicMock()
+            mock_indexer = mock_indexer_cls.return_value
+            mock_indexer.index_all.return_value = index_result
+
+            index_library(item_keys='["KBQCDWBE","54ZZF3LP"]', batch_size=0)
+
+        assert mock_indexer.index_all.call_args.kwargs["item_keys"] == ["KBQCDWBE", "54ZZF3LP"]
+
     def test_index_library_exposes_vision_budget_summary_when_requested(self):
         from zotpilot.tools.indexing import index_library
 
@@ -404,7 +493,7 @@ class TestContextAndIndexingContracts:
 
         store = MagicMock()
         store.get_indexed_doc_ids.return_value = {"KEY0"}
-        store.count.return_value = 10
+        store.count_chunks_for_doc_ids.return_value = 10
         store.collection.get.return_value = {"metadatas": []}
         zotero = MagicMock()
         zotero.get_all_items_with_pdfs.return_value = [_make_item(i) for i in range(6)]
@@ -424,6 +513,36 @@ class TestContextAndIndexingContracts:
         assert result["limit"] == 2
         assert len(result["unindexed_papers"]) == 2
         assert result["unindexed_papers"][0]["doc_id"] == "KEY2"
+
+    def test_get_index_stats_uses_authoritative_indexed_set(self):
+        from zotpilot.tools.indexing import get_index_stats
+
+        store = MagicMock()
+        store.get_indexed_doc_ids.return_value = {"KEY0", "ORPHAN"}
+        store.count_chunks_for_doc_ids.return_value = 8
+        store.collection.get.return_value = {
+            "metadatas": [
+                {"doc_id": "KEY0", "section": "results", "chunk_type": "text", "journal_quartile": "Q1"},
+                {"doc_id": "ORPHAN", "section": "methods", "chunk_type": "text", "journal_quartile": "Q2"},
+            ]
+        }
+        zotero = MagicMock()
+        current = _make_item(0)
+        zotero.get_all_items_with_pdfs.return_value = [current]
+        config = _make_config()
+        config.stats_sample_limit = 10
+
+        with (
+            patch("zotpilot.tools.indexing._get_config", return_value=config),
+            patch("zotpilot.tools.indexing._get_retriever"),
+            patch("zotpilot.tools.indexing._get_store", return_value=store),
+            patch("zotpilot.tools.indexing._get_zotero", return_value=zotero),
+        ):
+            result = get_index_stats(limit=5)
+
+        assert result["total_documents"] == 1
+        assert result["total_chunks"] == 8
+        assert result["journal_coverage"] == {"Q1": 1}
 
 
 class TestLibraryIdentifierContracts:

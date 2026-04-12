@@ -3,10 +3,11 @@ import json
 import logging
 from collections import defaultdict
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 
+from ..index_authority import authoritative_indexed_doc_ids, current_library_pdf_doc_ids
 from ..reranker import VALID_QUARTILES, VALID_SECTIONS
 from ..state import ToolError, _get_config, _get_reranker, _get_retriever, _get_store, _get_zotero, mcp
 from .profiles import tool_tags
@@ -14,10 +15,23 @@ from .profiles import tool_tags
 logger = logging.getLogger(__name__)
 
 
+def _parse_json_string_list(value: Any) -> Any:
+    """Accept list params even when an MCP client wraps them as JSON strings."""
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return value
+        if isinstance(parsed, list):
+            return parsed
+    return value
+
+
 def _collect_unindexed_papers(limit: int | None = None, offset: int = 0) -> tuple[list[dict], int]:
     """Return unindexed Zotero papers and their total count."""
     zotero = _get_zotero()
-    indexed_set = set(_get_store().get_indexed_doc_ids())
+    current_doc_ids = current_library_pdf_doc_ids(zotero)
+    indexed_set = authoritative_indexed_doc_ids(_get_store(), current_doc_ids)
     papers: list[dict] = []
     total = 0
 
@@ -153,7 +167,11 @@ def index_library(
     force_reindex: Annotated[bool, Field(description="Delete and rebuild index for matching items")] = False,
     limit: Annotated[int | None, Field(description="Max items to index, None for all")] = None,
     item_key: Annotated[str | None, Field(description="Index only this specific item key")] = None,
-    item_keys: Annotated[list[str] | None, Field(description="Index only these specific item keys")] = None,
+    item_keys: Annotated[
+        list[str] | None,
+        BeforeValidator(_parse_json_string_list),
+        Field(description="Index only these specific item keys"),
+    ] = None,
     title_pattern: Annotated[str | None, Field(description="Regex to filter items by title (case-insensitive)")] = None,
     no_vision: Annotated[bool, Field(description="Disable vision-based table extraction")] = False,
     batch_size: Annotated[int, Field(description="Items per batch (default 20). Set 0 for all at once. Call repeatedly until has_more=false. Vision extraction is auto-disabled in batch mode; use batch_size=0 for vision.")] = 20,  # noqa: E501
@@ -181,6 +199,10 @@ def index_library(
     from dataclasses import replace as dc_replace
 
     from ..indexer import Indexer
+
+    # Direct Python callers can still bypass FastMCP/Pydantic dispatch, so
+    # keep the same string->list coercion here for consistency.
+    item_keys = _parse_json_string_list(item_keys)
 
     _config = _get_config()
 
@@ -302,9 +324,11 @@ def get_index_stats(
         return result
     _get_retriever()  # Ensure initialized
     store = _get_store()
+    zotero = _get_zotero()
+    current_doc_ids = current_library_pdf_doc_ids(zotero)
     _config = _get_config()
-    doc_ids = store.get_indexed_doc_ids()
-    total_chunks = store.count()
+    doc_ids = authoritative_indexed_doc_ids(store, current_doc_ids)
+    total_chunks = store.count_chunks_for_doc_ids(doc_ids)
 
     # Get section, journal, and chunk type coverage from a sample of chunks
     # (Getting all chunks would be expensive for large collections)
@@ -316,6 +340,8 @@ def get_index_stats(
 
     if sample["metadatas"]:
         for meta in sample["metadatas"]:
+            if meta.get("doc_id", "") not in doc_ids:
+                continue
             section = meta.get("section", "unknown")
             section_counts[section] += 1
 

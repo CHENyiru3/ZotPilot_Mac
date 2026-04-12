@@ -15,6 +15,7 @@ from ..filters import (
     _build_chromadb_filters,
     _has_text_filters,
 )
+from ..index_authority import current_library_pdf_doc_ids
 from ..reranker import validate_journal_weights, validate_section_weights
 from ..result_utils import (
     _merge_results_by_chunk,
@@ -33,6 +34,18 @@ from ..state import (
 from .profiles import tool_tags
 
 logger = logging.getLogger(__name__)
+
+
+def _filter_live_results(results, live_doc_ids: set[str]):
+    """Drop search hits for docs that are no longer present in the current PDF library."""
+    if not live_doc_ids:
+        return []
+    return [row for row in results if row.doc_id in live_doc_ids]
+
+
+def _current_pdf_doc_ids() -> set[str]:
+    """Resolve the current authoritative set of searchable document IDs."""
+    return current_library_pdf_doc_ids(_get_zotero())
 
 
 @mcp.tool(tags=tool_tags("core", "search"))
@@ -95,6 +108,7 @@ def search_papers(
     retriever = _get_retriever()
     reranker = _get_reranker()
     _config = _get_config()
+    live_doc_ids = _current_pdf_doc_ids()
 
     queries = [query]
 
@@ -111,6 +125,7 @@ def search_papers(
             context_window=min(context_chunks, 3),
             filters=_build_chromadb_filters(year_min, year_max, chunk_types)
         )
+        r = _filter_live_results(r, live_doc_ids)
         r = _apply_text_filters(r, author, tag, collection)
         if required_terms:
             r = _apply_required_terms(r, required_terms)
@@ -173,6 +188,7 @@ def search_topic(
     retriever = _get_retriever()
     reranker = _get_reranker()
     _config = _get_config()
+    live_doc_ids = _current_pdf_doc_ids()
 
     queries = [query]
 
@@ -195,6 +211,7 @@ def search_topic(
             context_window=0,
             filters=_build_chromadb_filters(year_min, year_max, chunk_types)
         )
+        r = _filter_live_results(r, live_doc_ids)
         r = _apply_text_filters(r, author, tag, collection)
         if _config.rerank_enabled:
             r = reranker.rerank(r, section_weights, journal_weights)
@@ -358,6 +375,7 @@ def search_tables(
     store = _get_store()
     reranker = _get_reranker()
     _config = _get_config()
+    live_doc_ids = _current_pdf_doc_ids()
 
     # Build filters: chunk_type=table + year range (ChromaDB-native operators only)
     type_filter = {"chunk_type": {"$eq": "table"}}
@@ -369,6 +387,7 @@ def search_tables(
     fetch_k = base_fetch * 2 if _has_text_filters(author, tag, collection) else base_fetch
 
     results = store.search(query=query, top_k=fetch_k, filters=filters)
+    results = [r for r in results if r.metadata.get("doc_id", "") in live_doc_ids]
     results = _apply_text_filters(results, author, tag, collection)
 
     # Apply reranking (or bypass if disabled)
@@ -436,6 +455,7 @@ def search_figures(
     start = time.perf_counter()
     top_k = max(1, min(top_k, 30))
     store = _get_store()
+    live_doc_ids = _current_pdf_doc_ids()
 
     # Build filters: chunk_type=figure + year range (ChromaDB-native operators only)
     type_filter = {"chunk_type": {"$eq": "figure"}}
@@ -447,6 +467,7 @@ def search_figures(
     fetch_k = base_fetch * 2 if _has_text_filters(author, tag, collection) else base_fetch
 
     results = store.search(query=query, top_k=fetch_k, filters=filters)
+    results = [r for r in results if r.metadata.get("doc_id", "") in live_doc_ids]
     results = _apply_text_filters(results, author, tag, collection)
 
     output = []

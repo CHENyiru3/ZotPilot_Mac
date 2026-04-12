@@ -359,12 +359,16 @@ def cmd_status(args):
             )
         try:
             from .embeddings import create_embedder
+            from .index_authority import authoritative_indexed_doc_ids, current_library_pdf_doc_ids
             from .vector_store import VectorStore
+            from .zotero_client import ZoteroClient
 
             embedder = create_embedder(config)
             store = VectorStore(config.chroma_db_path, embedder)
-            doc_ids = store.get_indexed_doc_ids()
-            total = store.count()
+            zotero = ZoteroClient(config.zotero_data_dir)
+            current_doc_ids = current_library_pdf_doc_ids(zotero)
+            doc_ids = authoritative_indexed_doc_ids(store, current_doc_ids)
+            total = store.count_chunks_for_doc_ids(doc_ids)
             result["doc_count"] = len(doc_ids)
             result["chunk_count"] = total
             result["index_ready"] = len(doc_ids) > 0
@@ -423,12 +427,16 @@ def cmd_status(args):
 
     try:
         from .embeddings import create_embedder
+        from .index_authority import authoritative_indexed_doc_ids, current_library_pdf_doc_ids
         from .vector_store import VectorStore
+        from .zotero_client import ZoteroClient
 
         embedder = create_embedder(config)
         store = VectorStore(config.chroma_db_path, embedder)
-        doc_ids = store.get_indexed_doc_ids()
-        total = store.count()
+        zotero = ZoteroClient(config.zotero_data_dir)
+        current_doc_ids = current_library_pdf_doc_ids(zotero)
+        doc_ids = authoritative_indexed_doc_ids(store, current_doc_ids)
+        total = store.count_chunks_for_doc_ids(doc_ids)
         print("\n  Index stats:")
         print(f"    Documents: {len(doc_ids)}")
         print(f"    Chunks:    {total}")

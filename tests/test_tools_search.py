@@ -35,6 +35,14 @@ def _make_config():
     return cfg
 
 
+def _pdf_item(key: str):
+    item = MagicMock()
+    item.item_key = key
+    item.pdf_path = MagicMock()
+    item.pdf_path.exists.return_value = True
+    return item
+
+
 @pytest.fixture
 def mock_singletons():
     """Patch all state singletons for search tool tests."""
@@ -48,6 +56,11 @@ def mock_singletons():
          patch("zotpilot.tools.search._get_store", return_value=store), \
          patch("zotpilot.tools.search._get_config", return_value=config), \
          patch("zotpilot.tools.search._get_zotero") as mock_zotero:
+        mock_zotero.return_value.get_all_items_with_pdfs.return_value = [
+            _pdf_item("DOC1"),
+            _pdf_item("A"),
+            _pdf_item("B"),
+        ]
         yield {
             "retriever": retriever,
             "reranker": reranker,
@@ -87,6 +100,23 @@ class TestSearchPapers:
         mock_singletons["reranker"].rerank.return_value = []
         output = search_papers(query="test")
         assert output == []
+
+    def test_filters_orphaned_doc_ids(self, mock_singletons):
+        from zotpilot.tools.search import search_papers
+
+        current = MagicMock()
+        current.item_key = "DOC1"
+        current.pdf_path = MagicMock()
+        current.pdf_path.exists.return_value = True
+        mock_singletons["zotero"].return_value.get_all_items_with_pdfs.return_value = [current]
+
+        results = [_make_rr(doc_id="ORPHAN", score=0.95), _make_rr(doc_id="DOC1", score=0.90)]
+        mock_singletons["retriever"].search.return_value = results
+        mock_singletons["reranker"].rerank.side_effect = lambda rows, *_args, **_kwargs: rows
+
+        output = search_papers(query="test query", top_k=5)
+
+        assert [row["doc_id"] for row in output] == ["DOC1"]
 
 
 class TestSearchTopic:
