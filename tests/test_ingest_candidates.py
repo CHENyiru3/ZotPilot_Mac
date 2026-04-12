@@ -276,3 +276,94 @@ def test_str_branch_still_works_with_deprecation_warning(ingest_env, caplog):
     assert result["results"][0]["status"] == "saved_metadata_only"
     assert result["results"][0]["identifier"] == "10.1234/test"
     assert "deprecated identifiers=<list[str]>" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# MCP client compat: list params serialized as JSON strings
+# ---------------------------------------------------------------------------
+# Some MCP client wrappers (Qwen-based 'Sisyphus' runtimes, older Claude Code
+# builds) send list[T] params as JSON strings instead of real arrays. The tool
+# must accept both forms transparently via a Pydantic BeforeValidator.
+
+def test_candidates_accepts_json_string(ingest_env):
+    """A JSON-string form of candidates must be parsed before Pydantic validation."""
+    payload = '[{"doi": "10.1234/test", "title": "JSON-string candidate"}]'
+    result = ingestion_tool.ingest_by_identifiers(candidates=payload)
+
+    assert result["total"] == 1
+    assert result["results"][0]["status"] == "saved_metadata_only"
+    assert result["results"][0]["identifier"] == "10.1234/test"
+
+
+def test_identifiers_accepts_json_string(ingest_env):
+    """A JSON-string form of identifiers must also be accepted via BeforeValidator."""
+    payload = '["10.1234/test"]'
+    result = ingestion_tool.ingest_by_identifiers(identifiers=payload)
+
+    assert result["total"] == 1
+    assert result["results"][0]["status"] == "saved_metadata_only"
+    assert result["results"][0]["identifier"] == "10.1234/test"
+
+
+def test_candidates_malformed_json_raises_type_error(ingest_env):
+    """Malformed JSON passes through as str, Pydantic then reports a type error —
+    never silently swallow so the caller sees what went wrong."""
+    from pydantic import ValidationError
+
+    with pytest.raises((ToolError, ValidationError)):
+        ingestion_tool.ingest_by_identifiers(candidates="not json at all")
+
+
+def test_candidates_empty_json_string_list_rejected(ingest_env):
+    """JSON-string `[]` still hits the empty-list rejection (the upstream-filter
+    failure mode shouldn't have an escape hatch via string wrapping)."""
+    with pytest.raises(ToolError, match="at least one candidate"):
+        ingestion_tool.ingest_by_identifiers(candidates="[]")
+
+
+# ---------------------------------------------------------------------------
+# _parse_json_string_list helper — unit tests
+# ---------------------------------------------------------------------------
+# The helper is attached via Pydantic BeforeValidator to four different params:
+# ingest_by_identifiers(candidates, identifiers) and
+# search_academic_databases(concepts, institutions). Exercising it in isolation
+# covers all four paths without mocking OpenAlex in the search path.
+
+def test_parse_json_string_list_passes_through_real_list():
+    from zotpilot.tools.ingestion import _parse_json_string_list
+    payload = [{"doi": "10.1/x"}]
+    assert _parse_json_string_list(payload) is payload  # identity, no copy
+
+
+def test_parse_json_string_list_passes_through_none():
+    from zotpilot.tools.ingestion import _parse_json_string_list
+    assert _parse_json_string_list(None) is None
+
+
+def test_parse_json_string_list_decodes_json_array_of_dicts():
+    from zotpilot.tools.ingestion import _parse_json_string_list
+    result = _parse_json_string_list('[{"doi": "10.1/x"}, {"arxiv_id": "2301.00001"}]')
+    assert isinstance(result, list)
+    assert result == [{"doi": "10.1/x"}, {"arxiv_id": "2301.00001"}]
+
+
+def test_parse_json_string_list_decodes_json_array_of_strings():
+    from zotpilot.tools.ingestion import _parse_json_string_list
+    result = _parse_json_string_list('["Computer vision", "NLP"]')
+    assert result == ["Computer vision", "NLP"]
+
+
+def test_parse_json_string_list_malformed_passes_through_string():
+    """Malformed input stays as a string so Pydantic surfaces a clear type error
+    instead of us silently returning [] and masking the bug."""
+    from zotpilot.tools.ingestion import _parse_json_string_list
+    bad = "not valid json"
+    assert _parse_json_string_list(bad) == bad
+
+
+def test_parse_json_string_list_scalar_json_passes_through():
+    """If the JSON decodes but isn't a list (e.g. '42' or '{}'), return unchanged
+    so Pydantic validates it against the declared list[T] type and errors out."""
+    from zotpilot.tools.ingestion import _parse_json_string_list
+    assert _parse_json_string_list('42') == '42'
+    assert _parse_json_string_list('{"doi": "10.1/x"}') == '{"doi": "10.1/x"}'

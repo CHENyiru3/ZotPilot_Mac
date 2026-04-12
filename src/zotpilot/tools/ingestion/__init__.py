@@ -1,13 +1,14 @@
 """Ingestion MCP tools: search_academic_databases + ingest_by_identifiers."""
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 
 from ...bridge import DEFAULT_PORT, BridgeServer
 from ...state import (
@@ -24,6 +25,28 @@ from .models import IngestCandidate
 
 logger = logging.getLogger(__name__)
 _writer_lock = threading.Lock()
+
+
+def _parse_json_string_list(value: Any) -> Any:
+    """Accept list params even when an MCP client wraps them as JSON strings.
+
+    Some MCP client wrappers (e.g. Qwen-based 'Sisyphus' runtimes, older
+    Claude Code builds) serialize list[T] params as JSON strings instead
+    of real arrays before they reach the server. Decode transparently so
+    Pydantic can validate the inner structure.
+
+    Passes through lists, None, and other non-string values unchanged.
+    On malformed JSON, returns the original value so Pydantic surfaces
+    a type error the caller can act on instead of silently swallowing.
+    """
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return value
+        if isinstance(parsed, list):
+            return parsed
+    return value
 
 # ---------------------------------------------------------------------------
 # INBOX collection cache
@@ -275,6 +298,7 @@ def search_academic_databases(
     ] = False,
     concepts: Annotated[
         list[str] | None,
+        BeforeValidator(_parse_json_string_list),
         Field(description=(
             "Concept/topic names (human-readable, resolved server-side). "
             "Examples: ['Computer vision', 'Natural language processing']. "
@@ -290,6 +314,7 @@ def search_academic_databases(
     ] = None,
     institutions: Annotated[
         list[str] | None,
+        BeforeValidator(_parse_json_string_list),
         Field(description=(
             "Institution names (resolved server-side). "
             "Examples: ['Stanford University', 'MIT', 'Google DeepMind']."
@@ -307,6 +332,22 @@ def search_academic_databases(
     structured filter narrows the space. Use concepts+venue+year_min for
     precise topic discovery; use DOI or quoted phrase for known papers.
     """
+    # MCP client compatibility: some clients wrap list[str] params as JSON
+    # strings. Coerce defensively — mirrors the same pattern used by
+    # ingest_by_identifiers. See _parse_json_string_list for rationale.
+    concepts = _parse_json_string_list(concepts)
+    institutions = _parse_json_string_list(institutions)
+    if isinstance(concepts, str):
+        raise ToolError(
+            "`concepts` must be a list of concept names, e.g. "
+            '["Computer vision", "Natural language processing"].'
+        )
+    if isinstance(institutions, str):
+        raise ToolError(
+            "`institutions` must be a list of institution names, e.g. "
+            '["Stanford University", "Google DeepMind"].'
+        )
+
     config = _get_config()
     sort_map = {"relevance": "relevance", "citations": "citationCount", "date": "publicationDate"}
     return search.search_academic_databases_impl(
@@ -333,6 +374,7 @@ def search_academic_databases(
 def ingest_by_identifiers(
     candidates: Annotated[
         list[IngestCandidate] | None,
+        BeforeValidator(_parse_json_string_list),
         Field(description=(
             "**Preferred path.** Structured candidates from "
             "search_academic_databases. Pass each selected search result dict "
@@ -342,6 +384,7 @@ def ingest_by_identifiers(
     ] = None,
     identifiers: Annotated[
         list[str] | None,
+        BeforeValidator(_parse_json_string_list),
         Field(description=(
             "_Deprecated._ Direct DOI/arXiv/URL string list kept only for "
             "backward compatibility. Use candidates= instead."
@@ -363,6 +406,31 @@ def ingest_by_identifiers(
     Statuses: saved_with_pdf, saved_metadata_only, blocked, duplicate, failed.
     When action_required is non-empty, surface to user and wait.
     """
+    # MCP client compatibility: some clients (Qwen-based 'Sisyphus' runtimes,
+    # older Claude Code builds) wrap list[T] params as JSON strings on the
+    # wire. The signature has a BeforeValidator that catches this during
+    # FastMCP dispatch, but we also coerce defensively here so direct Python
+    # calls (tests, in-process callers) get the same behavior and so the
+    # string → list[IngestCandidate] conversion is explicit at the body level.
+    candidates = _parse_json_string_list(candidates)
+    identifiers = _parse_json_string_list(identifiers)
+    if isinstance(candidates, str):
+        raise ToolError(
+            "`candidates` could not be parsed as a JSON list of candidate "
+            "dicts. Pass the search result object directly without "
+            "modification."
+        )
+    if isinstance(identifiers, str):
+        raise ToolError(
+            "`identifiers` could not be parsed as a JSON list of strings. "
+            'Expected form: ["10.1234/abc", "2301.00001"].'
+        )
+    if isinstance(candidates, list):
+        candidates = [
+            c if isinstance(c, IngestCandidate) else IngestCandidate.model_validate(c)
+            for c in candidates
+        ]
+
     # Empty lists count as "absent": calling ingest with zero candidates is
     # almost always an upstream filter bug (e.g. `local_duplicate` wiped the
     # selection). Fail loudly instead of silently returning total=0.
