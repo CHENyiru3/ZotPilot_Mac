@@ -126,9 +126,12 @@ class TestSaveSingleAndVerify:
     @patch("zotpilot.tools.ingestion.connector.validate_saved_item")
     @patch("zotpilot.tools.ingestion.connector.poll_single_save_result")
     @patch("zotpilot.tools.ingestion.connector.enqueue_save_request")
-    def test_pdf_confirmed_skips_pdf_poll(
+    def test_pdf_confirmed_verified_via_local_api(
         self, mock_enqueue, mock_poll, mock_validate, mock_pdf,
     ):
+        """When connector reports pdf_connector_confirmed, we still verify
+        via local API (short 10s window) to guard against false positives
+        from Springer embedded-PDF pages."""
         from zotpilot.tools.ingestion.connector import save_single_and_verify
 
         mock_enqueue.return_value = ("req-1", None)
@@ -142,6 +145,7 @@ class TestSaveSingleAndVerify:
             "valid": True, "item_type": "journalArticle",
             "title": "Paper", "reason": None,
         }
+        mock_pdf.return_value = "attached"
 
         mock_writer = MagicMock()
         result = save_single_and_verify(
@@ -154,8 +158,8 @@ class TestSaveSingleAndVerify:
             writer_lock=MagicMock(),
         )
 
-        mock_pdf.assert_not_called()
-        mock_writer.try_attach_oa_pdf.assert_not_called()
+        mock_pdf.assert_called_once()
+        assert mock_pdf.call_args.kwargs.get("timeout_s") == 10.0
         assert result["status"] == "saved_with_pdf"
         assert result["has_pdf"] is True
 
@@ -163,9 +167,11 @@ class TestSaveSingleAndVerify:
     @patch("zotpilot.tools.ingestion.connector.validate_saved_item")
     @patch("zotpilot.tools.ingestion.connector.poll_single_save_result")
     @patch("zotpilot.tools.ingestion.connector.enqueue_save_request")
-    def test_pdf_failed_skips_pdf_poll_and_uses_oa_fallback(
+    def test_pdf_failed_verifies_then_uses_oa_fallback(
         self, mock_enqueue, mock_poll, mock_validate, mock_pdf,
     ):
+        """When connector reports pdf_failed, we still verify via local API
+        (full 30s window) then run OA fallback when PDF is absent."""
         from zotpilot.tools.ingestion.connector import save_single_and_verify
 
         mock_enqueue.return_value = ("req-1", None)
@@ -179,6 +185,7 @@ class TestSaveSingleAndVerify:
             "valid": True, "item_type": "journalArticle",
             "title": "Paper", "reason": None,
         }
+        mock_pdf.return_value = "none"
 
         resolver = MagicMock()
         resolver.resolve.return_value = SimpleNamespace(
@@ -200,7 +207,7 @@ class TestSaveSingleAndVerify:
                 writer_lock=MagicMock(),
             )
 
-        mock_pdf.assert_not_called()
+        mock_pdf.assert_called_once()
         mock_writer.try_attach_oa_pdf.assert_called_once()
         assert result["status"] == "saved_with_pdf"
         assert result["has_pdf"] is True
@@ -280,9 +287,12 @@ class TestSaveSingleAndVerify:
     @patch("zotpilot.tools.ingestion.connector.validate_saved_item")
     @patch("zotpilot.tools.ingestion.connector.poll_single_save_result")
     @patch("zotpilot.tools.ingestion.connector.enqueue_save_request")
-    def test_invalid_item_falls_back_to_api(
+    def test_invalid_webpage_retries_then_falls_back_to_api(
         self, mock_enqueue, mock_poll, mock_validate, mock_delete, mock_fallback,
     ):
+        """When Connector saves a webpage (JS throttling in background tab),
+        retry once with a fresh tab.  If retry also returns webpage, fall back
+        to API.  delete_item_safe is called twice (once per attempt)."""
         from zotpilot.tools.ingestion.connector import save_single_and_verify
 
         mock_enqueue.return_value = ("req-1", None)
@@ -309,7 +319,7 @@ class TestSaveSingleAndVerify:
 
         assert result["status"] == "saved_metadata_only"
         assert result["method"] == "api_fallback"
-        mock_delete.assert_called_once()
+        assert mock_delete.call_count == 2  # once per attempt
         mock_fallback.assert_called_once()
 
     @patch("zotpilot.tools.ingestion.connector.poll_single_save_result")

@@ -525,31 +525,18 @@ def ingest_by_identifiers(
             remaining, preflight_failures, blocking = connector.run_preflight_check(
                 [{"url": u} for u in urls], DEFAULT_PORT, BridgeServer, logger,
             )
+            # Preflight is advisory, not blocking.  Background tabs in Chrome
+            # MV3 throttle JS execution, causing Cloudflare challenges and SPA
+            # hydration to fail — producing false-positive anti-bot detections.
+            # Log the warning but let individual saves handle anti-bot per-paper;
+            # save_single_and_verify has its own anti-bot detection + retry logic.
             if blocking:
-                blocked_results = []
-                for candidate in candidates_internal:
-                    if candidate.get("status"):
-                        blocked_results.append(_result_from_candidate(candidate))
-                    else:
-                        blocked_results.append(
-                            _result_from_candidate(
-                                candidate,
-                                status="blocked",
-                                error="batch_halted_by_preflight",
-                            )
-                        )
-                return {
-                    "total": total_inputs,
-                    "results": blocked_results,
-                    "action_required": [{
-                        "type": "preflight_blocked",
-                        "message": (
-                            "Anti-bot protection detected. "
-                            "Complete browser verification in Chrome, then retry."
-                        ),
-                        "blocked_urls": [f.get("url") for f in preflight_failures],
-                    }],
-                }
+                blocked_urls = [f.get("url") for f in preflight_failures]
+                logger.warning(
+                    "Preflight reported anti-bot for %d URL(s) — proceeding anyway "
+                    "(background tab JS throttling causes false positives): %s",
+                    len(blocked_urls), blocked_urls,
+                )
 
     # Step 5: Sequential save + verify
     results: list[dict] = []
@@ -568,6 +555,7 @@ def ingest_by_identifiers(
             # Connector route. tags=None is invariant — see tool docstring.
             result = connector.save_single_and_verify(
                 url, doi, title,
+                arxiv_id=candidate.get("arxiv_id"),
                 collection_key=collection_key, tags=None,
                 bridge_url=bridge_url, get_writer=get_writer,
                 writer_lock=_writer_lock, _logger=logger,
@@ -575,7 +563,10 @@ def ingest_by_identifiers(
         elif doi:
             # API-only route. tags=None is invariant — see tool docstring.
             result = connector._doi_api_fallback(
-                doi, title, collection_key=collection_key, tags=None,
+                doi, title,
+                arxiv_id=candidate.get("arxiv_id"),
+                oa_url=None,
+                collection_key=collection_key, tags=None,
                 get_writer=get_writer, writer_lock=_writer_lock, _logger=logger,
             )
         else:

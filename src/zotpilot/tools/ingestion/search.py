@@ -122,6 +122,24 @@ def format_openalex_paper(paper: dict) -> dict:
         if match:
             arxiv_id = match.group(1)
 
+    # Back-fill from any OpenAlex location (e.g. Location[1] = arXiv).
+    # Many Springer/Elsevier papers have arXiv preprints listed only as
+    # secondary locations, not in the primary DOI or best_oa_location.
+    if not arxiv_id:
+        for loc in paper.get("locations", []):
+            for url_field in ("landing_page_url", "pdf_url"):
+                loc_url = (loc.get(url_field) or "").lower()
+                if "arxiv.org" in loc_url:
+                    match = re.search(
+                        r"arxiv\.org/(?:abs|pdf)/([\w.\-]+?)(?:v\d+)?(?:\.pdf)?(?:[?#]|$)",
+                        loc_url,
+                    )
+                    if match:
+                        arxiv_id = match.group(1)
+                        break
+            if arxiv_id:
+                break
+
     return {
         "title": paper.get("display_name"),
         "authors": authors,

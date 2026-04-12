@@ -328,54 +328,13 @@ Zotero.AgentAPI = new function() {
 		return null;
 	}
 
-	async function _applyLocalRouting(itemKey, collectionKey, tags) {
-		const base = "http://127.0.0.1:23119/api/users/0/items/" + itemKey;
-		try {
-			let resp = await fetch(base, {
-				method: "GET",
-				headers: { "Accept": "application/json", "Zotero-Allowed-Request": "1" },
-				signal: AbortSignal.timeout(5000),
-			});
-			if (!resp.ok) {
-				let msg = "local routing GET failed: " + resp.status;
-				Zotero.debug("[ZotPilot] " + msg);
-				return { error: msg };
-			}
-			let item = await resp.json();
-			let data = item.data || item;
-			if (collectionKey) {
-				let existing = new Set(data.collections || []);
-				existing.add(collectionKey);
-				data.collections = Array.from(existing);
-			}
-			if (tags && tags.length) {
-				let existing = new Set((data.tags || []).map(t => t.tag));
-				for (let t of tags) existing.add(t);
-				data.tags = Array.from(existing).map(t => ({ tag: t }));
-			}
-			let patch = await fetch(base, {
-				method: "PATCH",
-				headers: {
-					"Content-Type": "application/json",
-					"Zotero-Allowed-Request": "1",
-					"If-Unmodified-Since-Version": String(item.version || 0),
-				},
-				body: JSON.stringify({ collections: data.collections, tags: data.tags }),
-				signal: AbortSignal.timeout(5000),
-			});
-			if (patch.ok) {
-				Zotero.debug("[ZotPilot] local routing applied for " + itemKey);
-			} else {
-				let msg = "local routing PATCH failed: " + patch.status;
-				Zotero.debug("[ZotPilot] " + msg);
-				return { error: msg };
-			}
-		} catch (e) {
-			let msg = "local routing error: " + e.message;
-			Zotero.debug("[ZotPilot] " + msg);
-			return { error: msg };
-		}
-		return null;
+	async function _applyLocalRouting(/* itemKey, collectionKey, tags */) {
+		// Zotero Desktop local API (port 23119) returns 501 Not Implemented for
+		// PATCH requests — it is effectively read-only for items.  Collection/tag
+		// routing is handled by the Python bridge via pyzotero Web API instead
+		// (apply_collection_tag_routing in connector.py).  Return an error so the
+		// bridge knows to run its own routing pass.
+		return { error: "local_api_read_only" };
 	}
 
 	async function _fetchRecentTopLevelItems() {
@@ -514,16 +473,25 @@ Zotero.AgentAPI = new function() {
 			// 3. Wait for page load + translator detection
 			let readyResult = await _waitForReady(tab.id, 30000);
 
-			// B1: If translator wait timed out with no match, fail fast — do not attempt
-			// a webpage-snapshot save. Python bridge will see error_code "no_translator"
-			// and can immediately fall back to the API metadata path if a DOI is available.
+			// B1: If translator wait timed out with no match, retry once after a delay.
+			// Background tabs in Chrome MV3 throttle JS execution, causing SPA pages
+			// (IEEE Xplore, Springer) to delay React hydration and citation_* meta tag
+			// injection.  The Zotero translator relies on these meta tags — without them
+			// it sees only an empty shell.  A 5s delay lets the browser catch up on
+			// deferred JS work; the second _waitForReady attempt usually succeeds because
+			// DNS/TLS are now cached and the page content has hydrated.
 			if (readyResult && readyResult.translatorFound === false) {
-				Zotero.debug("[ZotPilot] no translator found for tab " + tab.id + " — reporting no_translator");
+				Zotero.debug("[ZotPilot] no translator on first attempt for tab " + tab.id + " — retrying after 5s delay");
+				await new Promise(r => setTimeout(r, 5000));
+				readyResult = await _waitForReady(tab.id, 15000);
+			}
+			if (readyResult && readyResult.translatorFound === false) {
+				Zotero.debug("[ZotPilot] no translator found after retry for tab " + tab.id + " — reporting no_translator");
 				await _postResult({
 					request_id,
 					success: false,
 					error_code: "no_translator",
-					error_message: "No Zotero translator matched this URL within 20s. Falling back to API metadata.",
+					error_message: "No Zotero translator matched this URL after retry. Falling back to API metadata.",
 					url,
 				});
 				return;

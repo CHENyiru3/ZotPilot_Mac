@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 DISCOVERY_BACKOFF_DELAYS = [2.0, 4.0, 8.0, 16.0, 32.0]
 ITEM_DISCOVERY_WINDOW_S = 120
 PDF_VERIFICATION_WINDOW_S = 15.0
-ROUTING_RETRY_DELAYS_S = [0.0, 2.0, 5.0]
+ROUTING_RETRY_DELAYS_S = [0.0, 5.0, 10.0, 15.0]
 
 _PUBLISHER_TAG_SOURCES = {
     "arxiv.org", "biorxiv.org", "medrxiv.org",
@@ -569,10 +569,21 @@ def run_preflight_check(
 
     for error in preflight_report.get("errors", []):
         error_url = error.get("url") or ""
-        blocked_domains.add(extract_publisher_domain(error_url))
+        # Only block the domain for genuine anti-bot errors, not timeouts
+        # or generic failures.  SPA pages (IEEE Xplore, Springer) may timeout
+        # during preflight due to slow JS hydration — blocking the entire
+        # domain for a timeout would prevent all saves to that publisher.
+        error_code = error.get("error_code") or "preflight_failed"
+        if error_code == "anti_bot_detected":
+            blocked_domains.add(extract_publisher_domain(error_url))
+        else:
+            _logger.debug(
+                "Preflight non-blocking error for %s: %s (%s)",
+                error_url, error.get("error"), error_code,
+            )
         failures.append({
             "url": error_url, "status": "failed",
-            "error_code": error.get("error_code") or "preflight_failed",
+            "error_code": error_code,
             "error": error.get("error") or "preflight failed",
         })
 
@@ -587,7 +598,7 @@ def run_preflight_check(
             dropped, len(blocked_domains), len(remaining),
         )
 
-    if not remaining:
+    if not remaining and blocked_domains:
         blocking_dict = {
             "decision_id": "preflight_blocked",
             "description": (
@@ -1029,12 +1040,14 @@ def save_single_and_verify(
     doi: str | None,
     title: str | None,
     *,
+    arxiv_id: str | None = None,
     collection_key: str | None,
     tags: list[str] | None,
     bridge_url: str,
     get_writer,
     writer_lock,
     _logger=None,
+    _retry_count: int = 0,
 ) -> dict:
     """逐条 save + 即时验证。v0.5.0 入库的核心函数。
 
@@ -1101,6 +1114,7 @@ def save_single_and_verify(
 
     if not save_result.get("success"):
         error_text = save_result.get("error", "unknown")
+        error_code = save_result.get("error_code", "")
         result_title = save_result.get("title", "")
         if looks_like_error_page_title(result_title, save_result.get("item_key")):
             ik = save_result.get("item_key")
@@ -1111,10 +1125,26 @@ def save_single_and_verify(
                     "title": title or "",
                     "action_required": "用户需在浏览器中完成验证，然后重试",
                     "warning": None}
+        # Cold-start retry: Connector-side already retried _waitForReady once
+        # (5s delay + 15s wait). If still no_translator, one more attempt with a
+        # fresh tab — DNS/TLS cache is now warm and JS hydration should be faster.
+        if error_code == "no_translator" and _retry_count == 0:
+            _logger.info(
+                "no_translator after Connector retry for %s — retrying with fresh tab",
+                url,
+            )
+            return save_single_and_verify(
+                url, doi, title, arxiv_id=arxiv_id,
+                collection_key=collection_key, tags=tags,
+                bridge_url=bridge_url, get_writer=get_writer,
+                writer_lock=writer_lock, _logger=_logger,
+                _retry_count=1,
+            )
         if doi:
             _logger.info("Connector failed for %s, trying DOI API fallback", url)
             return _doi_api_fallback(
-                doi, title, collection_key=collection_key, tags=tags,
+                doi, title, arxiv_id=arxiv_id,
+                collection_key=collection_key, tags=tags,
                 get_writer=get_writer, writer_lock=writer_lock, _logger=_logger,
             )
         return {"status": "failed", "method": "connector",
@@ -1142,14 +1172,34 @@ def save_single_and_verify(
     validation = validate_saved_item(item_key, get_writer=get_writer, _logger=_logger)
 
     if not validation["valid"]:
+        reason = validation.get("reason", "")
+        # Cold-start retry for webpage saves: background tab JS throttling
+        # caused the translator to miss citation_* meta tags and fall back to
+        # a generic webpage save.  Retry with a fresh tab (warm cache) before
+        # falling back to the API-only path which loses Connector PDF access.
+        if "webpage" in reason and _retry_count == 0:
+            _logger.info(
+                "Connector saved webpage for %s (item %s) — retrying with fresh tab",
+                url, item_key,
+            )
+            # Best-effort delete; don't block long — Zotero may auto-cleanup
+            delete_item_safe(item_key, get_writer=get_writer, _logger=_logger)
+            return save_single_and_verify(
+                url, doi, title, arxiv_id=arxiv_id,
+                collection_key=collection_key, tags=tags,
+                bridge_url=bridge_url, get_writer=get_writer,
+                writer_lock=writer_lock, _logger=_logger,
+                _retry_count=1,
+            )
         _logger.warning(
             "Connector item %s invalid: %s — deleting and falling back to API",
-            item_key, validation["reason"],
+            item_key, reason,
         )
         delete_item_safe(item_key, get_writer=get_writer, _logger=_logger)
         if doi:
             return _doi_api_fallback(
-                doi, title, collection_key=collection_key, tags=tags,
+                doi, title, arxiv_id=arxiv_id,
+                collection_key=collection_key, tags=tags,
                 get_writer=get_writer, writer_lock=writer_lock, _logger=_logger,
             )
         return {"status": "failed", "method": "connector",
@@ -1188,18 +1238,24 @@ def save_single_and_verify(
     connector_pdf_failed = bool(save_result.get("pdf_failed"))
     if connector_pdf_confirmed:
         _logger.debug(
-            "PDF confirmed by connector signal — skipping local API poll for %s",
+            "Connector reports PDF attached for %s — verifying via local API",
             item_key,
         )
-        pdf_status = "attached"
     elif connector_pdf_failed:
         _logger.debug(
-            "PDF failed per connector signal — skipping local API poll for %s",
+            "Connector reports PDF failed for %s — will try OA fallback",
             item_key,
         )
-        pdf_status = "none"
-    else:
-        pdf_status = check_pdf_status(item_key, get_writer=get_writer, _logger=_logger)
+
+    # Always verify via local API — connector signals are hints, not ground
+    # truth.  Springer embedded-PDF pages can trigger pdf_connector_confirmed
+    # without actually attaching a file.  Use a shorter poll window when the
+    # connector claims success (PDF should appear quickly if it really saved).
+    pdf_status = check_pdf_status(
+        item_key, get_writer=get_writer,
+        timeout_s=10.0 if connector_pdf_confirmed else 30.0,
+        _logger=_logger,
+    )
 
     # OA PDF fallback: when the Connector's translator didn't attach a PDF
     # (paywalled with no session cookies, translator bug, JS-rendered page,
@@ -1209,28 +1265,33 @@ def save_single_and_verify(
     # only the DOI to try_attach_oa_pdf misses papers whose published
     # version has no Unpaywall record but whose arXiv preprint is free
     # (e.g. IJCV-published CLIP-Adapter resolves only via its arXiv id).
-    if pdf_status != "attached" and doi:
+    if pdf_status != "attached" and (doi or arxiv_id):
         try:
             from ...state import _get_resolver
             resolver = _get_resolver()
-            metadata = resolver.resolve(doi)
+            # Resolve via arXiv when arxiv_id is known: CrossRef._resolve_doi
+            # hard-codes arxiv_id=None, so resolving a journal DOI never yields
+            # an arXiv PDF URL even when a preprint exists.
+            resolve_id = f"arxiv:{arxiv_id}" if arxiv_id else doi
+            metadata = resolver.resolve(resolve_id)
+            effective_arxiv = metadata.arxiv_id or arxiv_id
             with writer_lock:
                 attach_status = get_writer().try_attach_oa_pdf(
                     item_key,
                     doi=metadata.doi or doi,
                     oa_url=metadata.oa_url,
-                    arxiv_id=metadata.arxiv_id,
+                    arxiv_id=effective_arxiv,
                 )
             if attach_status == "attached":
                 _logger.info(
                     "OA PDF fallback attached to %s (arxiv=%s oa_url=%s)",
-                    item_key, metadata.arxiv_id, metadata.oa_url,
+                    item_key, effective_arxiv, metadata.oa_url,
                 )
                 pdf_status = "attached"
             else:
                 _logger.debug(
                     "OA PDF fallback for %s: %s (arxiv=%s oa_url=%s)",
-                    item_key, attach_status, metadata.arxiv_id, metadata.oa_url,
+                    item_key, attach_status, effective_arxiv, metadata.oa_url,
                 )
         except Exception as exc:
             _logger.debug("OA PDF fallback failed for %s: %s", item_key, exc)
@@ -1247,13 +1308,20 @@ def _doi_api_fallback(
     doi: str,
     title: str | None,
     *,
+    arxiv_id: str | None = None,
+    oa_url: str | None = None,
     collection_key: str | None,
     tags: list[str] | None,
     get_writer,
     writer_lock,
     _logger=None,
 ) -> dict:
-    """DOI API fallback：通过 CrossRef/arXiv 元数据 + pyzotero 创建条目。"""
+    """DOI API fallback：通过 CrossRef/arXiv 元数据 + pyzotero 创建条目。
+
+    arxiv_id — when provided, save_via_api resolves via the arXiv API instead
+    of CrossRef (avoids CrossRef returning arxiv_id=None for journal DOIs) and
+    try_attach_oa_pdf can download the arXiv PDF directly.
+    """
     if _logger is None:
         _logger = logger
 
@@ -1262,7 +1330,12 @@ def _doi_api_fallback(
             pass
 
     candidate = {
-        "paper": {"doi": doi, "title": title or ""},
+        "paper": {
+            "doi": doi,
+            "title": title or "",
+            "arxiv_id": arxiv_id,
+            "oa_url": oa_url,
+        },
         "_index": 0,
     }
     result = save_via_api(
