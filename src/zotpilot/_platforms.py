@@ -952,6 +952,10 @@ def _write_mcp_config(config_path: Path, env: dict[str, str]) -> bool:
             json.load(f)
 
         os.replace(tmp_path, config_path)
+
+        # Restrict permissions on Unix (owner read/write only)
+        if sys.platform != "win32":
+            os.chmod(config_path, 0o600)
         return True
     except (OSError, json.JSONDecodeError) as e:
         print(f"  ERROR writing {config_path}: {e}", file=sys.stderr)

@@ -2,6 +2,7 @@
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -191,6 +192,10 @@ def cmd_setup(args):
 
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config_data, f, indent=2)
+
+    # Restrict permissions on Unix (owner read/write only)
+    if sys.platform != "win32":
+        os.chmod(config_path, 0o600)
 
     from ._platforms import reconcile_runtime
 
