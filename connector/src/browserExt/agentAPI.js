@@ -59,7 +59,7 @@ Zotero.AgentAPI = new function() {
 	let _heartbeatTimer = null; // Independent heartbeat timer — not tied to poll loop
 	let _busy = false;
 
-	// Map<tabId, {resolve, item_key, item_title}> — pending save completions
+	// Map<tabId, {resolve, item_key, item_title, progressRows, pdf_*}> — pending save completions
 	let _pendingSaves = new Map();
 
 	/**
@@ -151,19 +151,46 @@ Zotero.AgentAPI = new function() {
 				let payload = args || {};
 				if (payload.title && !entry.item_title) entry.item_title = payload.title;
 				if (payload.key && !entry.item_key) entry.item_key = payload.key;
-				// PDF/attachment download failed: Zotero sets iconSrc to cross.png.
-				// Resolve immediately so the user can handle the verification rather
-				// than waiting for the 60s timeout — item metadata was saved successfully.
-				if (payload.iconSrc && payload.iconSrc.includes("cross.png") && !entry.item_key) {
-					Zotero.debug("[ZotPilot] attachment failed (cross.png) for " + (payload.title || "unknown") + " — resolving with pdf_failed");
-					_pendingSaves.delete(tab.id);
-					entry.resolve({
-						success: true,
-						pdf_failed: true,
-						error_code: "pdf_download_failed",
-						error: "PDF download failed (anti-bot or access restriction). Item metadata was saved. Please download the PDF manually.",
-						_via: "itemProgress_cross",
-					});
+
+				const rowId = payload.id;
+				let row = null;
+				if (rowId !== undefined && rowId !== null) {
+					row = entry.progressRows.get(rowId) || { sawPdfIcon: false, completed: false };
+				}
+
+				// "attachment-pdf" only establishes PDF context for this progress row.
+				// The row is confirmed only once it reaches progress 100.
+				if (row && payload.iconSrc && payload.iconSrc.includes("attachment-pdf")) {
+					row.sawPdfIcon = true;
+				}
+				if (row && payload.progress === 100) {
+					row.completed = true;
+				}
+				if (row && row.sawPdfIcon && row.completed) {
+					entry.pdf_connector_confirmed = true;
+				}
+
+				// "cross.png" is a generic attachment failure icon. Treat it as a PDF
+				// failure only when the same row was previously identified as PDF.
+				if (row && payload.iconSrc && payload.iconSrc.includes("cross.png") && row.sawPdfIcon) {
+					entry.pdf_failed = true;
+					// Resolve immediately so the user can handle the verification rather
+					// than waiting for the 60s timeout — item metadata was saved successfully.
+					if (!entry.item_key) {
+						Zotero.debug("[ZotPilot] PDF attachment failed (cross.png) for " + (payload.title || "unknown") + " — resolving with pdf_failed");
+						_pendingSaves.delete(tab.id);
+						entry.resolve({
+							success: true,
+							pdf_failed: true,
+							error_code: "pdf_download_failed",
+							error: "PDF download failed (anti-bot or access restriction). Item metadata was saved. Please download the PDF manually.",
+							_via: "itemProgress_cross",
+						});
+					}
+				}
+
+				if (row) {
+					entry.progressRows.set(rowId, row);
 				}
 			}
 			// ALWAYS forward — observe only, never modify args
@@ -505,7 +532,14 @@ Zotero.AgentAPI = new function() {
 			// 4. Set up completion detection — keep local ref to entry so we can
 			//    read item_key/item_title after the promise resolves (the Map entry
 			//    is deleted by the patch that fires, but the object reference lives on)
-			let entry = { resolve: null, item_key: null, item_title: null };
+			let entry = {
+				resolve: null,
+				item_key: null,
+				item_title: null,
+				progressRows: new Map(),
+				pdf_connector_confirmed: false,
+				pdf_failed: false,
+			};
 			let saveCompleted = new Promise((resolve) => {
 				// Task 1.2: 60s timeout reports unconfirmed instead of false-positive success
 				let timer = setTimeout(() => {
@@ -593,6 +627,8 @@ Zotero.AgentAPI = new function() {
 				success: result.success,
 				...(result.error_code ? { error_code: result.error_code } : {}),
 				...(result.error ? { error_message: result.error } : {}),
+				pdf_connector_confirmed: !!entry.pdf_connector_confirmed,
+				pdf_failed: !!entry.pdf_failed,
 				...(routingWarning ? { routing_warning: routingWarning } : {}),
 				routing_applied: !!(entry.item_key && !routingWarning && (command.collection_key || (command.tags && command.tags.length))),
 				url,

@@ -18,7 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import httpx
@@ -817,7 +817,9 @@ def _fetch_item_via_local_api(
             with urllib.request.urlopen(req, timeout=timeout_s) as resp:
                 payload = json.loads(resp.read())
             # Zotero local API returns either {"data": {...}} or the data directly
-            return payload.get("data", payload)
+            if isinstance(payload, dict):
+                return cast(dict[Any, Any], payload.get("data", payload))
+            return None
         except urllib.error.HTTPError as exc:
             if exc.code == 404 and attempt < max_retries - 1:
                 time.sleep(1.0 * (attempt + 1))  # small backoff for flush lag
@@ -1070,6 +1072,7 @@ def save_single_and_verify(
         return {"status": "failed", "method": "connector",
                 "error": str(enqueue_error), "item_key": None, "has_pdf": False,
                 "title": title or "", "action_required": None, "warning": None}
+    assert request_id is not None
 
     # Step 2: Poll result
     save_result = poll_single_save_result(bridge_url, request_id, timeout_s=60.0)
@@ -1181,7 +1184,22 @@ def save_single_and_verify(
         except Exception as exc:
             _logger.warning("Routing failed for %s: %s", item_key, exc)
 
-    pdf_status = check_pdf_status(item_key, get_writer=get_writer, _logger=_logger)
+    connector_pdf_confirmed = bool(save_result.get("pdf_connector_confirmed"))
+    connector_pdf_failed = bool(save_result.get("pdf_failed"))
+    if connector_pdf_confirmed:
+        _logger.debug(
+            "PDF confirmed by connector signal — skipping local API poll for %s",
+            item_key,
+        )
+        pdf_status = "attached"
+    elif connector_pdf_failed:
+        _logger.debug(
+            "PDF failed per connector signal — skipping local API poll for %s",
+            item_key,
+        )
+        pdf_status = "none"
+    else:
+        pdf_status = check_pdf_status(item_key, get_writer=get_writer, _logger=_logger)
 
     # OA PDF fallback: when the Connector's translator didn't attach a PDF
     # (paywalled with no session cookies, translator bug, JS-rendered page,

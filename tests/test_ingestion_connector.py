@@ -1,6 +1,7 @@
 """Tests for ingestion connector module (v0.5.0)."""
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
@@ -120,6 +121,159 @@ class TestSaveSingleAndVerify:
         assert result["item_key"] == "KEY1"
         assert result["has_pdf"] is True
         assert result["method"] == "connector"
+
+    @patch("zotpilot.tools.ingestion.connector.check_pdf_status")
+    @patch("zotpilot.tools.ingestion.connector.validate_saved_item")
+    @patch("zotpilot.tools.ingestion.connector.poll_single_save_result")
+    @patch("zotpilot.tools.ingestion.connector.enqueue_save_request")
+    def test_pdf_confirmed_skips_pdf_poll(
+        self, mock_enqueue, mock_poll, mock_validate, mock_pdf,
+    ):
+        from zotpilot.tools.ingestion.connector import save_single_and_verify
+
+        mock_enqueue.return_value = ("req-1", None)
+        mock_poll.return_value = {
+            "success": True,
+            "item_key": "KEY1",
+            "title": "Paper",
+            "pdf_connector_confirmed": True,
+        }
+        mock_validate.return_value = {
+            "valid": True, "item_type": "journalArticle",
+            "title": "Paper", "reason": None,
+        }
+
+        mock_writer = MagicMock()
+        result = save_single_and_verify(
+            "https://example.com/paper",
+            doi="10.1234/test",
+            title="Paper",
+            collection_key=None, tags=None,
+            bridge_url="http://127.0.0.1:23119",
+            get_writer=lambda: mock_writer,
+            writer_lock=MagicMock(),
+        )
+
+        mock_pdf.assert_not_called()
+        mock_writer.try_attach_oa_pdf.assert_not_called()
+        assert result["status"] == "saved_with_pdf"
+        assert result["has_pdf"] is True
+
+    @patch("zotpilot.tools.ingestion.connector.check_pdf_status")
+    @patch("zotpilot.tools.ingestion.connector.validate_saved_item")
+    @patch("zotpilot.tools.ingestion.connector.poll_single_save_result")
+    @patch("zotpilot.tools.ingestion.connector.enqueue_save_request")
+    def test_pdf_failed_skips_pdf_poll_and_uses_oa_fallback(
+        self, mock_enqueue, mock_poll, mock_validate, mock_pdf,
+    ):
+        from zotpilot.tools.ingestion.connector import save_single_and_verify
+
+        mock_enqueue.return_value = ("req-1", None)
+        mock_poll.return_value = {
+            "success": True,
+            "item_key": "KEY1",
+            "title": "Paper",
+            "pdf_failed": True,
+        }
+        mock_validate.return_value = {
+            "valid": True, "item_type": "journalArticle",
+            "title": "Paper", "reason": None,
+        }
+
+        resolver = MagicMock()
+        resolver.resolve.return_value = SimpleNamespace(
+            doi="10.1234/test",
+            oa_url="https://example.com/paper.pdf",
+            arxiv_id=None,
+        )
+        mock_writer = MagicMock()
+        mock_writer.try_attach_oa_pdf.return_value = "attached"
+
+        with patch("zotpilot.state._get_resolver", return_value=resolver):
+            result = save_single_and_verify(
+                "https://example.com/paper",
+                doi="10.1234/test",
+                title="Paper",
+                collection_key=None, tags=None,
+                bridge_url="http://127.0.0.1:23119",
+                get_writer=lambda: mock_writer,
+                writer_lock=MagicMock(),
+            )
+
+        mock_pdf.assert_not_called()
+        mock_writer.try_attach_oa_pdf.assert_called_once()
+        assert result["status"] == "saved_with_pdf"
+        assert result["has_pdf"] is True
+
+    @patch("zotpilot.tools.ingestion.connector.check_pdf_status", return_value="attached")
+    @patch("zotpilot.tools.ingestion.connector.validate_saved_item")
+    @patch("zotpilot.tools.ingestion.connector.poll_single_save_result")
+    @patch("zotpilot.tools.ingestion.connector.enqueue_save_request")
+    def test_no_pdf_signal_uses_pdf_poll(
+        self, mock_enqueue, mock_poll, mock_validate, mock_pdf,
+    ):
+        from zotpilot.tools.ingestion.connector import save_single_and_verify
+
+        mock_enqueue.return_value = ("req-1", None)
+        mock_poll.return_value = {
+            "success": True,
+            "item_key": "KEY1",
+            "title": "Paper",
+        }
+        mock_validate.return_value = {
+            "valid": True, "item_type": "journalArticle",
+            "title": "Paper", "reason": None,
+        }
+
+        result = save_single_and_verify(
+            "https://example.com/paper",
+            doi=None,
+            title="Paper",
+            collection_key=None, tags=None,
+            bridge_url="http://127.0.0.1:23119",
+            get_writer=lambda: MagicMock(),
+            writer_lock=MagicMock(),
+        )
+
+        mock_pdf.assert_called_once()
+        assert result["status"] == "saved_with_pdf"
+        assert result["has_pdf"] is True
+
+    @patch("zotpilot.tools.ingestion.connector.check_pdf_status", return_value="attached")
+    @patch("zotpilot.tools.ingestion.connector.validate_saved_item")
+    @patch("zotpilot.tools.ingestion.connector.poll_single_save_result")
+    @patch("zotpilot.tools.ingestion.connector.enqueue_save_request")
+    def test_generic_attachment_failure_without_signal_keeps_old_behavior(
+        self, mock_enqueue, mock_poll, mock_validate, mock_pdf,
+    ):
+        from zotpilot.tools.ingestion.connector import save_single_and_verify
+
+        mock_enqueue.return_value = ("req-1", None)
+        mock_poll.return_value = {
+            "success": True,
+            "item_key": "KEY1",
+            "title": "Paper",
+            "error_code": "pdf_download_failed",
+            "error": "PDF download failed",
+        }
+        mock_validate.return_value = {
+            "valid": True, "item_type": "journalArticle",
+            "title": "Paper", "reason": None,
+        }
+
+        result = save_single_and_verify(
+            "https://example.com/paper",
+            doi=None,
+            title="Paper",
+            collection_key=None, tags=None,
+            bridge_url="http://127.0.0.1:23119",
+            get_writer=lambda: MagicMock(),
+            writer_lock=MagicMock(),
+        )
+
+        mock_pdf.assert_called_once()
+        assert result["status"] == "saved_with_pdf"
+        assert result["has_pdf"] is True
 
     @patch("zotpilot.tools.ingestion.connector._doi_api_fallback")
     @patch("zotpilot.tools.ingestion.connector.delete_item_safe", return_value=True)

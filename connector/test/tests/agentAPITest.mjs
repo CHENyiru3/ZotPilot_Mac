@@ -9,8 +9,8 @@
  * Timer strategy: sinon fake timers control setTimeout/clearTimeout.
  * After tickAsync(), flush microtasks with await Promise.resolve() chains so
  * async _handleSave steps (tabs.create, _waitForReady, etc.) complete.
- * getTabInfo returns translators immediately so _pollForTranslators resolves
- * synchronously without needing additional tickAsync() calls.
+ * getTabInfo returns translators immediately so the event-driven translator
+ * readiness check resolves as soon as the stability window completes.
  */
 
 import { readFileSync } from 'fs';
@@ -40,6 +40,7 @@ function makeZoteroStub() {
 		},
 		Connector_Browser: {
 			onZoteroButtonElementClick: sinon.stub(),
+			onTranslators: sinon.stub(),
 			setKeepServiceWorkerAlive: sinon.stub(),
 			// Return translators immediately → _pollForTranslators resolves on first check
 			// (no additional tickAsync needed for the translator poll loop)
@@ -142,9 +143,9 @@ async function runSaveCycle({ command, completionFn, fetchOverride } = {}) {
 	// Tick past poll interval → _poll fires → _handleSave starts
 	await clock.tickAsync(2001);
 	await flush();
-	// _waitForReady() uses a 2000ms stability window before translator polling
-	await clock.tickAsync(2000);
-	// Flush: tabs.create → _waitForReady → local API snapshot → tabs.get → _pollForTranslators → onReady → _pendingSaves.set
+	// _waitForReady() uses a 4000ms stability window before translator readiness check
+	await clock.tickAsync(4000);
+	// Flush: tabs.create → _waitForReady → local API snapshot → tabs.get → onReady → _pendingSaves.set
 	await flush();
 
 	const patchedSend = Zotero.Messaging.sendMessage;
@@ -153,7 +154,9 @@ async function runSaveCycle({ command, completionFn, fetchOverride } = {}) {
 	if (completionFn) {
 		await completionFn(patchedSend, patchedReceive);
 	} else {
-		// Default: complete via sendMessage patch
+		// Default: include an item key so second-handshake does not block the test
+		patchedSend('progressWindow.itemProgress',
+			{ title: 'Test Page', key: 'TESTKEY42' }, { id: 42 }, 0);
 		patchedSend('progressWindow.done', [true], { id: 42 }, 0);
 	}
 
@@ -219,6 +222,8 @@ describe('AgentAPI', function() {
 		it('unwraps Messaging.sendMessage wrapper and detects progressWindow.done (AC-1)', async function() {
 			const { resultPosted } = await runSaveCycle({
 				completionFn: async (patchedSend, patchedReceive) => {
+					patchedSend('progressWindow.itemProgress',
+						{ title: 'My Paper', key: 'ABCD1234' }, { id: 42 }, 0);
 					// Fire receiveMessage with the wrapped inject-side format
 					await patchedReceive(
 						'Messaging.sendMessage',
@@ -285,6 +290,8 @@ describe('AgentAPI', function() {
 		it('resolves pending save on progressWindow.done (AC-3)', async function() {
 			const { resultPosted } = await runSaveCycle({
 				completionFn: async (patchedSend) => {
+					patchedSend('progressWindow.itemProgress',
+						{ title: 'My Paper', key: 'ABCD1234' }, { id: 42 }, 0);
 					patchedSend('progressWindow.done', [true], { id: 42 }, 0);
 					await flush();
 				},
@@ -311,6 +318,155 @@ describe('AgentAPI', function() {
 				'title should be captured from itemProgress');
 			assert.strictEqual(resultPosted.item_key, 'ABCD1234',
 				'item_key should be captured from itemProgress');
+		});
+
+		it('does not confirm PDF from attachment icon alone', async function() {
+			const { resultPosted } = await runSaveCycle({
+				completionFn: async (patchedSend) => {
+					patchedSend('progressWindow.itemProgress', {
+						id: 1,
+						title: 'My Paper',
+						key: 'ABCD1234',
+						iconSrc: 'attachment-pdf.png',
+					}, { id: 42 }, 0);
+					patchedSend('progressWindow.done', [true], { id: 42 }, 0);
+					await flush();
+				},
+			});
+
+			assert.isNotNull(resultPosted, 'result should be posted');
+			assert.isFalse(resultPosted.pdf_connector_confirmed,
+				'attachment-pdf without completion should not confirm PDF');
+			assert.isFalse(resultPosted.pdf_failed,
+				'attachment-pdf without failure should not set pdf_failed');
+		});
+
+		it('confirms PDF only when the PDF row reaches progress 100', async function() {
+			const { resultPosted } = await runSaveCycle({
+				completionFn: async (patchedSend) => {
+					patchedSend('progressWindow.itemProgress', {
+						id: 1,
+						title: 'My Paper',
+						key: 'ABCD1234',
+						iconSrc: 'attachment-pdf.png',
+					}, { id: 42 }, 0);
+					patchedSend('progressWindow.itemProgress', {
+						id: 1,
+						title: 'My Paper',
+						key: 'ABCD1234',
+						progress: 100,
+					}, { id: 42 }, 0);
+					patchedSend('progressWindow.done', [true], { id: 42 }, 0);
+					await flush();
+				},
+			});
+
+			assert.isNotNull(resultPosted, 'result should be posted');
+			assert.isTrue(resultPosted.pdf_connector_confirmed,
+				'PDF row should be confirmed only after completion');
+			assert.isFalse(resultPosted.pdf_failed);
+		});
+
+		it('ignores generic cross.png without prior PDF row context', async function() {
+			const { resultPosted } = await runSaveCycle({
+				completionFn: async (patchedSend) => {
+					patchedSend('progressWindow.itemProgress', {
+						id: 1,
+						title: 'Snapshot',
+						key: 'ABCD1234',
+						iconSrc: 'cross.png',
+					}, { id: 42 }, 0);
+					patchedSend('progressWindow.done', [true], { id: 42 }, 0);
+					await flush();
+				},
+			});
+
+			assert.isNotNull(resultPosted, 'result should be posted');
+			assert.isFalse(resultPosted.pdf_failed,
+				'generic cross.png should not be treated as a PDF failure');
+			assert.isFalse(resultPosted.pdf_connector_confirmed);
+		});
+
+		it('serializes pdf_failed from entry state when a PDF row later fails', async function() {
+			const { resultPosted } = await runSaveCycle({
+				completionFn: async (patchedSend) => {
+					patchedSend('progressWindow.itemProgress', {
+						id: 1,
+						title: 'My Paper',
+						key: 'ABCD1234',
+						iconSrc: 'attachment-pdf.png',
+					}, { id: 42 }, 0);
+					patchedSend('progressWindow.itemProgress', {
+						id: 1,
+						title: 'My Paper',
+						key: 'ABCD1234',
+						iconSrc: 'cross.png',
+					}, { id: 42 }, 0);
+					patchedSend('progressWindow.done', [true], { id: 42 }, 0);
+					await flush();
+				},
+			});
+
+			assert.isNotNull(resultPosted, 'result should be posted');
+			assert.isTrue(resultPosted.pdf_failed,
+				'pdf_failed should be posted from entry state even when done resolved the save');
+			assert.isFalse(resultPosted.pdf_connector_confirmed);
+		});
+
+		it('early-resolves only for a PDF row failure', async function() {
+			let recentItemsResponses = [
+				[],
+				[makeRecentItem('NEWKEY123', 'My Paper')],
+			];
+			let resultPosted = null;
+			const fetchOverride = sinon.stub().callsFake((url, opts) => {
+				if (url.includes('/pending')) {
+					return Promise.resolve({
+						status: 200,
+						ok: true,
+						json: () => Promise.resolve({
+							action: 'save',
+							url: 'https://example.com/paper',
+							request_id: 'req-pdf-cross',
+						}),
+					});
+				}
+				if (url.includes('/api/users/0/items/top')) {
+					let payload = recentItemsResponses.shift() || [];
+					return Promise.resolve({
+						status: 200,
+						ok: true,
+						json: () => Promise.resolve(payload),
+					});
+				}
+				if (url.includes('/result')) {
+					resultPosted = JSON.parse(opts.body);
+					return Promise.resolve({ status: 200, ok: true });
+				}
+				return Promise.resolve({ status: 204, ok: true });
+			});
+
+			await runSaveCycle({
+				fetchOverride,
+				completionFn: async (patchedSend) => {
+					patchedSend('progressWindow.itemProgress', {
+						id: 1,
+						title: 'My Paper',
+						iconSrc: 'attachment-pdf.png',
+					}, { id: 42 }, 0);
+					patchedSend('progressWindow.itemProgress', {
+						id: 1,
+						title: 'My Paper',
+						iconSrc: 'cross.png',
+					}, { id: 42 }, 0);
+					await flush();
+				},
+			});
+
+			assert.isNotNull(resultPosted, 'result should be posted');
+			assert.strictEqual(resultPosted._detected_via, 'itemProgress_cross');
+			assert.isTrue(resultPosted.pdf_failed);
+			assert.strictEqual(resultPosted.item_key, 'NEWKEY123');
 		});
 
 		it('backfills item_key from Zotero local API after translator save', async function() {
@@ -361,7 +517,7 @@ describe('AgentAPI', function() {
 				'item_key should be discovered from the Zotero local API');
 		});
 
-		it('returns null when local API discovery is ambiguous', async function() {
+		it('falls back to the first new item when local API discovery is ambiguous', async function() {
 			let recentItemsResponses = [
 				[makeRecentItem('OLDKEY001', 'Old Paper')],
 				[
@@ -409,8 +565,8 @@ describe('AgentAPI', function() {
 			});
 
 			assert.isNotNull(resultPosted, 'result should be posted');
-			assert.isNull(resultPosted.item_key,
-				'item_key should remain null when multiple unmatched candidates exist');
+			assert.strictEqual(resultPosted.item_key, 'NEWKEY111',
+				'item_key should fall back to the first new candidate when ambiguous');
 		});
 
 		it('forwards all messages to the original sendMessage handler', async function() {
@@ -500,21 +656,14 @@ describe('AgentAPI', function() {
 		});
 	});
 
-	// ── _pollForTranslators ───────────────────────────────────────────────────
+	// ── translator readiness ──────────────────────────────────────────────────
 
-	describe('_pollForTranslators', function() {
-		it('calls onReady after detecting translators within 10 attempts', async function() {
+	describe('translator readiness', function() {
+		it('proceeds once translators are already available after stability', async function() {
 			const clock = sinon.useFakeTimers({ shouldClearNativeTimers: true });
 
 			globalThis.Zotero = makeZoteroStub();
 			globalThis.browser = makeBrowserStub();
-
-			// Return translators on 2nd call
-			let callCount = 0;
-			Zotero.Connector_Browser.getTabInfo = sinon.stub().callsFake(() => {
-				callCount++;
-				return callCount >= 2 ? { translators: [{ label: 'DOI' }] } : null;
-			});
 
 			let resultPosted = null;
 			globalThis.fetch = sinon.stub().callsFake((url, opts) => {
@@ -530,16 +679,13 @@ describe('AgentAPI', function() {
 			// Trigger poll
 			await clock.tickAsync(2001);
 			await flush();
-			// Wait through the stability window before translator polling starts
-			await clock.tickAsync(2000);
+			// Wait through the stability window before the translator readiness check
+			await clock.tickAsync(4000);
 			await flush();
-
-			// Tick 500ms for first _pollForTranslators check (callCount=1, no translators)
-			await clock.tickAsync(500);
-			await flush();
-			// Now callCount=2, translators found, onReady fires
 
 			// Trigger completion
+			Zotero.Messaging.sendMessage('progressWindow.itemProgress',
+				{ title: 'My Paper', key: 'ABCD1234' }, { id: 42 }, 0);
 			Zotero.Messaging.sendMessage('progressWindow.done', [true], { id: 42 }, 0);
 			await flush();
 			await clock.tickAsync(100);
@@ -548,17 +694,17 @@ describe('AgentAPI', function() {
 			Zotero.AgentAPI.destroy();
 			clock.restore();
 
-			assert.isAtLeast(callCount, 2, 'getTabInfo should be called at least twice');
+			assert.isAtLeast(Zotero.Connector_Browser.getTabInfo.callCount, 1,
+				'getTabInfo should be checked once after stability');
 			assert.isNotNull(resultPosted, 'save should complete after translators detected');
 		});
 
-		it('calls onReady after 10 failed attempts (no translators found)', async function() {
+		it('waits for the onTranslators hook when translators are not ready yet', async function() {
 			const clock = sinon.useFakeTimers({ shouldClearNativeTimers: true });
 
 			globalThis.Zotero = makeZoteroStub();
 			globalThis.browser = makeBrowserStub();
 
-			// Always return null — no translators
 			Zotero.Connector_Browser.getTabInfo = sinon.stub().returns(null);
 
 			let resultPosted = null;
@@ -574,17 +720,16 @@ describe('AgentAPI', function() {
 
 			await clock.tickAsync(2001);
 			await flush();
-			await clock.tickAsync(2000);
+			await clock.tickAsync(4000);
 			await flush();
 
-			// 10 attempts × 500ms each = 5000ms total
-			for (let i = 0; i < 10; i++) {
-				await clock.tickAsync(500);
-				await flush();
-			}
+			assert.isNull(resultPosted, 'save should still be waiting for translator event');
+			Zotero.Connector_Browser.onTranslators([{ label: 'DOI' }], 1, null, { id: 42 }, 0);
+			await flush();
 
-			// onReady should have fired after 10 failed attempts
 			// Trigger completion
+			Zotero.Messaging.sendMessage('progressWindow.itemProgress',
+				{ title: 'My Paper', key: 'ABCD1234' }, { id: 42 }, 0);
 			Zotero.Messaging.sendMessage('progressWindow.done', [true], { id: 42 }, 0);
 			await flush();
 			await clock.tickAsync(100);
@@ -593,9 +738,43 @@ describe('AgentAPI', function() {
 			Zotero.AgentAPI.destroy();
 			clock.restore();
 
-			assert.isAtLeast(Zotero.Connector_Browser.getTabInfo.callCount, 10,
-				'getTabInfo should be called 10 times before giving up');
-			assert.isNotNull(resultPosted, 'save should complete even with no translators (saveAsWebpage fallback)');
+			assert.strictEqual(Zotero.Connector_Browser.getTabInfo.callCount, 1,
+				'event-driven readiness should not poll repeatedly');
+			assert.isNotNull(resultPosted, 'save should complete after onTranslators fires');
+		});
+
+		it('fails fast with no_translator after the translator wait timeout', async function() {
+			const clock = sinon.useFakeTimers({ shouldClearNativeTimers: true });
+
+			globalThis.Zotero = makeZoteroStub();
+			globalThis.browser = makeBrowserStub();
+			Zotero.Connector_Browser.getTabInfo = sinon.stub().returns(null);
+
+			let resultPosted = null;
+			globalThis.fetch = sinon.stub().callsFake((url, opts) => {
+				if (url.includes('/pending')) return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve({ action: 'save', url: 'https://example.com', request_id: 'rpt3' }) });
+				if (url.includes('/result')) { resultPosted = JSON.parse(opts.body); return Promise.resolve({ status: 200, ok: true }); }
+				return Promise.resolve({ status: 204, ok: true });
+			});
+
+			loadAgentAPI();
+			await Zotero.AgentAPI.init();
+			await flush();
+
+			await clock.tickAsync(2001);
+			await flush();
+			await clock.tickAsync(4000);
+			await flush();
+			await clock.tickAsync(20000);
+			await flush();
+
+			Zotero.AgentAPI.destroy();
+			clock.restore();
+
+			assert.strictEqual(Zotero.Connector_Browser.getTabInfo.callCount, 1);
+			assert.isNotNull(resultPosted, 'bridge should receive a no_translator result');
+			assert.strictEqual(resultPosted.success, false);
+			assert.strictEqual(resultPosted.error_code, 'no_translator');
 		});
 	});
 
