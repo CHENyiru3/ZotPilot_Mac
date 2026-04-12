@@ -249,14 +249,24 @@ class TestCreateCollection:
 # ---------------------------------------------------------------------------
 
 class TestGetCitations:
+    @patch("zotpilot.tools.citations._get_zotero")
     @patch("zotpilot.tools.citations._get_config")
     @patch("zotpilot.tools.citations._get_store_optional")
-    def test_get_citations_no_doi(self, mock_get_store_opt, mock_get_config):
+    def test_get_citations_no_doi(self, mock_get_store_opt, mock_get_config, mock_get_zotero):
         from zotpilot.tools.citations import get_citations
 
         mock_store = MagicMock()
         mock_store.get_document_meta.return_value = {"doc_id": "DOC1"}  # no "doi" key
         mock_get_store_opt.return_value = mock_store
+        mock_item = MagicMock()
+        mock_item.item_key = "DOC1"
+        mock_item.doi = ""
+        mock_item.pdf_path = MagicMock()
+        mock_item.pdf_path.exists.return_value = True
+        mock_zotero = MagicMock()
+        mock_zotero.get_all_items_with_pdfs.return_value = [mock_item]
+        mock_zotero.get_item.return_value = mock_item
+        mock_get_zotero.return_value = mock_zotero
 
         with pytest.raises(ToolError, match="no DOI"):
             get_citations("DOC1")

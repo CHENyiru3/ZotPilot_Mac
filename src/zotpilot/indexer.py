@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from .config import Config
 from .embeddings import create_embedder
+from .index_authority import reconcile_orphaned_index_docs
 from .journal_ranker import JournalRanker
 from .models import ZoteroItem
 from .pdf import extract_document
@@ -186,6 +187,13 @@ class Indexer:
         if len(unique_items) < len(items):
             logger.info(f"Deduplicated {len(items) - len(unique_items)} duplicate item(s)")
         items = unique_items
+        current_doc_ids = {item.item_key for item in items}
+        reconciliation = reconcile_orphaned_index_docs(self.store, current_doc_ids)
+        if reconciliation["deleted_count"] > 0:
+            logger.info(
+                "Indexer: removed %d orphaned indexed document(s) not present in the current Zotero PDF library",
+                reconciliation["deleted_count"],
+            )
         logger.info(f"Discovered {len(items)} papers with PDFs in Zotero library")
 
         # Apply filters
@@ -682,8 +690,9 @@ class Indexer:
 
     def get_stats(self) -> dict:
         """Get index statistics."""
-        doc_ids = self.store.get_indexed_doc_ids()
-        total_chunks = self.store.count()
+        current_doc_ids = {item.item_key for item in self.zotero.get_all_items_with_pdfs() if item.pdf_path and item.pdf_path.exists()}  # noqa: E501
+        doc_ids = self.store.get_indexed_doc_ids() & current_doc_ids
+        total_chunks = self.store.count_chunks_for_doc_ids(doc_ids)
         return {
             "total_documents": len(doc_ids),
             "total_chunks": total_chunks,

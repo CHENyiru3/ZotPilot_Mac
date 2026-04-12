@@ -192,8 +192,12 @@ class TestCitationsNoRag:
         mock_store_opt.return_value = None  # No-RAG
         mock_item = MagicMock()
         mock_item.doi = ""  # no DOI
+        mock_item.item_key = "DOC1"
+        mock_item.pdf_path = MagicMock()
+        mock_item.pdf_path.exists.return_value = True
         mock_client = MagicMock()
         mock_client.get_item.return_value = mock_item
+        mock_client.get_all_items_with_pdfs.return_value = [mock_item]
         mock_zotero.return_value = mock_client
 
         from fastmcp.exceptions import ToolError
@@ -208,6 +212,7 @@ class TestCitationsNoRag:
         mock_store_opt.return_value = None
         mock_client = MagicMock()
         mock_client.get_item.return_value = None
+        mock_client.get_all_items_with_pdfs.return_value = []
         mock_zotero.return_value = mock_client
 
         from fastmcp.exceptions import ToolError

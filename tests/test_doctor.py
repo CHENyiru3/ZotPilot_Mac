@@ -16,6 +16,14 @@ from zotpilot.doctor import (
 )
 
 
+def _pdf_item(key: str):
+    item = MagicMock()
+    item.item_key = key
+    item.pdf_path = MagicMock()
+    item.pdf_path.exists.return_value = True
+    return item
+
+
 class TestCheckPythonVersion:
     def test_pass_on_current_python(self):
         result = _check_python_version()
@@ -119,29 +127,39 @@ class TestCheckEmbeddingApiKey:
 
 
 class TestCheckChromaDbIndex:
+    @patch("zotpilot.zotero_client.ZoteroClient")
     @patch("zotpilot.vector_store.VectorStore")
     @patch("zotpilot.embeddings.create_embedder")
-    def test_pass_with_documents(self, mock_create_embedder, mock_vector_store_cls):
+    def test_pass_with_documents(self, mock_create_embedder, mock_vector_store_cls, mock_zotero_cls):
         mock_store = MagicMock()
         mock_store.get_indexed_doc_ids.return_value = ["doc1", "doc2"]
-        mock_store.count.return_value = 100
+        mock_store.count_chunks_for_doc_ids.return_value = 100
         mock_vector_store_cls.return_value = mock_store
+        zotero = MagicMock()
+        zotero.get_all_items_with_pdfs.return_value = [_pdf_item("doc1"), _pdf_item("doc2")]
+        mock_zotero_cls.return_value = zotero
 
         config = MagicMock()
+        config.zotero_data_dir = "/fake"
         result = _check_chromadb_index(config)
         assert result.status == "pass"
         assert "2 documents" in result.message
         assert "100 chunks" in result.message
 
+    @patch("zotpilot.zotero_client.ZoteroClient")
     @patch("zotpilot.vector_store.VectorStore")
     @patch("zotpilot.embeddings.create_embedder")
-    def test_warn_when_empty(self, mock_create_embedder, mock_vector_store_cls):
+    def test_warn_when_empty(self, mock_create_embedder, mock_vector_store_cls, mock_zotero_cls):
         mock_store = MagicMock()
         mock_store.get_indexed_doc_ids.return_value = []
-        mock_store.count.return_value = 0
+        mock_store.count_chunks_for_doc_ids.return_value = 0
         mock_vector_store_cls.return_value = mock_store
+        zotero = MagicMock()
+        zotero.get_all_items_with_pdfs.return_value = []
+        mock_zotero_cls.return_value = zotero
 
         config = MagicMock()
+        config.zotero_data_dir = "/fake"
         result = _check_chromadb_index(config)
         assert result.status == "warn"
         assert "empty" in result.message.lower()

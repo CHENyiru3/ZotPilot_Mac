@@ -3,23 +3,28 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from ..index_authority import current_library_pdf_doc_ids
 from ..state import ToolError, _get_config, _get_store_optional, _get_zotero, mcp
 from .profiles import tool_tags
 
 
 def _get_doi(doc_id: str) -> str:
-    """Get DOI for a document, trying vector store first, then SQLite."""
+    """Get DOI for a current-library document, trying vector store first, then SQLite."""
+    zotero = _get_zotero()
+    if doc_id not in current_library_pdf_doc_ids(zotero):
+        raise ToolError(f"Document not found: {doc_id}")
+
+    item = zotero.get_item(doc_id)
+    if not item:
+        raise ToolError(f"Document not found: {doc_id}")
+
     store = _get_store_optional()
+    doi = ""
     if store is not None:
         meta = store.get_document_meta(doc_id)
-        if not meta:
-            raise ToolError(f"Document not found: {doc_id}")
-        doi = meta.get("doi")
-    else:
-        # No-RAG mode: get DOI from Zotero SQLite
-        item = _get_zotero().get_item(doc_id)
-        if not item:
-            raise ToolError(f"Document not found: {doc_id}")
+        if meta:
+            doi = meta.get("doi") or ""
+    if not doi:
         doi = item.doi
     if not doi:
         raise ToolError("Document has no DOI - citation lookup unavailable")
@@ -66,5 +71,4 @@ def get_citations(
         citing = client.get_citing_works(work.openalex_id, limit)
         result["citing"] = [client.format_work(w) for w in citing]
     return result
-
 
