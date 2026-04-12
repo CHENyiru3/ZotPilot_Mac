@@ -52,21 +52,47 @@ class OpenAlexClient:
         """Enforce rate limiting."""
         elapsed = time.time() - self._last_request
         if elapsed < self._rate_limit_delay:
-            time.sleep(self._rate_limit_delay - elapsed)
+            sleep_time = self._rate_limit_delay - elapsed
+            logger.debug("Rate limit sleep: %.2fs", sleep_time)
+            time.sleep(sleep_time)
         self._last_request = time.time()
 
     def _request(self, path: str, *, params: dict | None = None, timeout: float = 10.0) -> httpx.Response:
         """Issue a rate-limited GET request to the OpenAlex API."""
-        self._rate_limit()
         request_params = dict(params or {})
         if self.email:
             request_params.setdefault("mailto", self.email)
-        return httpx.get(
-            f"{OPENALEX_API}{path}",
-            params=request_params or None,
-            headers=self.headers,
-            timeout=timeout,
-        )
+
+        max_retries = 3
+        backoff = 1.0
+
+        response: httpx.Response | None = None
+        for attempt in range(max_retries + 1):
+            self._rate_limit()
+            response = httpx.get(
+                f"{OPENALEX_API}{path}",
+                params=request_params or None,
+                headers=self.headers,
+                timeout=timeout,
+            )
+
+            if response.status_code == 429:
+                if attempt < max_retries:
+                    logger.warning(
+                        "Rate limited (429), retry %d/%d in %.1fs",
+                        attempt + 1,
+                        max_retries,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+                logger.error("Rate limited (429), all %d retries exhausted", max_retries)
+
+            return response
+
+        # Unreachable (loop always returns), satisfies type checker
+        return response  # type: ignore[return-value]
 
     @staticmethod
     def _normalize_doi(doi: str) -> str:
