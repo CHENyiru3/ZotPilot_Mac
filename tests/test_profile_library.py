@@ -62,6 +62,17 @@ class TestProfileLibraryWithItems:
             {"name": "machine learning", "count": 2},
             {"name": "NLP", "count": 2},
         ]
+
+        # Mock items with PDFs so current_library_pdf_doc_ids returns KEY1 and KEY2
+        mock_item1 = MagicMock()
+        mock_item1.item_key = "KEY1"
+        mock_item1.pdf_path = MagicMock()
+        mock_item1.pdf_path.exists.return_value = True
+        mock_item2 = MagicMock()
+        mock_item2.item_key = "KEY2"
+        mock_item2.pdf_path = MagicMock()
+        mock_item2.pdf_path.exists.return_value = True
+        mock_zotero.get_all_items_with_pdfs.return_value = [mock_item1, mock_item2]
         mock_get_zotero.return_value = mock_zotero
 
         mock_conn = _make_mock_connection(
