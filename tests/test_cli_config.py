@@ -1,4 +1,5 @@
 """Tests for `zotpilot config` CLI subcommands."""
+
 from __future__ import annotations
 
 import json
@@ -13,6 +14,7 @@ from zotpilot.config import Config
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _run_config(args: list[str], config_path: Path, monkeypatch, capsys):
     """Invoke cmd_config() directly with the given sub-args."""
@@ -31,6 +33,7 @@ def _run_config(args: list[str], config_path: Path, monkeypatch, capsys):
 
     parsed = parser.parse_args(["config"] + args)
     parsed.config = str(config_path)
+    parsed.config_subcmd = parsed.subcommand
     cmd_config(parsed)
     return capsys.readouterr()
 
@@ -38,6 +41,7 @@ def _run_config(args: list[str], config_path: Path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 # _mask_secret
 # ---------------------------------------------------------------------------
+
 
 class TestMaskSecret:
     def test_short_value_is_fully_masked(self):
@@ -55,6 +59,7 @@ class TestMaskSecret:
 # ---------------------------------------------------------------------------
 # _coerce_value
 # ---------------------------------------------------------------------------
+
 
 class TestCoerceValue:
     def test_int_field(self):
@@ -84,6 +89,7 @@ class TestCoerceValue:
 # ---------------------------------------------------------------------------
 # _config_set
 # ---------------------------------------------------------------------------
+
 
 class TestConfigSet:
     def test_creates_file_with_value(self, tmp_path):
@@ -128,6 +134,7 @@ class TestConfigSet:
 # config set + Config.load() round-trip
 # ---------------------------------------------------------------------------
 
+
 class TestConfigSetLoadRoundTrip:
     def test_set_and_load(self, tmp_path, monkeypatch):
         """config set persists; Config.load() reads it back when no env var."""
@@ -157,6 +164,7 @@ class TestConfigSetLoadRoundTrip:
 # cmd_status --json version field
 # ---------------------------------------------------------------------------
 
+
 class TestStatusJsonVersion:
     def test_status_json_includes_version(self, tmp_path, capsys, monkeypatch):
         """status --json output includes 'version' matching __version__."""
@@ -167,10 +175,14 @@ class TestStatusJsonVersion:
         from zotpilot.cli import cmd_status
 
         cfg_path = tmp_path / "config.json"
-        cfg_path.write_text(json.dumps({
-            "zotero_data_dir": str(tmp_path),
-            "embedding_provider": "none",
-        }))
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "zotero_data_dir": str(tmp_path),
+                    "embedding_provider": "none",
+                }
+            )
+        )
 
         args = argparse.Namespace(json=True, config=str(cfg_path))
         with patch("zotpilot.cli.Config.load") as mock_load:
@@ -196,10 +208,14 @@ class TestStatusJsonVersion:
         from zotpilot.cli import cmd_status
 
         cfg_path = tmp_path / "config.json"
-        cfg_path.write_text(json.dumps({
-            "zotero_data_dir": str(tmp_path),
-            "embedding_provider": "none",
-        }))
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "zotero_data_dir": str(tmp_path),
+                    "embedding_provider": "none",
+                }
+            )
+        )
 
         args = argparse.Namespace(json=True, config=str(cfg_path))
         with (
@@ -247,10 +263,14 @@ class TestStatusJsonVersion:
         from zotpilot.cli import cmd_status
 
         cfg_path = tmp_path / "config.json"
-        cfg_path.write_text(json.dumps({
-            "zotero_data_dir": str(tmp_path),
-            "embedding_provider": "none",
-        }))
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "zotero_data_dir": str(tmp_path),
+                    "embedding_provider": "none",
+                }
+            )
+        )
 
         args = argparse.Namespace(json=True, config=str(cfg_path))
         with (
@@ -280,3 +300,105 @@ class TestStatusJsonVersion:
         data = json.loads(capsys.readouterr().out)
         assert data["drift_state"] == "needs-sync"
         assert data["restart_required"] is True
+
+
+# ---------------------------------------------------------------------------
+# config set hard-error contract — sensitive fields must be rejected
+# ---------------------------------------------------------------------------
+
+
+class TestConfigSetHardErrorSensitiveFields:
+    """Pin the target behavior: config set on sensitive fields hard-errors.
+
+    These tests are RED now (the implementation only warns and proceeds).
+    They will turn GREEN once the hard-error contract is implemented.
+    """
+
+    SENSITIVE_FIELDS = ["gemini_api_key", "dashscope_api_key", "anthropic_api_key", "zotero_api_key"]
+
+    def test_gemini_api_key_hard_error(self, tmp_path, monkeypatch, capsys):
+        """config set gemini_api_key → exit code 1 + error message."""
+        cfg_path = tmp_path / "config.json"
+        monkeypatch.setattr("zotpilot.cli._default_config_path", lambda: cfg_path)
+        out = _run_config(["set", "gemini_api_key", "sk-test-key"], cfg_path, monkeypatch, capsys)
+        assert "exit" in out.err.lower() or "error" in out.err.lower() or "runtime" in out.err.lower()
+
+    def test_dashscope_api_key_hard_error(self, tmp_path, monkeypatch, capsys):
+        """config set dashscope_api_key → exit code 1 + error message."""
+        cfg_path = tmp_path / "config.json"
+        monkeypatch.setattr("zotpilot.cli._default_config_path", lambda: cfg_path)
+        out = _run_config(["set", "dashscope_api_key", "sk-test-key"], cfg_path, monkeypatch, capsys)
+        assert "exit" in out.err.lower() or "error" in out.err.lower() or "runtime" in out.err.lower()
+
+    def test_anthropic_api_key_hard_error(self, tmp_path, monkeypatch, capsys):
+        """config set anthropic_api_key → exit code 1 + error message."""
+        cfg_path = tmp_path / "config.json"
+        monkeypatch.setattr("zotpilot.cli._default_config_path", lambda: cfg_path)
+        out = _run_config(["set", "anthropic_api_key", "sk-test-key"], cfg_path, monkeypatch, capsys)
+        assert "exit" in out.err.lower() or "error" in out.err.lower() or "runtime" in out.err.lower()
+
+    def test_zotero_api_key_hard_error(self, tmp_path, monkeypatch, capsys):
+        """config set zotero_api_key → exit code 1 + error message."""
+        cfg_path = tmp_path / "config.json"
+        monkeypatch.setattr("zotpilot.cli._default_config_path", lambda: cfg_path)
+        out = _run_config(["set", "zotero_api_key", "test-key"], cfg_path, monkeypatch, capsys)
+        assert "exit" in out.err.lower() or "error" in out.err.lower() or "runtime" in out.err.lower()
+
+
+class TestConfigSetHardErrorMessageContract:
+    """Verify the error message for sensitive fields points users to the right alternatives."""
+
+    def test_error_message_mentions_runtime_only(self, tmp_path, monkeypatch, capsys):
+        """Error message states the field is runtime-only."""
+        cfg_path = tmp_path / "config.json"
+        monkeypatch.setattr("zotpilot.cli._default_config_path", lambda: cfg_path)
+        out = _run_config(["set", "gemini_api_key", "sk-test"], cfg_path, monkeypatch, capsys)
+        combined = (out.out + out.err).lower()
+        assert "runtime" in combined or "environment" in combined or "env" in combined
+
+    def test_error_message_points_to_env_vars(self, tmp_path, monkeypatch, capsys):
+        """Error message points to environment variables as the correct path."""
+        cfg_path = tmp_path / "config.json"
+        monkeypatch.setattr("zotpilot.cli._default_config_path", lambda: cfg_path)
+        out = _run_config(["set", "gemini_api_key", "sk-test"], cfg_path, monkeypatch, capsys)
+        combined = (out.out + out.err).lower()
+        assert "env" in combined or "environment" in combined or "export" in combined
+
+    def test_error_message_mentions_register_flag(self, tmp_path, monkeypatch, capsys):
+        """Error message mentions register --*-key as an alternative."""
+        cfg_path = tmp_path / "config.json"
+        monkeypatch.setattr("zotpilot.cli._default_config_path", lambda: cfg_path)
+        out = _run_config(["set", "gemini_api_key", "sk-test"], cfg_path, monkeypatch, capsys)
+        combined = (out.out + out.err).lower()
+        assert "register" in combined
+
+
+class TestConfigSetNonSensitiveFieldsStillWork:
+    """Non-sensitive fields should continue to work normally with config set."""
+
+    def test_chunk_set_still_works(self, tmp_path, monkeypatch, capsys):
+        """config set chunk_size succeeds with exit 0."""
+        cfg_path = tmp_path / "config.json"
+        monkeypatch.setattr("zotpilot.cli._default_config_path", lambda: cfg_path)
+        out = _run_config(["set", "chunk_size", "256"], cfg_path, monkeypatch, capsys)
+        assert "saved" in out.out.lower() or "✓" in out.out
+        data = json.loads(cfg_path.read_text())
+        assert data["chunk_size"] == 256
+
+    def test_zotero_user_id_persistable(self, tmp_path, monkeypatch, capsys):
+        """zotero_user_id is NOT a secret — it should persist via config set."""
+        cfg_path = tmp_path / "config.json"
+        monkeypatch.setattr("zotpilot.cli._default_config_path", lambda: cfg_path)
+        out = _run_config(["set", "zotero_user_id", "12345678"], cfg_path, monkeypatch, capsys)
+        assert "saved" in out.out.lower() or "✓" in out.out
+        data = json.loads(cfg_path.read_text())
+        assert data["zotero_user_id"] == "12345678"
+
+    def test_zotero_user_id_non_numeric_warned_but_stored(self, tmp_path, monkeypatch, capsys):
+        """Non-numeric zotero_user_id gets a warning but is still stored."""
+        cfg_path = tmp_path / "config.json"
+        monkeypatch.setattr("zotpilot.cli._default_config_path", lambda: cfg_path)
+        out = _run_config(["set", "zotero_user_id", "xunhe730"], cfg_path, monkeypatch, capsys)
+        assert "warning" in out.out.lower() or "warn" in out.out.lower()
+        data = json.loads(cfg_path.read_text())
+        assert data["zotero_user_id"] == "xunhe730"

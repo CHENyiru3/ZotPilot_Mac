@@ -290,3 +290,142 @@ class TestConfigPriorityInversion:
         cfg = Config.load(path=config_file)
         assert cfg.zotero_api_key == "env-zotkey"
         assert cfg.zotero_user_id == "99999999"
+
+
+class TestSecretLoadAndScrub:
+    """Tests for secret load/save/scrub behavior in Config."""
+
+    def _clear_creds(self, monkeypatch):
+        for var in ("GEMINI_API_KEY", "DASHSCOPE_API_KEY", "ANTHROPIC_API_KEY",
+                    "ZOTERO_API_KEY", "ZOTERO_USER_ID", "S2_API_KEY", "OPENALEX_EMAIL"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_legacy_secret_load_from_disk(self, tmp_path, monkeypatch):
+        """Config.load() reads secrets from config.json when env vars are absent."""
+        self._clear_creds(monkeypatch)
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "gemini_api_key": "disk-gemini-key",
+            "dashscope_api_key": "disk-dashscope-key",
+            "anthropic_api_key": "disk-anthropic-key",
+            "zotero_api_key": "disk-zotero-key",
+            "semantic_scholar_api_key": "disk-s2-key",
+        }))
+
+        cfg = Config.load(path=config_file)
+
+        assert cfg.gemini_api_key == "disk-gemini-key"
+        assert cfg.dashscope_api_key == "disk-dashscope-key"
+        assert cfg.anthropic_api_key == "disk-anthropic-key"
+        assert cfg.zotero_api_key == "disk-zotero-key"
+        assert cfg.semantic_scholar_api_key == "disk-s2-key"
+
+    def test_env_takes_priority_over_disk_secrets(self, tmp_path, monkeypatch):
+        """Env vars override disk values for secrets."""
+        self._clear_creds(monkeypatch)
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "gemini_api_key": "disk-gemini",
+            "dashscope_api_key": "disk-dashscope",
+            "anthropic_api_key": "disk-anthropic",
+            "zotero_api_key": "disk-zotero",
+            "semantic_scholar_api_key": "disk-s2",
+        }))
+        monkeypatch.setenv("GEMINI_API_KEY", "env-gemini")
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "env-dashscope")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "env-anthropic")
+        monkeypatch.setenv("ZOTERO_API_KEY", "env-zotero")
+        monkeypatch.setenv("S2_API_KEY", "env-s2")
+
+        cfg = Config.load(path=config_file)
+
+        assert cfg.gemini_api_key == "env-gemini"
+        assert cfg.dashscope_api_key == "env-dashscope"
+        assert cfg.anthropic_api_key == "env-anthropic"
+        assert cfg.zotero_api_key == "env-zotero"
+        assert cfg.semantic_scholar_api_key == "env-s2"
+
+    def test_scrub_on_write_all_secrets_absent(self, tmp_path, monkeypatch):
+        """After Config.save(), all secret fields are absent from serialized JSON."""
+        self._clear_creds(monkeypatch)
+        monkeypatch.setenv("GEMINI_API_KEY", "secret-gemini")
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "secret-dashscope")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "secret-anthropic")
+        monkeypatch.setenv("ZOTERO_API_KEY", "secret-zotero")
+        monkeypatch.setenv("S2_API_KEY", "secret-s2")
+
+        cfg = Config.load(path=tmp_path / "nonexistent.json")
+        save_path = tmp_path / "saved.json"
+        cfg.save(path=save_path)
+
+        saved_data = json.loads(save_path.read_text())
+        secret_fields = [
+            "gemini_api_key", "dashscope_api_key", "anthropic_api_key",
+            "zotero_api_key", "openai_api_key", "semantic_scholar_api_key",
+        ]
+        for field in secret_fields:
+            assert field not in saved_data, f"{field} should not appear in saved config"
+
+    def test_zotero_user_id_persisted_on_save(self, tmp_path, monkeypatch):
+        """zotero_user_id IS persisted (not a secret)."""
+        self._clear_creds(monkeypatch)
+        cfg = Config.load(path=tmp_path / "nonexistent.json")
+        cfg.zotero_user_id = "user-12345"
+        save_path = tmp_path / "saved.json"
+        cfg.save(path=save_path)
+
+        saved_data = json.loads(save_path.read_text())
+        assert saved_data["zotero_user_id"] == "user-12345"
+
+    def test_migration_from_legacy_path_with_secrets(self, tmp_path, monkeypatch):
+        """Config.load() from legacy deep-zotero path reads secrets."""
+        self._clear_creds(monkeypatch)
+        old_dir = tmp_path / ".config" / "deep-zotero"
+        old_dir.mkdir(parents=True)
+        old_config = old_dir / "config.json"
+        old_config.write_text(json.dumps({
+            "gemini_api_key": "legacy-gemini-key",
+            "anthropic_api_key": "legacy-anthropic-key",
+            "embedding_model": "legacy-model",
+        }))
+
+        # Patch _old_config_path and _default_config_dir to use tmp_path
+        def patched_old_config_path():
+            return old_config
+
+        def patched_default_config_dir():
+            return tmp_path / ".config" / "zotpilot"
+
+        import zotpilot.config as config_mod
+        monkeypatch.setattr(config_mod, "_old_config_path", patched_old_config_path)
+        monkeypatch.setattr(config_mod, "_default_config_dir", patched_default_config_dir)
+
+        cfg = Config.load()  # No explicit path -> triggers migration
+
+        assert cfg.gemini_api_key == "legacy-gemini-key"
+        assert cfg.anthropic_api_key == "legacy-anthropic-key"
+        assert cfg.embedding_model == "legacy-model"
+
+    def test_save_roundtrip_secrets_not_reloadable(self, tmp_path, monkeypatch):
+        """save→load loses secrets but keeps non-secrets."""
+        self._clear_creds(monkeypatch)
+        monkeypatch.setenv("GEMINI_API_KEY", "env-gemini")
+        monkeypatch.setenv("ZOTERO_USER_ID", "user-999")
+
+        cfg = Config.load(path=tmp_path / "nonexistent.json")
+        cfg.zotero_data_dir = tmp_path / "Zotero"
+        cfg.chunk_size = 999
+        save_path = tmp_path / "roundtrip.json"
+        cfg.save(path=save_path)
+
+        # Clear env so load reads only from disk
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("ZOTERO_USER_ID", raising=False)
+
+        reloaded = Config.load(path=save_path)
+
+        # Non-secrets persisted
+        assert reloaded.chunk_size == 999
+        assert reloaded.zotero_user_id == "user-999"
+        # Secrets lost (not on disk, env cleared)
+        assert reloaded.gemini_api_key is None
