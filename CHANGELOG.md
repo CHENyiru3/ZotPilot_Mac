@@ -12,61 +12,61 @@ zotpilot update --dry-run    # 预览操作，不执行
 
 ---
 
-## [0.5.0] - 2026-04-11
+## [0.5.0] - 2026-04-13
 
-**架构重构版本 / Architectural refactor** — 不破不立，彻底简化入库路由、工具层和 skill 系统。
+**架构重构 / Architectural Refactor** — 重新设计入库流程、精简工具层、新增浏览器扩展。
 
 ### ✨ Highlights
-- **入库路由 Plan C**：Connector save → 本地 API 验证 → DOI API fallback，彻底解决 IEEE/Springer translator 失败导致的 webpage snapshot 垃圾 item 问题
-- **工具层从 33 → 18 个原子操作**：每个工具对应一个不可再分解的原子操作，从用户场景推导而非拍脑袋删减
-- **Skill 系统重写**：4 个声明式 skill (`ztp-research` / `ztp-review` / `ztp-profile` / `ztp-setup`)，删除路由器 Skill，由平台原生机制根据 `description` 自动选择
-- **代码量减少 30%**：~31,400 行 → ~22,000 行，测试覆盖率从 15.78% → 46.00%
-- **仅支持三大 agent 平台**：Claude Code / Codex CLI / OpenCode（Gemini / Cursor / Windsurf 不再维护适配）
+- **Connector 浏览器扩展**：AI agent 可通过你的浏览器保存论文到 Zotero，自动带上机构订阅的 PDF
+- **一步入库**：给 agent 一组 DOI / arXiv ID / URL，它帮你全部存进 Zotero 并验证 PDF
+- **18 个精简工具**（原 33 个）：合并冗余，每个工具做一件事
+- **Research 工作流**：4 个声明式 Skill 引导 agent 完成"搜索 → 入库 → 整理 → 报告"全流程
+- **索引可靠性大修**（Issue #7）：增量索引、中断恢复、不再丢失已完成的索引数据
 
 ### Added
-- **`ingest_by_identifiers`**：同步原子入库工具，内部完成 DOI/arXiv/URL 规范化 → 本地去重 → Connector preflight → 逐条 save + 即时验证 → 失败时 DOI API fallback → PDF 验证，返回每篇论文的最终状态（`saved_with_pdf` / `saved_metadata_only` / `blocked` / `duplicate` / `failed`）
-- **`validate_saved_item`**：Connector save 后通过**本地 Zotero API (port 23119)** 即时验证 itemType + title，规避 Web API 同步延迟
-- **`zotpilot upgrade` 命令**：一键升级 CLI + skill，`aliases=["update"]` 向后兼容
-- **版本漂移检测**：MCP server 启动时检测已部署 skill 版本，不匹配时在 instructions 中提示运行 `zotpilot register`
-- **OpenAlex 检索增强**：参数化 `min_citations`、cursor-based pagination，支持 `concepts` / `institutions` / `source` filter
-- **arXiv DOI fast-path**：`10.48550/arXiv.xxx` 规范 DOI 自动路由到 arXiv API（CrossRef 不索引 arXiv DOI）
+- **Connector 浏览器扩展** — 基于 Zotero Connector fork，加入 AI agent 调用路径。Agent 通过本地 bridge 触发浏览器保存，带机构权限下载 PDF。从 [GitHub Release](https://github.com/xunhe730/ZotPilot/releases) 下载 zip，加载到 Chrome 即可
+- **`ingest_by_identifiers` 工具** — 给 DOI / arXiv ID / URL 即可入库，自动去重、验证 PDF、失败时走 API fallback。返回每篇论文的最终状态（`saved_with_pdf` / `saved_metadata_only` / `duplicate` / `failed`）
+- **`profile_library` 工具** — 分析文献库的主题分布、期刊结构、时间跨度，帮助 agent 理解你的研究方向
+- **`search_academic_databases` 全参数搜索** — OpenAlex 检索支持 `min_citations`、`concepts`、`institutions`、`source` 等 filter，cursor-based 分页
+- **`zotpilot update` 命令** — 一键升级 CLI + skill 目录
+- **版本漂移检测** — MCP server 启动时检查已部署 skill 版本，不匹配时提示更新
+- **增量索引** — 基于 PDF hash 跳过已索引文档，中断后从断点恢复，不重复处理
+- **索引并发保护** — 防止多个 agent 同时索引导致重复数据
+- **入库即时验证** — Connector 保存后通过本地 Zotero API 验证 itemType + title，自动识别并清理出版商 translator 产生的网页快照垃圾 item，失败时走 DOI API fallback
 
 ### Changed
-- **Ingestion 子系统从 7 文件 3146 行 → 3 文件 ~1200 行**：
-  - 新建 `tools/ingestion/connector.py`（~1100 行）— Connector 通信 + 验证 + DOI API fallback
-  - 新建 `tools/ingestion/search.py`（~490 行）— OpenAlex 搜索 + query 构建
-  - 重写 `tools/ingestion/__init__.py`（~330 行）— 只注册 2 个 MCP 工具
-- **18 个 MCP 工具（从 33 精简）**：
-  - `search_papers` 吸收 `search_tables` / `search_figures`（新增 `section_type` 参数）
-  - `ingest_by_identifiers` 吸收 `save_urls`（URL 自动识别）
-  - `manage_collections` 吸收 `create_collection`（`action="create"`）
-  - `index_library` 吸收 `reindex_degraded`（`item_keys` 参数）
-- **Skill 系统**：4 个 skill 替代原有 5 个，删除 `zotpilot` 路由器 skill（由平台原生机制处理），`ztp-research` 完整覆盖 4-Phase 流程（Discovery → Ingestion → Post-processing → Final Report）
-- **平台支持收敛**：从 6 个平台降到 3 个（Claude Code / Codex / OpenCode），移除 Gemini / Cursor / Windsurf 适配代码
+- **MCP 工具从 33 个精简到 18 个**：
+  - `search_papers` 新增 `section_type` 参数，可搜表格和图表（替代 `search_tables` / `search_figures`）
+  - `ingest_by_identifiers` 支持 URL 输入（替代 `save_urls`）
+  - `manage_collections` 支持 `action="create"`（替代 `create_collection`）
+  - `index_library` 支持 `item_keys` 参数局部重索引（替代 `reindex_degraded`）
+- **入库流程同步化** — 不再需要轮询状态或多步确认，一次调用返回完整结果
+- **Skill 系统** — 4 个声明式 skill（`ztp-research` / `ztp-review` / `ztp-profile` / `ztp-setup`）替代旧的路由器模式，由平台原生机制自动选择
+- **平台支持收敛到 3 个** — Claude Code / Codex CLI / OpenCode 为官方支持平台（Gemini CLI / Cursor / Windsurf 不再维护适配，MCP 工具仍可用但不保证）
 
 ### Removed
-- **10 个状态机 phase gate 工具**：`confirm_candidates` / `resolve_preflight` / `approve_ingest` / `get_batch_status` / `approve_post_ingest` / `authorize_taxonomy_changes` / `approve_post_process` — 全部删除，Agent 在 Skill 引导下通过 `action_required` 字段自然处理用户介入
-- **整个 `tools/research_workflow.py`**（1202 行）— 状态机 MCP 工具层被 Skill 声明式编排替代
-- **整个 `workflow/worker.py`**（660 行）— 后台 worker 线程模型被同步执行替代
-- **`tools/ingest_state.py`**（427 行）— 旧的 `BatchStore` 系统，与 `workflow/batch.py` 合并为单一来源
-- **`tools/ingestion_bridge.py`**（1654 行）— 拆分到 `tools/ingestion/connector.py`
-- **`switch_library` MCP 工具**：v0.5.0 仅支持单文献库，多库切换推迟到未来版本
-- **旧的 `skills/SKILL.md` 路由器** + **`skills/references/` 目录**：内容内化到工具逻辑和各 skill 硬规则
-- **`test_research_workflow_*.py`** / **`test_post_process_gate.py`** 等依赖旧状态机的测试
+- **状态机工具** — `confirm_candidates` / `approve_ingest` / `get_batch_status` 等 7 个多步确认工具，被 `ingest_by_identifiers` 一步替代
+- **`switch_library`** — 多文献库切换推迟到未来版本
+- **旧工具别名** — `search_tables`、`search_figures`、`save_urls`、`create_collection`、`reindex_degraded` 等已合并到对应工具
 
 ### Fixed
-- **40% Connector 垃圾率根治**：之前 Connector `success=True` 信号不可信，IEEE 等翻车 publisher 的 translator 会保存成 webpage snapshot；现在通过 `validate_saved_item` 检查 itemType + title，失败自动 delete 并走 DOI API fallback
-- **item_key Web API 同步延迟竞态**：`validate_saved_item` 和 `_fetch_item_via_local_api` 使用本地 Zotero HTTP API (port 23119)，无需等待 Zotero Desktop → api.zotero.org 同步
-- **`delete_item_safe` 加入重试退避**：Web API delete 针对刚 save 的 item 加入 0/5/10/15s 退避重试，处理 Zotero 同步延迟
-- **arXiv DOI fallback 路由修复**：`identifier_resolver._resolve_doi` 识别 `10.48550/arXiv.xxx` 并路由到 arXiv API，避免 CrossRef 404
+- **Issue #7：索引中断丢数据** — 增量索引基于 PDF hash，中断后自动从断点恢复；清理 ChromaDB 中的 stale 孤儿记录
+- **arXiv DOI 路由** — `10.48550/arXiv.xxx` 格式的 DOI 正确路由到 arXiv API（CrossRef 不索引这类 DOI）
+- **PDF 提取冷启动** — 硬化 PDF fallback 链，修复首次索引时的提取失败
+- **API 密钥不再写入配置文件** — `config save()` 跳过所有 API key 字段
+- **MCP 配置文件权限** — Unix 上自动设为 0600，防止其他用户读取
+- **OpenAlex 请求限流** — 添加 rate limiter 和 429 重试，避免触发 API 封禁
 
-### Docs
-- `docs/prd-v0.5.0.md` — 产品需求文档（重构动机、产品定位、工具表、任务分解）
-- `docs/tech-design-v0.5.0.md` — 技术实施规格（入库路由决策、Task 级别的实施指令）
-- `scripts/ingest_routing_test.py` — 入库路由基准测试脚本（可复用）
+### 从 v0.4 升级 / Upgrading from v0.4
 
-### Migration Notes
-v0.5.0 从未发布到 PyPI，现有用户直接升级即可。使用新命令 `zotpilot upgrade` 一键同步 CLI + skill。Agent 在新版本中不再需要调用 `confirm_candidates` / `approve_ingest` 等 phase gate 工具——直接调用 `ingest_by_identifiers`，响应中 `action_required` 非空时停下等用户。
+```bash
+pip install --upgrade zotpilot     # 或 uv tool upgrade zotpilot
+zotpilot register                  # 必须：工具签名变了，需重新注册
+```
+
+Connector 浏览器扩展是 Research 工作流的核心组件，从 [GitHub Release](https://github.com/xunhe730/ZotPilot/releases) 下载安装到 Chrome。没有 Connector，入库功能降级为 metadata-only（无 PDF），纯 URL 入库会失败。搜索、引用、整理功能不受影响。
+
+如果你之前通过 `register --gemini-key` 传入 API 密钥，升级后改用 `zotpilot config set gemini_api_key <key>` 保存（更安全，不进 shell history）。
 
 ---
 

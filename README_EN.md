@@ -1,3 +1,5 @@
+> **Note**: This English README has not been updated for v0.5.0 yet. For the latest information, please refer to the [Chinese README](README.md). Translation update is in progress.
+
 <div align="center">
   <h2>🧭 Your AI Pilot for Zotero</h2>
   <img src="assets/banner.jpg" alt="ZotPilot" width="100%">
