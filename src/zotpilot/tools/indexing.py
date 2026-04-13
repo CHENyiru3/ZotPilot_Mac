@@ -1,4 +1,5 @@
 """Indexing tools: index_library, get_index_stats."""
+
 import json
 import logging
 from collections import defaultdict
@@ -7,7 +8,15 @@ from typing import Annotated, Any
 
 from pydantic import BeforeValidator, Field
 
-from ..index_authority import authoritative_indexed_doc_ids, current_library_pdf_doc_ids
+from ..index_authority import (
+    IndexJournal,
+    IndexLease,
+    LeaseContentionError,
+    acquire_lease,
+    authoritative_indexed_doc_ids,
+    current_library_pdf_doc_ids,
+    release_lease,
+)
 from ..reranker import VALID_QUARTILES, VALID_SECTIONS
 from ..state import ToolError, _get_config, _get_reranker, _get_retriever, _get_store, _get_zotero, _index_lock, mcp
 from .profiles import tool_tags
@@ -43,12 +52,14 @@ def _collect_unindexed_papers(limit: int | None = None, offset: int = 0) -> tupl
             continue
         if limit is not None and len(papers) >= limit:
             continue
-        papers.append({
-            "doc_id": item.item_key,
-            "title": item.title or "(no title)",
-            "year": item.year,
-            "authors": item.authors,
-        })
+        papers.append(
+            {
+                "doc_id": item.item_key,
+                "title": item.title or "(no title)",
+                "year": item.year,
+                "authors": item.authors,
+            }
+        )
 
     return papers, total
 
@@ -69,9 +80,7 @@ def _get_reranking_config_impl() -> dict:
         "alpha": reranker.alpha,
         "section_weights": reranker.default_section_weights,
         "journal_weights": {
-            k if k is not None else "unknown": v
-            for k, v in reranker.quartile_weights.items()
-            if k != ""
+            k if k is not None else "unknown": v for k, v in reranker.quartile_weights.items() if k != ""
         },
         "valid_sections": sorted(VALID_SECTIONS),
         "valid_quartiles": sorted(VALID_QUARTILES),
@@ -157,8 +166,6 @@ def _get_vision_costs_impl(last_n: int = 10) -> dict:
     }
 
 
-
-
 @mcp.tool(tags=tool_tags("extended", "indexing"))
 def index_library(
     force_reindex: Annotated[bool, Field(description="Delete and rebuild index for matching items")] = False,
@@ -171,18 +178,29 @@ def index_library(
     ] = None,
     title_pattern: Annotated[str | None, Field(description="Regex to filter items by title (case-insensitive)")] = None,
     no_vision: Annotated[bool, Field(description="Disable vision-based table extraction")] = False,
-    batch_size: Annotated[int, Field(description="Items per batch (default 20). Set 0 for all at once. Call repeatedly until has_more=false. Vision extraction is auto-disabled in batch mode; use batch_size=0 for vision.")] = 20,  # noqa: E501
-    max_pages: Annotated[int | None, Field(description="Skip PDFs over N pages. None uses config default (40). 0=no limit.")] = None,  # noqa: E501
+    batch_size: Annotated[
+        int,
+        Field(
+            description="Items per batch (default 20). Set 0 for all at once. "  # noqa: E501
+        ),
+    ] = 20,  # noqa: E501
+    max_pages: Annotated[
+        int | None, Field(description="Skip PDFs over N pages. None uses config default (40). 0=no limit.")
+    ] = None,  # noqa: E501
     include_summary: Annotated[bool, Field(description="Include extended indexing summary fields")] = False,
-    acknowledge_metadata_only: Annotated[bool, Field(description="Set True after presenting metadata_only_choice to the user and receiving consent.")] = False,  # noqa: E501
+    acknowledge_metadata_only: Annotated[
+        bool, Field(description="Set True after presenting metadata_only_choice to the user and receiving consent.")
+    ] = False,  # noqa: E501
     session_id: Annotated[
         str | None,
-        Field(description=(
-            "Optional research session id. When called from inside a "
-            "ztp-research workflow, the SOP requires passing the active "
-            "session_id so the post-ingest-review gate can fire. CLI / "
-            "ad-hoc indexing should leave this None."
-        )),
+        Field(
+            description=(
+                "Optional research session id. When called from inside a "
+                "ztp-research workflow, the SOP requires passing the active "
+                "session_id so the post-ingest-review gate can fire. CLI / "
+                "ad-hoc indexing should leave this None."
+            )
+        ),
     ] = None,
 ) -> dict:
     """Index Zotero PDFs into the vector store. Incremental by default; processes batch_size items per call. Repeat until has_more=false to index all.
@@ -198,7 +216,6 @@ def index_library(
     if not _index_lock.acquire(blocking=False):
         raise ToolError("Indexing in progress, please wait.")
     try:
-
         from dataclasses import replace as dc_replace
 
         from ..indexer import Indexer
@@ -214,6 +231,19 @@ def index_library(
             raise ToolError(f"Config errors: {'; '.join(errors)}")
 
         config = _config
+
+        # Set up journal/lease for this indexing run
+        index_data_root = Path(config.chroma_db_path).parent
+        journal_path = index_data_root / "index_journal.json"
+        lease_path = index_data_root / "index_lease.json"
+        journal = IndexJournal(journal_path)
+        lease = IndexLease(lease_path)
+
+        # Acquire mutual-exclusion lease
+        try:
+            acquire_lease(lease)
+        except LeaseContentionError as e:
+            raise ToolError(str(e))
 
         # Batch mode defaults to no_vision to avoid many small vision API calls
         if batch_size > 0 and not no_vision:
@@ -232,6 +262,7 @@ def index_library(
             title_pattern=title_pattern,
             max_pages=effective_max_pages,
             batch_size=batch_size if batch_size > 0 else None,
+            journal=journal,
         )
 
         # Clear query embedding cache so new documents are findable
@@ -240,15 +271,17 @@ def index_library(
         # Serialize IndexResult objects
         serialized_results = []
         for r in result["results"]:
-            serialized_results.append({
-                "item_key": r.item_key,
-                "title": r.title,
-                "status": r.status,
-                "reason": r.reason,
-                "n_chunks": r.n_chunks,
-                "n_tables": r.n_tables,
-                "quality_grade": r.quality_grade,
-            })
+            serialized_results.append(
+                {
+                    "item_key": r.item_key,
+                    "title": r.title,
+                    "status": r.status,
+                    "reason": r.reason,
+                    "n_chunks": r.n_chunks,
+                    "n_tables": r.n_tables,
+                    "quality_grade": r.quality_grade,
+                }
+            )
 
         skipped_no_pdf_all: list[dict] = result.get("skipped_no_pdf", [])
         skipped_no_pdf_count = len(skipped_no_pdf_all)
@@ -278,20 +311,23 @@ def index_library(
             )
 
         if include_summary:
-            response.update({
-                "quality_distribution": result.get("quality_distribution"),
-                "extraction_stats": result.get("extraction_stats"),
-                "long_documents": result.get("long_documents", []),
-                "skipped_long": result.get("skipped_long", 0),
-                "total_to_index": result.get("total_to_index", 0),
-                "vision_pending_tables": result.get("vision_pending_tables", 0),
-                "vision_estimated_cost_usd": result.get("vision_estimated_cost_usd", 0.0),
-                "vision_budget_skipped": result.get("vision_budget_skipped", False),
-                "vision_skip_reason": result.get("vision_skip_reason"),
-            })
+            response.update(
+                {
+                    "quality_distribution": result.get("quality_distribution"),
+                    "extraction_stats": result.get("extraction_stats"),
+                    "long_documents": result.get("long_documents", []),
+                    "skipped_long": result.get("skipped_long", 0),
+                    "total_to_index": result.get("total_to_index", 0),
+                    "vision_pending_tables": result.get("vision_pending_tables", 0),
+                    "vision_estimated_cost_usd": result.get("vision_estimated_cost_usd", 0.0),
+                    "vision_budget_skipped": result.get("vision_budget_skipped", False),
+                    "vision_skip_reason": result.get("vision_skip_reason"),
+                }
+            )
 
         return response
     finally:
+        release_lease(lease)
         _index_lock.release()
 
 
