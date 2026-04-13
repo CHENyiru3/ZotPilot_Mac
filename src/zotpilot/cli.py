@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -176,41 +177,37 @@ def cmd_setup(args):
     config_path = _default_config_dir() / "config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
-    config_data = {
-        "zotero_data_dir": str(zotero_path),
-        "chroma_db_path": str(chroma_db_path),
-        "embedding_provider": embedding_provider,
-    }
-    if embedding_provider == "gemini" and gemini_api_key:
-        config_data["gemini_api_key"] = gemini_api_key
-    elif embedding_provider == "dashscope":
-        import os as _os
+    from dataclasses import replace
 
-        dashscope_key = _os.environ.get("DASHSCOPE_API_KEY")
-        if dashscope_key:
-            config_data["dashscope_api_key"] = dashscope_key
+    # Load defaults, override setup-chosen fields, then save (no secrets persisted)
+    from .config import Config as _Config
 
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(config_data, f, indent=2)
+    config = replace(
+        _Config.load(),
+        zotero_data_dir=zotero_path,
+        chroma_db_path=chroma_db_path,
+        embedding_provider=embedding_provider,
+    )
+    config.save(config_path)
 
-    # Restrict permissions on Unix (owner read/write only)
-    if sys.platform != "win32":
-        os.chmod(config_path, 0o600)
-
+    # Runtime reconcile (no secret back-import)
     from ._platforms import reconcile_runtime
 
-    imported = _import_runtime_env_to_config(
-        config_path=config_path,
-        platforms=None,
-    )
     reconcile = reconcile_runtime(platforms=None, apply=True)
 
     if non_interactive:
         print(f"Config written to: {config_path}")
-        if imported:
-            print(f"Imported existing runtime config: {', '.join(sorted(imported))}")
         if reconcile.applied and reconcile.applied.restart_required:
             print("Runtime configured for Codex/Claude Code. Restart your AI agent.")
+        # Tell user how to provide API keys
+        if embedding_provider == "gemini":
+            print("Set your API key via:")
+            print("  export GEMINI_API_KEY='<your-key>'")
+            print("  or: zotpilot register --gemini-key <key>")
+        elif embedding_provider == "dashscope":
+            print("Set your API key via:")
+            print("  export DASHSCOPE_API_KEY='<your-key>'")
+            print("  or: zotpilot register --dashscope-key <key>")
     else:
         print(f"  Config written to: {config_path}")
 
@@ -219,8 +216,7 @@ def cmd_setup(args):
             masked = gemini_api_key[:4] + "..." + gemini_api_key[-4:] if len(gemini_api_key) > 8 else "****"
             print("\n  NOTE: Set GEMINI_API_KEY as an environment variable:")
             print(f"    export GEMINI_API_KEY='{masked}'  # (masked for security)")
-        if imported:
-            print(f"\n  Imported existing runtime config: {', '.join(sorted(imported))}")
+            print("  Or use: zotpilot register --gemini-key <key>")
 
         print("\n" + "=" * 40)
         print("Setup complete!")
@@ -524,21 +520,34 @@ def _coerce_value(key: str, value: str):
 
 
 def _config_set(key: str, value: str, config_path: Path) -> None:
-    """Direct JSON read-modify-write for a config field."""
-    import os
+    """Set a config field using atomic write (tempfile + os.replace)."""
+    # Load existing config
     data: dict = {}
     if config_path.exists():
         with open(config_path, encoding="utf-8") as f:
             data = json.load(f)
     data[key] = _coerce_value(key, value)
+    # Atomic write: temp file + rename
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-    if sys.platform != "win32":
-        os.chmod(config_path, 0o600)
-
-
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=config_path.parent, suffix=".tmp", prefix="zotpilot_"
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        if sys.platform != "win32":
+            os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, config_path)
+        tmp_path = None
+    except OSError as e:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise RuntimeError(f"Failed to write config to {config_path}: {e}") from e
 _ENV_TO_CONFIG = {
     "GEMINI_API_KEY": "gemini_api_key",
     "DASHSCOPE_API_KEY": "dashscope_api_key",
@@ -612,8 +621,10 @@ def cmd_config(args):
             print(f"Warning: zotero_user_id should be a numeric ID, not a username (got '{value}').\n"
                   f"Find your numeric ID at https://www.zotero.org/settings/keys")
         if key in _SENSITIVE_FIELDS:
-            print(f"Warning: {key} will be stored in plain text at {config_path}")
-            print("If this path is inside a git-tracked dotfiles repo, ensure it is git-ignored.")
+            print(f"Error: Field '{key}' is runtime-only and is no longer persisted in config.json. "
+                  f"Use environment variables or `zotpilot register --{key}` for runtime injection.",
+                  file=sys.stderr)
+            return 1
         try:
             _config_set(key, value, config_path)
             print(f"✓ Saved to {config_path}")
@@ -659,21 +670,9 @@ def cmd_config(args):
 
     if subcmd == "unset":
         key = args.key
-        if not config_path.exists():
-            print(f"Config file not found: {config_path}", file=sys.stderr)
-            return 1
-        with open(config_path, encoding="utf-8") as f:
-            data = json.load(f)
-        if key not in data:
-            print(f"Field '{key}' not set in config file.")
-            return 0
-        del data[key]
-        import os
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-            f.write("\n")
-        if sys.platform != "win32":
-            os.chmod(config_path, 0o600)
+        cfg = Config.load(path=config_path)
+        setattr(cfg, key, None)
+        cfg.save(path=config_path)
         print(f"✓ Removed '{key}' from {config_path}")
         return 0
 
@@ -841,12 +840,8 @@ def cmd_update(args):
         from ._platforms import reconcile_runtime
 
         config_path = _default_config_path()
-        imported = _import_runtime_env_to_config(
-            config_path=config_path,
-            platforms=None,
-        )
-        if imported:
-            print(f"Imported existing runtime config: {', '.join(sorted(imported))}")
+        # Runtime reconcile only — no secret back-import
+        runtime_config = Config.load(config_path)
         runtime_config = Config.load(config_path)
         desired_keys = _desired_env_from_config(runtime_config)
 
@@ -905,14 +900,11 @@ def cmd_update(args):
 def cmd_sync(args):
     """Developer-facing runtime synchronize command."""
     from ._platforms import reconcile_runtime
-
     config_path = _default_config_path()
-    imported = _import_runtime_env_to_config(
-        config_path=config_path,
-        platforms=None,
-    )
-    if imported:
-        print(f"Imported existing runtime config: {', '.join(sorted(imported))}")
+    # Runtime reconcile only — no secret back-import
+    runtime_config = Config.load(config_path)
+    # Runtime reconcile only — no secret back-import
+    runtime_config = Config.load(config_path)
     runtime_config = Config.load(config_path)
     desired_keys = _desired_env_from_config(runtime_config)
 

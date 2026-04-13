@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -150,12 +151,13 @@ class Config:
         )
 
     def save(self, path: Path | str | None = None) -> None:
-        """Write the config to JSON."""
+        """Write the config to JSON using an atomic write pattern."""
         if path is not None:
             config_path = Path(path).expanduser()
         else:
             config_path = _default_config_dir() / "config.json"
 
+        # Create parent dirs if missing
         config_path.parent.mkdir(parents=True, exist_ok=True)
 
         data = {
@@ -191,14 +193,29 @@ class Config:
             # "semantic_scholar_api_key": self.semantic_scholar_api_key,  # SECURITY: excluded
         }
 
-        # Write with restrictive permissions on Unix, normal write on Windows
-        if sys.platform != "win32":
-            fd = os.open(str(config_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as f:
+        # Atomic write: temp file + rename
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=config_path.parent, suffix=".tmp", prefix="zotpilot_"
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
-        else:
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+
+            # Set restrictive permissions on Unix before atomic rename
+            if sys.platform != "win32":
+                os.chmod(tmp_path, 0o600)
+
+            os.replace(tmp_path, config_path)
+            tmp_path = None  # Successfully replaced, no cleanup needed
+        except OSError as e:
+            # Clean up temp file on failure, original config untouched
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            raise RuntimeError(f"Failed to write config to {config_path}: {e}") from e
 
     def validate(self) -> list[str]:
         """Return list of validation errors, empty if valid."""
