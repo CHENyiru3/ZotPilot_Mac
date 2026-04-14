@@ -78,6 +78,10 @@ def search_papers(
         )
     start = time.perf_counter()
 
+    # Validate section_type before dispatching
+    if section_type is not None and section_type not in ("text", "tables", "figures"):
+        raise ToolError(f"Invalid section_type: {section_type}. Must be 'text', 'tables', or 'figures'.")
+
     if section_type == "tables":
         return search_tables(
             query=query, top_k=top_k, year_min=year_min, year_max=year_max,
@@ -331,9 +335,9 @@ def search_boolean(
             continue
 
         # Apply year filters
-        if year_min and (item.year is None or item.year < year_min):
+        if year_min is not None and (item.year is None or item.year < year_min):
             continue
-        if year_max and (item.year is None or item.year > year_max):
+        if year_max is not None and (item.year is None or item.year > year_max):
             continue
 
         results.append({

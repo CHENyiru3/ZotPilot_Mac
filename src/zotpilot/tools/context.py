@@ -38,10 +38,12 @@ def get_passage_context(
     chunks = store.get_adjacent_chunks(doc_id, chunk_index, window=window)
 
     if not chunks:
-        raise ToolError(f"No chunks found for doc_id={doc_id}")
+        raise ToolError(f"No chunks found for doc_id={doc_id}, chunk_index={chunk_index}")
 
     # Get section and journal_quartile from center chunk
-    center_chunk = next((c for c in chunks if c.metadata.get("chunk_index", -1) == chunk_index), chunks[0])
+    center_chunk = next((c for c in chunks if c.metadata.get("chunk_index", -1) == chunk_index), None)
+    if center_chunk is None:
+        raise ToolError(f"chunk_index={chunk_index} not found in doc_id={doc_id}")
 
     passages = [
         {
