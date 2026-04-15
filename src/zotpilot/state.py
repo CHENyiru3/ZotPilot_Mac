@@ -341,9 +341,14 @@ _library_override: dict | None = None
 
 
 def _get_library_override() -> dict | None:
-    """Thread-safe read of _library_override."""
-    with _init_lock:
-        return _library_override
+    """Read _library_override.
+
+    Reading a single module-global reference is atomic in CPython (GIL); no
+    lock is required. Historically this held _init_lock, which caused a
+    self-deadlock when called from inside getters already holding that lock
+    (e.g. _get_zotero → _get_library_override).
+    """
+    return _library_override
 
 
 def _reset_singletons():

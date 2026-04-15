@@ -161,3 +161,82 @@ class Test429Retry:
                 params = call.kwargs.get("params") or call[1].get("params")
                 assert params is not None
                 assert params.get("mailto") == "polite@example.com"
+
+
+# ---------------------------------------------------------------------------
+# Network-error retry (SSL EOF, ConnectError, TimeoutException)
+# ---------------------------------------------------------------------------
+
+
+class TestNetworkErrorRetry:
+    def test_connect_error_retries_then_succeeds(self):
+        import httpx
+
+        with patch("zotpilot.openalex_client.httpx.get") as mock_get:
+            with patch("zotpilot.openalex_client.time.sleep"):
+                mock_get.side_effect = [
+                    httpx.ConnectError("SSL: UNEXPECTED_EOF_WHILE_READING"),
+                    _make_response(200),
+                ]
+                client = OpenAlexClient()
+                resp = client._request("/works")
+                assert resp.status_code == 200
+                assert mock_get.call_count == 2
+
+    def test_connect_error_exhausts_retries_and_raises(self):
+        import httpx
+
+        with patch("zotpilot.openalex_client.httpx.get") as mock_get:
+            with patch("zotpilot.openalex_client.time.sleep"):
+                mock_get.side_effect = httpx.ConnectError("SSL EOF")
+                client = OpenAlexClient()
+                with pytest.raises(httpx.ConnectError):
+                    client._request("/works")
+                assert mock_get.call_count == 4  # initial + 3 retries
+
+    def test_connect_error_backoff_grows(self):
+        import httpx
+
+        with patch("zotpilot.openalex_client.httpx.get") as mock_get:
+            with patch("zotpilot.openalex_client.time.sleep") as mock_sleep:
+                mock_get.side_effect = [
+                    httpx.ConnectError("x"),
+                    httpx.ConnectError("x"),
+                    _make_response(200),
+                ]
+                client = OpenAlexClient()
+                client._last_request = 0.0  # skip first rate-limit sleep
+                client._request("/works")
+                # sleep pattern: [backoff_0, rate_limit_1, backoff_1, rate_limit_2]
+                sleeps = [c[0][0] for c in mock_sleep.call_args_list]
+                assert sleeps[0] == pytest.approx(1.0, abs=0.05)  # backoff after attempt 0
+                assert sleeps[2] == pytest.approx(2.0, abs=0.05)  # backoff after attempt 1
+
+    def test_timeout_exception_also_retries(self):
+        """TimeoutException is a RequestError subclass — should retry."""
+        import httpx
+
+        with patch("zotpilot.openalex_client.httpx.get") as mock_get:
+            with patch("zotpilot.openalex_client.time.sleep"):
+                mock_get.side_effect = [
+                    httpx.ReadTimeout("read timed out"),
+                    _make_response(200),
+                ]
+                client = OpenAlexClient()
+                resp = client._request("/works")
+                assert resp.status_code == 200
+
+    def test_network_retry_logs_warning(self, caplog):
+        import httpx
+
+        with patch("zotpilot.openalex_client.httpx.get") as mock_get:
+            with patch("zotpilot.openalex_client.time.sleep"):
+                mock_get.side_effect = [
+                    httpx.ConnectError("SSL EOF"),
+                    _make_response(200),
+                ]
+                client = OpenAlexClient()
+                with caplog.at_level(logging.WARNING):
+                    client._request("/works")
+                assert "OpenAlex network error (ConnectError)" in caplog.text
+                assert "retry 1/3" in caplog.text

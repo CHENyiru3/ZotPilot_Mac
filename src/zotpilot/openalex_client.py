@@ -69,12 +69,33 @@ class OpenAlexClient:
         response: httpx.Response | None = None
         for attempt in range(max_retries + 1):
             self._rate_limit()
-            response = httpx.get(
-                f"{OPENALEX_API}{path}",
-                params=request_params or None,
-                headers=self.headers,
-                timeout=timeout,
-            )
+            try:
+                response = httpx.get(
+                    f"{OPENALEX_API}{path}",
+                    params=request_params or None,
+                    headers=self.headers,
+                    timeout=timeout,
+                )
+            except httpx.RequestError as exc:
+                # Covers ConnectError (incl. SSL EOF on first TLS handshake),
+                # ReadError, TimeoutException, and other transport-level faults.
+                if attempt < max_retries:
+                    logger.warning(
+                        "OpenAlex network error (%s), retry %d/%d in %.1fs",
+                        type(exc).__name__,
+                        attempt + 1,
+                        max_retries,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+                logger.error(
+                    "OpenAlex network error (%s), all %d retries exhausted",
+                    type(exc).__name__,
+                    max_retries,
+                )
+                raise
 
             if response.status_code == 429:
                 if attempt < max_retries:
