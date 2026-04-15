@@ -51,3 +51,7 @@ connector/config.sh
 
 # Local debug logs (per-session /ztp-research traces, not for repo)
 ztp-research-*.md
+
+# Local AI agent config — project-specific instructions, not for public repo
+CLAUDE.md
+AGENTS.md
