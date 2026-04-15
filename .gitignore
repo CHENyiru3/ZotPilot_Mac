@@ -55,3 +55,8 @@ ztp-research-*.md
 # Local AI agent config — project-specific instructions, not for public repo
 CLAUDE.md
 AGENTS.md
+
+# OMC / oh-my-claudecode runtime state (local only)
+.omx/
+.sisyphus/
+MagicMock/

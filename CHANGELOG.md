@@ -12,6 +12,24 @@ zotpilot update --dry-run    # 预览操作，不执行
 
 ---
 
+## [0.5.1] - 2026-04-15
+
+**质量加固 / Quality Hardening** — v0.5.0 发布后的修复与小功能补充。
+
+### Added
+- **`zotpilot register --dev [SOURCE_DIR]`** — 开发者模式注册：MCP server 直接跑源码（`uv run --directory <repo> zotpilot`），改代码后只需重启 MCP 连接无需重新安装
+
+### Fixed
+- **Preflight 真正阻塞** — 检测到反爬页面时阻塞整个批次并要求用户介入，不再悄然降级为 API fallback
+- **active_candidates 对象一致性** — `run_preflight_check` 接收 `active_candidates` 引用，保证 preflight 操作的对象与后续处理的对象为同一实例
+- **ArXiv API 改用 HTTPS** — `identifier_resolver` 中 ArXiv API 端点从 `http://` 改为 `https://`
+- **代码质量（P0–P2）** — 修复 `section_type` 验证、`chunk_index` 边界保护、`year_min=0` 过滤异常、消除死代码赋值
+
+### Changed
+- **AGENTS.md / CLAUDE.md** — 同步到 v0.5.0 三 Agent 协作模型（Claude / OpenCode / Codex），更新架构描述和文档维护规则
+
+---
+
 ## [0.5.0] - 2026-04-13
 
 **架构重构 / Architectural Refactor** — 重新设计入库流程、精简工具层、新增浏览器扩展。
