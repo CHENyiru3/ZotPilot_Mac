@@ -1,6 +1,12 @@
 ---
 name: ztp-setup
-description: ZotPilot installation, configuration, and registration
+description: >
+  Use for installing, configuring, or repairing ZotPilot.
+  Trigger on: "安装ZotPilot", "配置嵌入模型", "注册MCP", "ZotPilot无法启动", "升级ZotPilot",
+  "install zotpilot", "setup zotpilot", "configure embedding provider",
+  "register MCP", "zotpilot not found", "zotpilot doctor", "update zotpilot", "zotpilot upgrade",
+  or when the user is setting up for the first time, after an upgrade, or when commands are broken.
+  Covers: install → provider selection → API key setup → MCP registration → initial index → health check.
 ---
 # Setup Workflow
 

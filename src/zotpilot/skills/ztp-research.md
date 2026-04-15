@@ -1,10 +1,21 @@
 ---
 name: ztp-research
 description: >
-  Literature discovery, ingestion, and post-processing workflow.
-  Covers the full pipeline: search → select → ingest → tag → classify → index → verify.
+  Use for finding and ingesting new academic papers into Zotero.
+  Trigger on: "调研X领域", "找论文", "论文入库", "帮我收集X相关的文献",
+  "survey papers on X", "find recent papers about X", "ingest these DOIs",
+  "add papers to my library", "collect papers on X".
+  Covers the full pipeline: external search → candidate selection → PDF ingest → tagging → classification → indexing.
+  For synthesizing papers already in the library, use ztp-review instead.
 ---
 # Research Workflow
+
+## Language Policy
+
+**Detect the user's language from the message that triggered this workflow and use it consistently throughout.**
+- All user-facing messages, prompts, table headers, and blockquotes must be in the detected language.
+- The Chinese text in blockquotes below is illustrative only — translate to match user language.
+- If the triggering message is ambiguous, default to English.
 
 ## Phase 1 — Discovery
 
@@ -16,12 +27,21 @@ description: >
 
 ## Phase 2 — Ingestion
 
-4. **Pre-ingest institutional access check** [USER_REQUIRED]: Before calling `ingest_by_identifiers`, check the selected candidates' venues. If **any** of them is from a paywalled publisher (Springer / Elsevier / Wiley / IEEE / ACM / Nature Publishing Group / etc.) **and** `is_oa` is false, pause and ask the user **once**:
-   > 本次入库包含付费出版社的论文（例如 Springer/IEEE），请确认你当前是否位于**校园网 / VPN / 有机构订阅**的环境。(Y/N)
+4. **Pre-ingest institutional access check** [USER_REQUIRED]: Before calling `ingest_by_identifiers`, check the selected candidates' venues. If **any** of them is from a paywalled publisher (Springer / Elsevier / Wiley / IEEE / ACM / Nature Publishing Group / etc.) **and** `is_oa` is false, pause and ask the user **once**.
+
+   From the selected candidates, collect those where `is_oa_published` is false and `publisher` is non-null. Group them by `publisher`. For each group, pick the **first candidate that has a non-null `landing_page_url`** as the representative; if none has `landing_page_url`, fall back to `https://doi.org/{doi}` (if `doi` is non-null); if neither exists, omit that publisher from the table. Then show:
+
+   > 本次入库包含付费出版社的论文，请点击以下链接确认你当前的网络环境可以访问：
    >
-   > - **Y** → 直接继续入库
-   > - **N** → 请先启用机构网络，再告诉我继续
-   - Skip this check entirely when all selected candidates are arXiv-only, DOAJ-listed, or already marked `is_oa: true` — those papers are reachable without institutional access.
+   > | 出版社 | 代表论文 |
+   > |--------|---------|
+   > | {publisher} | [{title}]({landing_page_url or doi_url}) |
+   > | … | … |
+   >
+   > 确认可以正常访问后回复 **Y** 继续入库；无法访问请先启用机构网络/VPN 后告诉我。
+
+   - **Only list publishers** that appear in the current batch with at least one `is_oa_published: false` candidate.
+   - If ALL selected candidates have `is_oa_published: true` or `arxiv_id` non-null and no `publisher` — skip this check entirely.
    - Plan C's Connector save uses the user's **current network context**. Paywalled papers without institutional access will come back as `saved_metadata_only`; this reminder avoids that failure mode before it happens.
 5. **Ingest**: `ingest_by_identifiers(candidates=selected_search_results)`
    - **Forward search result dicts directly.** `search_academic_databases` already returns structured candidates with `doi`, `arxiv_id`, `landing_page_url`, `is_oa_published`, and `title`. Pass the selected rows unchanged to `candidates=`. Do NOT reconstruct identifier strings from memory, and do NOT use the deprecated `identifiers=` parameter for search results.
