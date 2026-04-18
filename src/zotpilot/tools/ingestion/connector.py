@@ -401,6 +401,7 @@ def preflight_urls(
             error_code = result.get("error_code") or _classify_preflight_error_code(result)
             error_entry = {
                 "url": url,
+                "final_url": result.get("final_url", url),
                 "error": result.get("error") or result.get("error_message") or "unknown preflight error",
                 "error_code": error_code,
             }
@@ -555,16 +556,36 @@ def run_preflight_check(
     if preflight_report.get("all_clear", False):
         return connector_candidates, [], None, []
 
+    # Map each probed URL → final_url after any redirects. Publisher ACL
+    # decisions and user-facing details MUST key off the redirect target
+    # (e.g. sciencedirect.com), not the doi.org jumper that produced it.
+    url_to_final: dict[str, str] = {}
+    for entry in (
+        preflight_report.get("accessible", [])
+        + preflight_report.get("blocked", [])
+        + preflight_report.get("errors", [])
+    ):
+        u = entry.get("url")
+        fu = entry.get("final_url")
+        if u and fu:
+            url_to_final[u] = fu
+
+    def _effective_url(u: str) -> str:
+        return url_to_final.get(u, u)
+
     failures: list[dict] = []
     blocked_domains: dict[str, str] = {}
     blocked_urls: dict[str, str] = {}
 
     for blocked in preflight_report.get("blocked", []):
         blocked_url = blocked.get("url") or ""
+        final_url = blocked.get("final_url") or blocked_url
         error_code = blocked.get("error_code") or "anti_bot_detected"
-        blocked_domains[extract_publisher_domain(blocked_url)] = error_code
+        blocked_domains[extract_publisher_domain(final_url)] = error_code
         failures.append({
-            "url": blocked_url, "status": "failed",
+            "url": blocked_url,
+            "final_url": final_url,
+            "status": "failed",
             "error_code": error_code,
             "error": (
                 blocked.get("error")
@@ -575,8 +596,9 @@ def run_preflight_check(
 
     for error in preflight_report.get("errors", []):
         error_url = error.get("url") or ""
+        final_url = error.get("final_url") or error_url
         error_code = error.get("error_code") or "preflight_failed"
-        domain = extract_publisher_domain(error_url)
+        domain = extract_publisher_domain(final_url)
 
         # Blocking scope by signal strength:
         #   anti_bot_detected / subscription_required → publisher-wide
@@ -591,14 +613,16 @@ def run_preflight_check(
             blocked_urls[error_url] = error_code
 
         failures.append({
-            "url": error_url, "status": "failed",
+            "url": error_url,
+            "final_url": final_url,
+            "status": "failed",
             "error_code": error_code,
             "error": error.get("error") or "preflight failed",
         })
 
     remaining = [
         c for c in connector_candidates
-        if extract_publisher_domain(c["url"]) not in blocked_domains
+        if extract_publisher_domain(_effective_url(c["url"])) not in blocked_domains
         and c["url"] not in blocked_urls
     ]
     dropped = len(connector_candidates) - len(remaining)
@@ -619,9 +643,11 @@ def run_preflight_check(
         }
         blocked_publishers_details: list[dict] = []
         for domain, code in blocked_domains.items():
+            # Prefer final_url in sample_urls — users open these to verify
             domain_urls = [
-                f["url"] for f in failures
-                if extract_publisher_domain(f.get("url", "")) == domain
+                (f.get("final_url") or f.get("url") or "")
+                for f in failures
+                if extract_publisher_domain(f.get("final_url") or f.get("url", "")) == domain
                 and f.get("error_code") == code
             ]
             blocked_publishers_details.append({
@@ -632,9 +658,10 @@ def run_preflight_check(
                 "total_affected": len(domain_urls),
             })
         for url, code in blocked_urls.items():
+            final_url = url_to_final.get(url, url)
             blocked_publishers_details.append({
-                "publisher": extract_publisher_domain(url),
-                "sample_urls": [url],
+                "publisher": extract_publisher_domain(final_url),
+                "sample_urls": [final_url],
                 "error_code": code,
                 "scope": "url",
                 "total_affected": 1,
