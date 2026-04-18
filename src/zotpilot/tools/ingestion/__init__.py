@@ -565,15 +565,25 @@ def ingest_by_identifiers(
             else:
                 details_str = "、".join(publisher_names)
 
+            # URL list for the user to open manually in their browser —
+            # mirrors the paywall-access-confirmation UX, which is more
+            # predictable than auto-promoting browser tabs.
+            urls_to_verify: list[str] = []
+            for d in publisher_details:
+                urls_to_verify.extend(d.get("sample_urls") or [])
+
             action_required.append({
                 "type": "preflight_blocked",
                 "publishers": publisher_names,
                 "details": publisher_details,
+                "urls_to_verify": urls_to_verify,
                 "blocked_count": blocked_count,
                 "message": (
-                    f"{blocked_count} 篇需要你处理：{details_str}。"
-                    "请在浏览器完成验证或等待慢加载页面完成后，"
-                    "重新调用 ingest_by_identifiers。"
+                    f"{blocked_count} 篇需要你处理：{details_str}。\n"
+                    "请在浏览器中打开以下链接确认页面可访问"
+                    "（若有 Cloudflare / CAPTCHA / 登录，请完成它）：\n  - "
+                    + "\n  - ".join(urls_to_verify)
+                    + "\n确认完成后回复 Y，我将重新调用 ingest_by_identifiers。"
                 ),
             })
 

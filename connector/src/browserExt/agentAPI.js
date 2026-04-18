@@ -714,9 +714,12 @@ Zotero.AgentAPI = new function() {
 			let status = "accessible";
 			if (ANTI_BOT_PATTERNS.some((pattern) => title.toLowerCase().includes(pattern))) {
 				status = "anti_bot_detected";
-				// 后台 tab 避免批量预检干扰用户，仅 anti-bot 时才提升前台让用户完成验证
-				try { await browser.tabs.update(tabId, { active: true }); } catch (e) {}
-				tabId = null; // keep tab open — user needs it to complete verification
+				// Do NOT auto-promote the tab to foreground — it is disruptive
+				// when multiple publishers in a batch each trigger this code.
+				// The bridge reports the final_url back to Python, and the
+				// user-facing action_required message surfaces the URL so the
+				// user can open it manually in their normal browsing flow.
+				// Tab is closed in finally{} like any other preflight probe.
 			}
 			await _postResult({
 				request_id,
@@ -745,8 +748,7 @@ Zotero.AgentAPI = new function() {
 					recoveredFinalUrl = t.url || url;
 					if (ANTI_BOT_PATTERNS.some(p => recoveredTitle.toLowerCase().includes(p))) {
 						recoveredStatus = "anti_bot_detected";
-						try { await browser.tabs.update(tabId, { active: true }); } catch (_) {}
-						tabId = null; // keep tab open — user needs it to complete verification
+						// No tab promotion — see the non-catch branch for rationale.
 					}
 				} catch (_) {
 					// tab already closed, nothing to recover

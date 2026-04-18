@@ -345,8 +345,12 @@ def preflight_urls(
         except Exception as exc:
             report["errors"].append({"url": url, "error": str(exc)})
 
-    per_url_timeout = 60.0
-    overall_timeout = 180.0
+    # Extension-side budget can reach 70s per URL (_waitForReady up to 60s +
+    # up to 5 × 2s = 10s title-retry after anti-bot pattern match). Python
+    # must wait longer than that or we surface false-positive preflight_timeout
+    # while the extension is still working.
+    per_url_timeout = 90.0
+    overall_timeout = 300.0
     polled: dict[str, dict] = {}
     pending_ids = set(id_to_url)
     per_request_deadlines = {
