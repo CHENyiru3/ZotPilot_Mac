@@ -1,6 +1,6 @@
 # ZotPilot Connector Bridge Protocol
 
-> **Version:** 2.0.0
+> **Version:** 2.1.0
 > **Scope:** HTTP bridge between ZotPilot MCP server and ZotPilot Connector extension
 
 The bridge exposes HTTP endpoints on `http://127.0.0.1:2619`. Any HTTP-capable client (MCP tool, curl, Python script) can integrate without Chrome-specific APIs.
@@ -44,51 +44,39 @@ The bridge exposes HTTP endpoints on `http://127.0.0.1:2619`. Any HTTP-capable c
 
 | Component | Language | Role |
 |-----------|----------|------|
-| `bridge.py` | Python | HTTP server, command queue, result storage, heartbeat tracking, auth token management |
-| `agentAPI.js` | JavaScript | Extension-side poller, save orchestration, completion detection, token handling |
-| MCP tool `save_urls` | Python | Client-facing API (via ZotPilot MCP server) |
+| `bridge.py` | Python | HTTP server, command queue, result storage, heartbeat tracking |
+| `agentAPI.js` | JavaScript | Extension-side poller, save orchestration, completion detection |
+| MCP tool `ingest_by_identifiers` | Python | Client-facing API (via ZotPilot MCP server) |
 
 ---
 
 ## 2. Authentication
 
-### Token-based Authentication (v2.0+)
+### Origin-based ACL (v2.1+)
 
-The bridge uses a random auth token generated on startup to prevent CSRF-style attacks from malicious websites.
+The bridge uses **Origin-based ACL** — no shared secret, no configuration.
 
-**Token lifecycle:**
+#### How it works
 
-1. Bridge generates a 64-character hex token (`secrets.token_hex(32)`) on startup.
-2. Extension fetches `GET /status` on init and extracts `auth_token` from the response.
-3. All subsequent requests include the header `X-ZotPilot-Token: <token>`.
-4. Missing or invalid token → `401 {"error": "unauthorized"}`.
-5. If extension receives 401, it re-fetches `/status` to get a fresh token.
+Every browser cross-origin `fetch()` carries an immutable `Origin` header that
+the page's JavaScript cannot forge. The bridge inspects it on every request:
 
-**Security model:**
+| Origin value                        | Verdict |
+|-------------------------------------|---------|
+| (absent) — CLI / MCP / curl         | Allow   |
+| `chrome-extension://<id>`           | Allow   |
+| `moz-extension://<id>`              | Allow   |
+| `safari-web-extension://<id>`       | Allow   |
+| `https://…`, `http://…`, `null`, … | **403** |
 
-- `GET /status` is public (no token required) — this is how the extension obtains the token.
-- `OPTIONS` preflight requests remain open (`Access-Control-Allow-Origin: *`) for CORS compatibility.
-- All other endpoints (`/pending`, `/enqueue`, `/result`, `/heartbeat`) require the `X-ZotPilot-Token` header.
-- Token is process-scoped: it changes on every bridge restart.
+`/status` is exempt from the check so health probes work without a browser.
 
-**Client integration (non-extension):**
-
-```python
-import requests
-
-# Step 1: fetch token from /status
-status = requests.get("http://127.0.0.1:2619/status").json()
-token = status["auth_token"]
-
-# Step 2: use token in subsequent requests
-headers = {"X-ZotPilot-Token": token, "Content-Type": "application/json"}
-resp = requests.post("http://127.0.0.1:2619/enqueue", headers=headers, json={
-    "action": "save",
-    "url": "https://arxiv.org/abs/2401.00001"
-})
-```
-
----
+#### Threat model covered
+- ✅ Malicious website you visit cannot POST `/enqueue` to save items to
+  your Zotero (Origin would be `https://attacker.com`, rejected).
+- ❌ Same-machine processes can impersonate the bridge on a different port —
+  out of scope (localhost is the trust boundary).
+- ❌ User deliberately installing a malicious browser extension — out of scope.
 
 ## 3. Command Validation
 
@@ -113,7 +101,6 @@ Extension polls this endpoint every 2 seconds. Returns the next pending save com
 ```
 GET /pending
 Accept: application/json
-X-ZotPilot-Token: <token>
 ```
 
 **Response (200 — command available)**
@@ -150,7 +137,6 @@ Enqueue a save command. Used by MCP tools and other clients.
 ```
 POST /enqueue
 Content-Type: application/json
-X-ZotPilot-Token: <token>
 ```
 
 ```json
@@ -180,9 +166,9 @@ X-ZotPilot-Token: <token>
 No body
 ```
 
-**Response (401 — unauthorized)**
+**Response (403 — origin not allowed)**
 ```json
-{ "error": "unauthorized" }
+{ "error": "forbidden_origin", "origin": "https://evil.example" }
 ```
 
 **Response (503 — extension not connected)**
@@ -203,7 +189,6 @@ Extension posts save results here after completion.
 ```
 POST /result
 Content-Type: application/json
-X-ZotPilot-Token: <token>
 ```
 
 ```json
@@ -265,7 +250,6 @@ Extension sends this every 10 seconds. Bridge tracks connectivity state.
 ```
 POST /heartbeat
 Content-Type: application/json
-X-ZotPilot-Token: <token>
 ```
 
 ```json
@@ -286,7 +270,7 @@ X-ZotPilot-Token: <token>
 
 ### `GET /status`
 
-Health check and connectivity status. **This is the only endpoint that does not require authentication.**
+Health check and connectivity status. **Exempt from the Origin ACL** so non-browser health probes can check bridge state without attaching an Origin header.
 
 **Request**
 ```
@@ -299,7 +283,6 @@ GET /status
   "bridge": "running",
   "port": 2619,
   "extension_connected": true,
-  "auth_token": "a1b2c3d4e5f6...",
   "extension_last_seen_s": 3.2,
   "extension_version": "0.0.2",
   "zotero_running": true
@@ -311,7 +294,6 @@ GET /status
 | `bridge` | string | Always `"running"` if server is up |
 | `port` | integer | Actual port the server is listening on |
 | `extension_connected` | boolean | `true` if a heartbeat was received in the last 30s |
-| `auth_token` | string | Current auth token for authenticated requests |
 | `extension_last_seen_s` | float | Seconds since last heartbeat (omitted if never connected) |
 | `extension_version` | string | From last heartbeat (omitted if never connected) |
 | `zotero_running` | boolean | From last heartbeat (omitted if never connected) |
@@ -361,7 +343,7 @@ All error responses use `{ error_code, error_message }` split schema:
 
 | `error_code` | Meaning | `success` value | Retryable? | Likely cause |
 |---|---|---|---|---|
-| `unauthorized` | Missing or invalid auth token | — | Yes | Token not provided, bridge restarted |
+| `forbidden_origin` | Request `Origin` not allowed (not a browser extension and not empty) | — | No | Fix the caller; non-browser callers must omit `Origin` |
 | `invalid_command` | Command failed schema validation | — | No | Invalid `action` or `url` |
 | `extension_not_connected` | Bridge has not received a heartbeat in >30s | `false` | Yes | Chrome closed, extension disabled |
 | `zotero_not_running` | Extension cannot reach Zotero desktop | `false` | Yes | Zotero desktop not running |
@@ -394,14 +376,6 @@ If the extension misses 3 consecutive heartbeat cycles (>30s), the bridge marks 
 
 After `POST /enqueue`, the client polls `GET /result/<request_id>` every **2 seconds**, up to a **90-second overall timeout**.
 
-### Token Refresh
-
-If any request receives a `401 {"error": "unauthorized"}` response:
-
-1. Extension clears its cached token.
-2. Extension re-fetches `GET /status` to obtain a new token.
-3. Extension retries the original request with the new token.
-
 ---
 
 ## 8. Sequence Diagrams
@@ -428,28 +402,23 @@ Client          Bridge            Extension         Zotero
   │               │                   │                │
 ```
 
-### Authentication flow
+### Origin ACL flow
 
 ```
-Extension       Bridge
-  │               │
-  │──GET /status──>
-  │<──200 {auth_token: "..."}
-  │               │
-  │──GET /pending─── (X-ZotPilot-Token: "...")
-  │<──200 {command}
-  │               │
-  │──POST /result── (X-ZotPilot-Token: "...")
-  │<──200
-  │               │
-  │──GET /pending─── (X-ZotPilot-Token: "stale")
-  │<──401 {error: "unauthorized"}
-  │               │
-  │──GET /status──> (re-fetch token)
-  │<──200 {auth_token: "..."}
-  │               │
-  │──GET /pending─── (X-ZotPilot-Token: "new")
-  │<──200 {command}
+Browser ext.     Bridge                    Malicious page   Bridge
+  │               │                             │             │
+  │──GET /pending  (Origin: chrome-extension://)│             │
+  │<──200 {command}                             │             │
+  │                                             │             │
+  │──POST /result  (Origin: chrome-extension://)│             │
+  │<──200                                       │             │
+  │                                             │             │
+  │                                             │──POST /enqueue  (Origin: https://evil.com)
+  │                                             │<──403 {error: "forbidden_origin"}
+  │                                             │             │
+  │              (no shared secret — browser    │             │
+  │               force-attaches Origin, JS     │             │
+  │               cannot forge it)              │             │
 ```
 
 ### Completion detection (dual monkey-patch)
@@ -489,24 +458,21 @@ Client          Bridge
 
 ## 9. Manual Testing with curl
 
-Assumes the bridge is running on port 2619.
+Assumes the bridge is running on port 2619. `curl` does not attach an `Origin` header, so it hits the bridge as a non-browser caller and always passes the ACL.
 
-### 1. Check bridge health and get auth token
+### 1. Check bridge health
 
 ```bash
 curl http://127.0.0.1:2619/status
 ```
 
-Expected: `{"bridge": "running", "port": 2619, "auth_token": "...", ...}`
+Expected: `{"bridge": "running", "port": 2619, ...}` — no `auth_token` field.
 
-### 2. Enqueue a save (with auth token)
+### 2. Enqueue a save
 
 ```bash
-TOKEN=$(curl -s http://127.0.0.1:2619/status | python3 -c "import sys,json; print(json.load(sys.stdin)['auth_token'])")
-
 curl -X POST http://127.0.0.1:2619/enqueue \
   -H "Content-Type: application/json" \
-  -H "X-ZotPilot-Token: $TOKEN" \
   -d '{
     "action": "save",
     "url": "https://arxiv.org/abs/2401.00001",
@@ -517,22 +483,22 @@ curl -X POST http://127.0.0.1:2619/enqueue \
 
 Expected: `{"request_id": "..."}`
 
-### 3. Test unauthorized access (no token)
+### 3. Test forbidden origin (simulate a malicious webpage)
 
 ```bash
 curl -X POST http://127.0.0.1:2619/enqueue \
   -H "Content-Type: application/json" \
+  -H "Origin: https://evil.example" \
   -d '{"action": "save", "url": "https://example.com"}'
 ```
 
-Expected: `HTTP 401 {"error": "unauthorized"}`
+Expected: `HTTP 403 {"error": "forbidden_origin", "origin": "https://evil.example"}`
 
 ### 4. Test invalid command
 
 ```bash
 curl -X POST http://127.0.0.1:2619/enqueue \
   -H "Content-Type: application/json" \
-  -H "X-ZotPilot-Token: $TOKEN" \
   -d '{"action": "delete", "url": "https://example.com"}'
 ```
 
@@ -542,8 +508,7 @@ Expected: `HTTP 400 {"error": "invalid_command", "reason": "..."}`
 
 ```bash
 # Replace REQUEST_ID with the id from step 2
-curl http://127.0.0.1:2619/result/REQUEST_ID \
-  -H "X-ZotPilot-Token: $TOKEN"
+curl http://127.0.0.1:2619/result/REQUEST_ID
 ```
 
 Expected (after ~5-15s): `{"request_id": "REQUEST_ID", "success": true, ...}`
@@ -555,11 +520,21 @@ Close Chrome, wait 35s, then:
 ```bash
 curl -X POST http://127.0.0.1:2619/enqueue \
   -H "Content-Type: application/json" \
-  -H "X-ZotPilot-Token: $TOKEN" \
   -d '{"action": "save", "url": "https://example.com"}'
 ```
 
 Expected: `HTTP 503 {"error_code": "extension_not_connected", ...}`
+
+### 7. Simulate an allowed browser-extension caller
+
+```bash
+curl -X POST http://127.0.0.1:2619/enqueue \
+  -H "Content-Type: application/json" \
+  -H "Origin: chrome-extension://abc123" \
+  -d '{"action": "save", "url": "https://example.com"}'
+```
+
+Expected: `{"request_id": "..."}` (same as step 2; the extension Origin prefix passes the ACL)
 
 ---
 
@@ -571,7 +546,8 @@ Breaking changes (removing or renaming fields) will increment the major version 
 
 | Version | Changes |
 |---------|---------|
+| **2.1.0** | Replaced token-based auth with Origin-based ACL (no `X-ZotPilot-Token`, no `auth_token` in `/status`) |
 | **2.0.0** | Added token-based authentication (`X-ZotPilot-Token` header), command schema validation (action/url), `auth_token` in `/status` response |
 | **1.0.0** | Initial protocol version |
 
-Current protocol version: **2.0.0**
+Current protocol version: **2.1.0**

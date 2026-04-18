@@ -18,7 +18,6 @@ Uses ThreadingHTTPServer to avoid deadlock when the MCP tool is polling
 
 import json
 import logging
-import secrets
 import subprocess
 import sys
 import threading
@@ -40,6 +39,13 @@ _RESULT_TTL_S = 300  # 5 minutes
 _RESULT_MAX_ENTRIES = 100
 
 
+_ALLOWED_ORIGIN_PREFIXES = (
+    "chrome-extension://",
+    "moz-extension://",
+    "safari-web-extension://",
+)
+
+
 class _BridgeHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the bridge."""
 
@@ -47,9 +53,13 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         logger.debug(format, *args)
 
     def _set_cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin", "")
+        if origin and origin.startswith(_ALLOWED_ORIGIN_PREFIXES):
+            self.send_header("Access-Control-Allow-Origin", origin)
+        else:
+            self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-ZotPilot-Token")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -57,19 +67,25 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Max-Age", "86400")
         self.end_headers()
 
-    def _check_auth(self) -> bool:
-        """Verify X-ZotPilot-Token header. Returns True if auth passes, False if 401 sent."""
-        token = self.headers.get("X-ZotPilot-Token", "")
-        expected = self.server.bridge.auth_token  # type: ignore[attr-defined]
-        if not expected or token != expected:
-            body = json.dumps({"error": "unauthorized"}).encode()
-            self.send_response(401)
-            self._set_cors()
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(body)
-            return False
-        return True
+    def _check_origin(self) -> bool:
+        """Allow empty Origin (CLI/MCP) or browser-extension Origins; deny others."""
+        origin = self.headers.get("Origin", "")
+        if not origin:
+            return True  # non-browser caller (CLI / MCP / curl)
+        if origin.startswith(_ALLOWED_ORIGIN_PREFIXES):
+            return True
+        # Reject any http(s)://... and "null"
+        self._send_403("origin_not_allowed", origin)
+        return False
+
+    def _send_403(self, error_code: str, origin: str) -> None:
+        """Send a 403 response for origin-not-allowed."""
+        body = json.dumps({"error": error_code, "origin": origin}).encode()
+        self.send_response(403)
+        self._set_cors()
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self):
         if self.path == "/status":
@@ -81,8 +97,8 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # All other GET endpoints require auth token
-        if not self._check_auth():
+        # All other GET endpoints require origin check
+        if not self._check_origin():
             return
 
         if self.path == "/pending":
@@ -117,8 +133,8 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        # POST endpoints require auth (heartbeat is extension-side, also needs token)
-        if not self._check_auth():
+        # POST endpoints require origin check
+        if not self._check_origin():
             return
 
         if self.path == "/enqueue":
@@ -211,17 +227,12 @@ class BridgeServer:
         self._thread: threading.Thread | None = None
         self.port = port
 
-        # Security: generate random auth token on startup
-        self._auth_token: str = secrets.token_hex(32)
 
         # Task 1.4: heartbeat tracking
         self._last_heartbeat_time: float = 0.0
         self._extension_info: dict[str, Any] = {}
 
-    @property
-    def auth_token(self) -> str:
-        """Return the current auth token for /status response."""
-        return self._auth_token
+
 
     def _validate_command(self, command: dict) -> str | None:
         """Validate command schema. Returns error reason string or None if valid."""
@@ -260,7 +271,6 @@ class BridgeServer:
             "bridge": "running",
             "port": self.port,
             "extension_connected": connected,
-            "auth_token": self._auth_token,
         }
         if last_seen_s is not None:
             status["extension_last_seen_s"] = last_seen_s

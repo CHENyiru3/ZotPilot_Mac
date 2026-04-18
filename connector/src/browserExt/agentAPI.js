@@ -59,9 +59,6 @@ Zotero.AgentAPI = new function() {
 	let _heartbeatTimer = null; // Independent heartbeat timer — not tied to poll loop
 	let _busy = false;
 
-	// Security: auth token fetched from /status, attached to all bridge requests
-	let _authToken = null;
-
 	// Map<tabId, {resolve, item_key, item_title, progressRows, pdf_*}> — pending save completions
 	let _pendingSaves = new Map();
 
@@ -87,48 +84,6 @@ Zotero.AgentAPI = new function() {
 	// Map<tabId, resolve> — pending translator-ready waiters (event-driven, replaces polling)
 	let _translatorWaiters = new Map();
 
-	/**
-	 * Fetch auth token from /status endpoint. Retries on failure.
-	 */
-	async function _fetchAuthToken() {
-		try {
-			let response = await fetch(BRIDGE_URL + "/status", {
-				method: "GET",
-				headers: { "Accept": "application/json" },
-			});
-			if (response.ok) {
-				let data = await response.json();
-				if (data.auth_token) {
-					_authToken = data.auth_token;
-					Zotero.debug("[ZotPilot] auth token acquired");
-					return true;
-				}
-			}
-		} catch (e) {
-			Zotero.debug("[ZotPilot] failed to fetch auth token: " + e.message);
-		}
-		return false;
-	}
-
-	/**
-	 * Build headers object with auth token for bridge requests.
-	 */
-	function _authHeaders(extraHeaders = {}) {
-		if (_authToken) {
-			extraHeaders["X-ZotPilot-Token"] = _authToken;
-		}
-		return extraHeaders;
-	}
-
-	/**
-	 * Handle 401 response by refreshing token. Returns true if token was refreshed.
-	 */
-	async function _handleUnauthorized() {
-		Zotero.debug("[ZotPilot] received 401, refreshing auth token");
-		_authToken = null;
-		return await _fetchAuthToken();
-	}
-
 	this.init = async function() {
 		// Task 1.1: milestone — init start
 		console.log("[ZotPilot] AgentAPI.init() called at " + Date.now() + ", awaiting Zotero.initDeferred...");
@@ -136,22 +91,8 @@ Zotero.AgentAPI = new function() {
 		// Task 1.1: milestone — initDeferred resolved
 		console.log("[ZotPilot] Zotero.initDeferred resolved at " + Date.now());
 
-		// Fetch auth token before starting poll loop
-		let tokenAcquired = await _fetchAuthToken();
-		if (!tokenAcquired) {
-			console.error("[ZotPilot] Failed to acquire auth token from bridge. Retrying in 5s...");
-			// Start a retry loop for token acquisition
-			let retryInterval = setInterval(async () => {
-				if (await _fetchAuthToken()) {
-					clearInterval(retryInterval);
-					console.log("[ZotPilot] Auth token acquired after retry");
-				}
-			}, 5000);
-			// Don't start polling until we have a token, but don't block init either
-			// The poll loop will handle missing token gracefully
-		}
-
 		// Hook onTranslators to signal event-driven translator readiness.
+
 		// When Zotero detects translators for a tab, notify any waiting _handleSave.
 		const _originalOnTranslators = Zotero.Connector_Browser.onTranslators.bind(Zotero.Connector_Browser);
 		Zotero.Connector_Browser.onTranslators = function(translators, instanceID, contentType, tab, frameId) {
@@ -296,12 +237,10 @@ Zotero.AgentAPI = new function() {
 		try {
 			let response = await fetch(BRIDGE_URL + "/pending", {
 				method: "GET",
-				headers: _authHeaders({ "Accept": "application/json" }),
+				headers: { "Accept": "application/json" },
 			});
 			console.log("[ZotPilot] poll /pending → " + response.status);
-			if (response.status === 401) {
-				await _handleUnauthorized();
-			} else if (response.status === 200) {
+			if (response.status === 200) {
 				let command = await response.json();
 				console.log("[ZotPilot] received command:", JSON.stringify(command));
 
@@ -351,7 +290,7 @@ Zotero.AgentAPI = new function() {
 
 		await fetch(BRIDGE_URL + "/heartbeat", {
 			method: "POST",
-			headers: _authHeaders({ "Content-Type": "application/json" }),
+			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
 				extension_version: browser.runtime.getManifest().version,
 				zotero_connected: zoteroConnected,
@@ -532,7 +471,10 @@ Zotero.AgentAPI = new function() {
 			}
 			Zotero.debug("[ZotPilot] item_key discovery: all new items have wrong titles — marking wrong_paper");
 			return null; // all new items look like wrong papers
-		}
+		return null; // all new items look like wrong papers
+	}
+
+	/**
 
 	/**
 	 * Handle a save command.
@@ -938,7 +880,7 @@ Zotero.AgentAPI = new function() {
 		try {
 			await fetch(BRIDGE_URL + "/result", {
 				method: "POST",
-				headers: _authHeaders({ "Content-Type": "application/json" }),
+				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify(result),
 			});
 		} catch (e) {
