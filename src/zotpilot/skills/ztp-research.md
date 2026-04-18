@@ -53,25 +53,28 @@ description: >
    - If `action_required` contains "connector_offline" → **STOP**, surface remediation to user
    - All saved → proceed to Phase 3
 
-   **Preflight Blocking** — when `action_required` contains `"preflight_blocked"`: 
-   - The preflight gate intercepted anti-bot detection (e.g. Cloudflare CAPTCHA) before save. **The browser tab has already been auto-popped to the foreground.**
-   - Show a status report distinguishing two statuses:
-     | Paper | Status | 说明 |
-     |-------|--------|------|
-     | Nature paper | preflight_blocked | anti-bot 拦截，需要用户处理 |
-     | arXiv paper  | preflight_pending | 通过预检，等待批次放行后入库 |
-   - Tell the user:
-     > 验证页面已自动在浏览器中打开（[blocked publishers] 的论文），请完成页面验证（如 Cloudflare CAPTCHA / 登录），完成后告诉我，我将重新提交整批入库。preflight_pending 的论文通过了预检，无需任何操作。
-   - Wait for user confirmation
+   **Preflight Blocking** — when `action_required` contains `"preflight_blocked"`:
+   - Preflight detected a real problem (anti-bot, subscription wall, or timeout) before save. **Preflight does NOT auto-open browser tabs — the user must open the URLs themselves.** Never tell the user that a tab was auto-opened.
+   - The `action_required` entry contains:
+     - `publishers`: affected publisher hostnames (e.g. `sciencedirect.com`)
+     - `urls_to_verify`: concrete URLs for the user to open
+     - `details[]`: per-publisher `{publisher, error_code, scope, sample_urls}`
+     - `message`: pre-formatted human-readable instruction that already includes the URL list — you may surface this field verbatim
+   - If you re-render the message yourself, it MUST include:
+     1. A one-line reason per publisher (publisher + error_code)
+     2. The full `urls_to_verify[]` as a clickable / copy-pasteable list
+     3. The ask: "请在浏览器中打开以上链接确认页面可访问（必要时完成 CAPTCHA / 登录），完成后回复 Y，我将重新调用 ingest_by_identifiers。"
+   - Do NOT mention `preflight_pending` to the user — it is internal bookkeeping (this candidate passed, just batch-halted).
+   - Wait for user confirmation (Y)
    - Re-run `ingest_by_identifiers` with **IDENTICAL inputs** (include ALL original candidates, both preflight_pending and preflight_blocked)
 
-   **Status meanings:**
-   - `preflight_blocked`: preflight gate intercepted, paper needs user anti-bot verification. Browser tab already auto-popped.
-   - `preflight_pending`: paper passed preflight but is waiting because other publishers in the batch were blocked. Will save normally on retry — **do NOT treat as a failure**.
+   **Status meanings (internal — do NOT surface `preflight_pending` to user):**
+   - `preflight_blocked`: this candidate itself failed preflight; user must verify the corresponding URL
+   - `preflight_pending`: passed preflight but batch halted because a sibling blocked — no user action, will save on retry
 
-   **Two anti-bot signals — know the difference:**
-   - `preflight_blocked` (NEW): preflight gate intercepted, tab already auto-popped to foreground, user operates the already-open page
-   - `anti_bot_detected` (EXISTING, from save_single_and_verify): save stage intercepted, user needs to manually open the URL in browser
+   **Two anti-bot signals — both require the same user action (open URL manually):**
+   - `preflight_blocked` (preflight stage): show URLs from `urls_to_verify`
+   - `anti_bot_detected` (save stage, after preflight passed): show the affected URL from the result
 7. **[USER_REQUIRED]** Show ingest results table (title / status / has_pdf / item_key). Items are already in the `INBOX` collection at this point. **STOP here** and ask explicitly:
    > 入库完成（已归档到 INBOX 集合）。是否继续进入 Phase 3 后处理（标签 + 分类 + 索引）？(Y/N)
 
