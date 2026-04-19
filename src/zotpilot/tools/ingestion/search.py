@@ -140,6 +140,20 @@ def format_openalex_paper(paper: dict) -> dict:
             if arxiv_id:
                 break
 
+    publisher_name = source.get("host_organization_name") or ""
+    landing_url = (primary.get("landing_page_url") or "").lower()
+    # Publishers whose Zotero translator opens a user-interactive dialog
+    # during save (e.g. Elsevier's "Continue" verification on ScienceDirect).
+    # When such a candidate is ingested the user MUST click the dialog in
+    # Zotero Desktop; re-triggering the ingest while the dialog is open
+    # creates duplicate items.
+    needs_manual_verification = bool(
+        (formatted_doi and formatted_doi.startswith("10.1016/"))
+        or "sciencedirect.com" in landing_url
+        or "linkinghub.elsevier.com" in landing_url
+        or "elsevier" in publisher_name.lower()
+    )
+
     return {
         "title": paper.get("display_name"),
         "authors": authors,
@@ -161,7 +175,8 @@ def format_openalex_paper(paper: dict) -> dict:
         "oa_host": best_oa_host if (not is_oa_published and best_oa_url) else None,
         "landing_page_url": primary.get("landing_page_url"),
         "journal": source.get("display_name"),
-        "publisher": source.get("host_organization_name"),
+        "publisher": publisher_name or None,
+        "needs_manual_verification": needs_manual_verification,
         "relevance_score": paper.get("relevance_score"),
         "_source": "openalex",
     }

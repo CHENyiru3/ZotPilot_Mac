@@ -14,6 +14,10 @@ from .zotero_client import _strip_html
 logger = logging.getLogger(__name__)
 
 
+class ZoteroQuotaExceeded(Exception):
+    """Zotero Web file storage quota rejected the upload (HTTP 413)."""
+
+
 class ZoteroWriter:
     """
     Write access to Zotero library via official Web API v3 (Pyzotero).
@@ -356,20 +360,31 @@ class ZoteroWriter:
         arxiv_id: str | None = None,
     ) -> str:
         """Attempt to find and attach an open-access PDF. Returns status string."""
+        def _canonicalize(u: str) -> str:
+            # arxiv.org/pdf/X and arxiv.org/pdf/X.pdf redirect to the same PDF.
+            # Strip trailing .pdf and querystring so string-equality dedup works.
+            base = u.split("?", 1)[0].rstrip("/")
+            if base.endswith(".pdf"):
+                base = base[:-4]
+            return base
+
         urls: list[str] = []
+        seen: set[str] = set()
 
-        if oa_url:
-            urls.append(oa_url)
+        def _add(u: str | None) -> None:
+            if not u:
+                return
+            key = _canonicalize(u)
+            if key in seen:
+                return
+            seen.add(key)
+            urls.append(u)
 
+        _add(oa_url)
         if doi:
-            unpaywall_url = self._get_unpaywall_pdf_url(doi)
-            if unpaywall_url and unpaywall_url not in urls:
-                urls.append(unpaywall_url)
-
+            _add(self._get_unpaywall_pdf_url(doi))
         if arxiv_id:
-            arxiv_url = f"https://arxiv.org/pdf/{arxiv_id}"
-            if arxiv_url not in urls:
-                urls.append(arxiv_url)
+            _add(f"https://arxiv.org/pdf/{arxiv_id}")
 
         if not urls:
             return "not_found"
@@ -379,6 +394,9 @@ class ZoteroWriter:
             try:
                 if self._download_and_attach_pdf(item_key, url):
                     return "attached"
+            except ZoteroQuotaExceeded:
+                # Trying another URL won't help — the quota is per-library.
+                return "quota_exceeded"
             except Exception as e:
                 logger.debug(f"PDF attach failed for {url}: {e}")
                 had_attempt_error = True
@@ -435,7 +453,12 @@ class ZoteroWriter:
             return False
 
     def _download_and_attach_pdf(self, item_key: str, url: str) -> bool:
-        """Download PDF from URL and attach to Zotero item. Returns True on success."""
+        """Download PDF from URL and attach to Zotero item. Returns True on success.
+
+        Raises ZoteroQuotaExceeded when Zotero Web file storage quota is full
+        (HTTP 413). Half-created attachment records are cleaned up so they do
+        not leave broken children on the parent item.
+        """
         resp = httpx.get(url, timeout=30.0, follow_redirects=True)
         resp.raise_for_status()
 
@@ -447,8 +470,32 @@ class ZoteroWriter:
             f.write(resp.content)
             tmp_path = f.name
 
+        # Snapshot attachment-item keys before upload so we can delete any
+        # orphan record pyzotero leaves behind on 413.
+        before_keys = {
+            (c.get("data") or {}).get("key")
+            for c in self._zot.children(item_key) or []
+        }
+
         try:
             self._zot.attachment_simple([tmp_path], item_key)
             return True
+        except Exception as exc:
+            msg = str(exc)
+            if "413" in msg or "exceed quota" in msg.lower():
+                # attachment item was created but file upload rejected — purge it
+                for c in self._zot.children(item_key) or []:
+                    k = (c.get("data") or {}).get("key")
+                    if k and k not in before_keys:
+                        try:
+                            self._zot.delete_item(c)
+                        except Exception:
+                            pass
+                raise ZoteroQuotaExceeded(
+                    "Zotero Web storage quota exceeded (413). "
+                    "Free the cloud quota or run Zotero Desktop's "
+                    "'Find Available PDF' which saves locally."
+                ) from exc
+            raise
         finally:
             os.unlink(tmp_path)

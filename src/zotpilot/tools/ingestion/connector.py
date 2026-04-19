@@ -78,6 +78,12 @@ VALID_ACADEMIC_ITEM_TYPES = frozenset({
     "book", "bookSection", "report",
 })
 
+_MANUAL_VERIFICATION_DOMAINS = (
+    "sciencedirect.com",
+    "linkinghub.elsevier.com",
+    "elsevier.com",
+)
+
 
 class _FakeBatch:
     """Minimal batch shim for single-item API fallback saves."""
@@ -104,6 +110,21 @@ def looks_like_error_page_title(raw_title: str, item_key: str | None) -> bool:
     if item_key:
         return False
     return any(title.endswith(pattern) for pattern in GENERIC_SITE_ONLY_TITLE_PATTERNS)
+
+
+def needs_long_pdf_wait(url: str, doi: str | None) -> bool:
+    """Return True only for save flows that genuinely warrant a long PDF wait.
+
+    Long waits are reserved for publishers whose Zotero translator commonly
+    blocks on user interaction (for example Elsevier / ScienceDirect
+    "Continue" prompts). Applying the same 300s ceiling to ordinary saves
+    makes mixed batches unusably slow, because each item can stall for five
+    minutes even when no manual step is expected.
+    """
+    lowered_url = (url or "").lower()
+    if doi and doi.lower().startswith("10.1016/"):
+        return True
+    return any(domain in lowered_url for domain in _MANUAL_VERIFICATION_DOMAINS)
 
 
 def extract_publisher_domain(url: str) -> str:
@@ -345,31 +366,22 @@ def preflight_urls(
         except Exception as exc:
             report["errors"].append({"url": url, "error": str(exc)})
 
-    # Extension-side budget can reach 70s per URL (_waitForReady up to 60s +
-    # up to 5 × 2s = 10s title-retry after anti-bot pattern match). Python
-    # must wait longer than that or we surface false-positive preflight_timeout
-    # while the extension is still working.
+    # Extension processes preflight requests serially (_busy flag). Each URL
+    # consumes up to 70s in the extension (_waitForReady hardTimer 60s +
+    # title-retry 10s). A per-request deadline that starts at dispatch time
+    # would falsely time out URLs still waiting in queue. Rely on the overall
+    # budget scaled to N × per_url_timeout, and on the extension's internal
+    # hard timer to bound per-URL work.
     per_url_timeout = 90.0
-    overall_timeout = 300.0
+    overall_timeout = max(300.0, len(id_to_url) * per_url_timeout + 30.0)
     polled: dict[str, dict] = {}
     pending_ids = set(id_to_url)
-    per_request_deadlines = {
-        request_id: monotonic_fn() + per_url_timeout for request_id in id_to_url
-    }
     overall_deadline = monotonic_fn() + overall_timeout
 
     while pending_ids and monotonic_fn() < overall_deadline:
         sleep_fn(2)
         for request_id in list(pending_ids):
             url = id_to_url[request_id]
-            if monotonic_fn() >= per_request_deadlines[request_id]:
-                polled[request_id] = {
-                    "status": "error", "url": url,
-                    "error": "Timeout (60s) — page did not finish loading in time.",
-                    "error_code": "preflight_timeout",
-                }
-                pending_ids.remove(request_id)
-                continue
             try:
                 response = urllib.request.urlopen(f"{bridge_url}/result/{request_id}", timeout=5)
                 if response.status != 200:
@@ -1327,11 +1339,23 @@ def save_single_and_verify(
 
     # Always verify via local API — connector signals are hints, not ground
     # truth.  Springer embedded-PDF pages can trigger pdf_connector_confirmed
-    # without actually attaching a file.  Use a shorter poll window when the
-    # connector claims success (PDF should appear quickly if it really saved).
+    # without actually attaching a file.
+    #   confirmed   → 10s, PDF should appear quickly if it really saved
+    #   failed      → 30s, translator gave up, OA fallback will handle it next
+    #   neither     → short wait for ordinary publishers; long wait only for
+    #                 publishers that genuinely require manual translator
+    #                 confirmation (Elsevier / ScienceDirect, etc.)
+    if connector_pdf_confirmed:
+        pdf_poll_timeout = 10.0
+    elif connector_pdf_failed:
+        pdf_poll_timeout = 30.0
+    elif needs_long_pdf_wait(url, doi):
+        pdf_poll_timeout = 300.0
+    else:
+        pdf_poll_timeout = 45.0
     pdf_status = check_pdf_status(
         item_key, get_writer=get_writer,
-        timeout_s=10.0 if connector_pdf_confirmed else 30.0,
+        timeout_s=pdf_poll_timeout,
         _logger=_logger,
     )
 
@@ -1343,6 +1367,7 @@ def save_single_and_verify(
     # only the DOI to try_attach_oa_pdf misses papers whose published
     # version has no Unpaywall record but whose arXiv preprint is free
     # (e.g. IJCV-published CLIP-Adapter resolves only via its arXiv id).
+    attach_status = None
     if pdf_status != "attached" and (doi or arxiv_id):
         try:
             from ...state import _get_resolver
@@ -1373,9 +1398,23 @@ def save_single_and_verify(
                 )
         except Exception as exc:
             _logger.debug("OA PDF fallback failed for %s: %s", item_key, exc)
+            attach_status = "attach_failed"
 
     status = "saved_with_pdf" if pdf_status == "attached" else "saved_metadata_only"
-    warning = None if pdf_status == "attached" else "PDF not attached (paywall or download pending)"
+    if pdf_status == "attached":
+        warning = None
+    elif attach_status == "quota_exceeded":
+        warning = (
+            "Zotero Web storage quota exceeded — OA PDF download aborted. "
+            "Free cloud quota or right-click item in Zotero Desktop → "
+            "'Find Available PDF' to attach locally (uses your WebDAV/local storage)."
+        )
+    else:
+        warning = (
+            "PDF not attached. If Zotero still shows a translator dialog "
+            "(e.g. Elsevier 'Continue'), click it to finish — do NOT re-ingest "
+            "this DOI or it will create a duplicate item."
+        )
 
     return {"status": status, "method": "connector", "item_key": item_key,
             "has_pdf": pdf_status == "attached", "title": real_title,

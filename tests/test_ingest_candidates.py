@@ -15,6 +15,8 @@ from zotpilot.tools.ingestion.models import IngestCandidate
 @pytest.fixture
 def ingest_env(monkeypatch):
     """Patch external dependencies so ingest tool tests stay local and deterministic."""
+    ingestion_tool._RECENT_SAVES.clear()
+    ingestion_tool._PREFLIGHT_PASSES.clear()
     zotero = MagicMock()
     zotero.get_item_key_by_doi.return_value = None
     zotero.get_item_key_by_arxiv_id.return_value = None
@@ -51,6 +53,171 @@ def ingest_env(monkeypatch):
         },
     )
     return zotero
+
+
+def test_preflight_blocked_items_reported_but_passed_items_still_save(ingest_env, monkeypatch):
+    saved_urls: list[str] = []
+
+    monkeypatch.setattr(
+        ingestion_tool.connector,
+        "check_connector_availability",
+        lambda *args, **kwargs: (True, None, None),
+    )
+
+    def _run_preflight(candidates, *args, **kwargs):
+        assert [c["url"] for c in candidates] == [
+            "https://doi.org/10.1000/a",
+            "https://doi.org/10.1000/b",
+            "https://doi.org/10.1000/c",
+        ]
+        return (
+            [c for c in candidates if c["url"] != "https://doi.org/10.1000/a"],
+            [{
+                "url": "https://doi.org/10.1000/a",
+                "final_url": "https://www.sciencedirect.com/science/article/pii/A",
+                "error_code": "anti_bot_detected",
+                "error": "Anti-bot protection detected.",
+            }],
+            {"decision_id": "preflight_blocked"},
+            [{
+                "publisher": "sciencedirect.com",
+                "sample_urls": ["https://www.sciencedirect.com/science/article/pii/A"],
+                "error_code": "anti_bot_detected",
+                "scope": "publisher",
+                "total_affected": 1,
+            }],
+        )
+
+    monkeypatch.setattr(ingestion_tool.connector, "run_preflight_check", _run_preflight)
+
+    def _save_single(url, doi, title, **kwargs):
+        saved_urls.append(url)
+        return {
+            "status": "saved_metadata_only",
+            "method": "connector",
+            "item_key": f"KEY-{doi}",
+            "has_pdf": False,
+            "title": title or "",
+            "action_required": None,
+            "warning": None,
+        }
+
+    monkeypatch.setattr(ingestion_tool.connector, "save_single_and_verify", _save_single)
+
+    result = ingestion_tool.ingest_by_identifiers(
+        candidates=[
+            IngestCandidate(doi="10.1000/a", title="A", is_oa_published=True),
+            IngestCandidate(doi="10.1000/b", title="B", is_oa_published=True),
+            IngestCandidate(doi="10.1000/c", title="C", is_oa_published=True),
+        ]
+    )
+
+    assert saved_urls == ["https://doi.org/10.1000/b", "https://doi.org/10.1000/c"]
+    assert [row["status"] for row in result["results"]] == [
+        "preflight_blocked", "saved_metadata_only", "saved_metadata_only",
+    ]
+    assert result["action_required"][0]["type"] == "preflight_blocked"
+    assert result["action_required"][0]["blocked_count"] == 1
+
+
+def test_recent_preflight_pass_skips_recheck(ingest_env, monkeypatch):
+    run_preflight_calls = 0
+
+    monkeypatch.setattr(
+        ingestion_tool.connector,
+        "check_connector_availability",
+        lambda *args, **kwargs: (True, None, None),
+    )
+
+    def _run_preflight(candidates, *args, **kwargs):
+        nonlocal run_preflight_calls
+        run_preflight_calls += 1
+        return (list(candidates), [], None, [])
+
+    monkeypatch.setattr(ingestion_tool.connector, "run_preflight_check", _run_preflight)
+    monkeypatch.setattr(ingestion_tool, "_remember_recent_save", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ingestion_tool.connector,
+        "save_single_and_verify",
+        lambda url, doi, title, **kwargs: {
+            "status": "saved_metadata_only",
+            "method": "connector",
+            "item_key": f"KEY-{doi}",
+            "has_pdf": False,
+            "title": title or "",
+            "action_required": None,
+            "warning": None,
+        },
+    )
+
+    candidate = IngestCandidate(doi="10.1000/cache", title="Cache", is_oa_published=True)
+    first = ingestion_tool.ingest_by_identifiers(candidates=[candidate])
+    second = ingestion_tool.ingest_by_identifiers(candidates=[candidate])
+
+    assert first["results"][0]["status"] == "saved_metadata_only"
+    assert second["results"][0]["status"] == "saved_metadata_only"
+    assert run_preflight_calls == 1
+
+
+def test_save_stage_anti_bot_does_not_halt_remaining_items(ingest_env, monkeypatch):
+    saved_urls: list[str] = []
+
+    monkeypatch.setattr(
+        ingestion_tool.connector,
+        "check_connector_availability",
+        lambda *args, **kwargs: (True, None, None),
+    )
+    monkeypatch.setattr(
+        ingestion_tool.connector,
+        "run_preflight_check",
+        lambda candidates, *args, **kwargs: (list(candidates), [], None, []),
+    )
+
+    def _save_single(url, doi, title, **kwargs):
+        saved_urls.append(url)
+        if doi == "10.1000/b":
+            return {
+                "status": "blocked",
+                "method": "connector",
+                "item_key": None,
+                "has_pdf": False,
+                "title": title or "",
+                "action_required": "需要用户在浏览器中完成验证，然后重试",
+                "warning": None,
+            }
+        return {
+            "status": "saved_metadata_only",
+            "method": "connector",
+            "item_key": f"KEY-{doi}",
+            "has_pdf": False,
+            "title": title or "",
+            "action_required": None,
+            "warning": None,
+        }
+
+    monkeypatch.setattr(ingestion_tool.connector, "save_single_and_verify", _save_single)
+
+    result = ingestion_tool.ingest_by_identifiers(
+        candidates=[
+            IngestCandidate(doi="10.1000/a", title="A", is_oa_published=True),
+            IngestCandidate(doi="10.1000/b", title="B", is_oa_published=True),
+            IngestCandidate(doi="10.1000/c", title="C", is_oa_published=True),
+        ]
+    )
+
+    assert saved_urls == [
+        "https://doi.org/10.1000/a",
+        "https://doi.org/10.1000/b",
+        "https://doi.org/10.1000/c",
+    ]
+    assert [row["status"] for row in result["results"]] == [
+        "saved_metadata_only", "blocked", "saved_metadata_only",
+    ]
+    assert result["action_required"] == [{
+        "type": "anti_bot_detected",
+        "message": "需要用户在浏览器中完成验证，然后重试",
+        "identifier": "10.1000/b",
+    }]
 
 
 def test_candidate_accepts_minimal_doi():

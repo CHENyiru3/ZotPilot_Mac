@@ -23,13 +23,37 @@ description: >
 2. **External search**: `search_academic_databases` — see **Search SOP** below. Run 2-4 queries that anchor on DOI / venue / concept / quoted phrase. Merge results client-side, dedup by DOI, sort by cited_by_count.
    - Each result carries `local_duplicate: bool` and `existing_item_key: str | None` — the server already dedup'd against your **local library** via DOI + arXiv DOI + `extra` field lookup.
    - **Do NOT** run a separate `advanced_search` dedup call — the annotation is the authoritative source.
-3. **[USER_REQUIRED]** Show ranked candidates with scores and an explicit duplicate flag per row (`✅ new` / `📚 already in library (key=<existing_item_key>)`). Default-exclude library duplicates from the selection unless the user explicitly asks to refresh metadata on an existing item. Wait for user selection before proceeding to Phase 2.
+3. **[USER_REQUIRED]** Show ranked candidates using **this exact table** — do not invent columns, reorder, or split into multiple tables:
+
+   ```
+   | # | 引用量 | 状态 | 标题 (年份) | 作者 | 出版物 | OA |
+   |---|-------|------|-----------|------|--------|-----|
+   | 1 | 1102  | ✅ new | NSFnets: Physics-informed NN for Navier-Stokes (2020) | Jin et al. | J Comput Phys | ✅ |
+   | 2 | 1026  | 📚 已在库 (key=AB12CDEF) | ... | ... | ... | ... |
+   ```
+
+   - `状态`: `✅ new` for fresh rows, `📚 已在库 (key=<existing_item_key>)` for local duplicates. Default-exclude 📚 rows from the selection unless the user asks to refresh metadata.
+   - `OA`: `✅` when `is_oa_published: true` OR `arxiv_id` non-null, else `❌`.
+
+   **End the turn with this line and stop — no tool calls, no step 4, no ingest:**
+
+   > 请选择要入库的编号（如 `6,9,13` / `全部` / `除 10,14 外全部`），或回复 `取消` 终止。
+
+   Resume at step 4 only after the user's next message names specific rows.
 
 ## Phase 2 — Ingestion
 
-4. **Pre-ingest institutional access check** [USER_REQUIRED]: Before calling `ingest_by_identifiers`, check the selected candidates' venues. If **any** of them is from a paywalled publisher (Springer / Elsevier / Wiley / IEEE / ACM / Nature Publishing Group / etc.) **and** `is_oa` is false, pause and ask the user **once**.
+4. **Pre-ingest institutional access check** [USER_REQUIRED when applicable]: Determine which selected candidates need an access/subscription confirmation using these rules:
 
-   From the selected candidates, collect those where `is_oa_published` is false and `publisher` is non-null. Group them by `publisher`. For each group, pick the **first candidate that has a non-null `landing_page_url`** as the representative; if none has `landing_page_url`, fall back to `https://doi.org/{doi}` (if `doi` is non-null); if neither exists, omit that publisher from the table. Then show:
+   - **Always check** candidates with `is_oa_published: false`
+   - **Also check even when `is_oa_published: true`** if the candidate appears to come from one of these publishers / hosts:
+     - IEEE: `publisher` contains `ieee`, or `landing_page_url` contains `ieeexplore.ieee.org`
+     - Wiley: `publisher` contains `wiley`, or `landing_page_url` contains `wiley.com` / `onlinelibrary.wiley.com`
+     - Springer: `publisher` contains `springer`, or `landing_page_url` contains `springer.com` / `springerlink.com` / `link.springer.com`
+
+   This check must be based on the **actual selected rows the user asked to ingest**, not on the whole search result page.
+
+   If no selected candidates match the rules above, skip step 4 entirely. Otherwise group the matched set by `publisher` (fall back to the hostname of `landing_page_url` when `publisher` is missing — don't require the field to be present), pick one representative per group (prefer `landing_page_url`, else `https://doi.org/{doi}`), then show:
 
    > 本次入库包含付费出版社的论文，请点击以下链接确认你当前的网络环境可以访问：
    >
@@ -40,16 +64,35 @@ description: >
    >
    > 确认可以正常访问后回复 **Y** 继续入库；无法访问请先启用机构网络/VPN 后告诉我。
 
-   - **Only list publishers** that appear in the current batch with at least one `is_oa_published: false` candidate.
-   - If ALL selected candidates have `is_oa_published: true` or `arxiv_id` non-null and no `publisher` — skip this check entirely.
-   - Plan C's Connector save uses the user's **current network context**. Paywalled papers without institutional access will come back as `saved_metadata_only`; this reminder avoids that failure mode before it happens.
+   Connector save uses the user's **current network context**. Do not assume OA means "no login / no subscription confirmation needed" on IEEE, Wiley, or Springer — those publishers can still require user login or institutional access even for papers marked OA by upstream metadata. This reminder pre-empts the common `saved_metadata_only` failure mode.
+
+   **4b. Manual-verification notice** [USER_REQUIRED when applicable — MANDATORY gate, do NOT skip even when `is_oa_published` is true]. A candidate is "Elsevier-like" and triggers this warning whenever **any** of the following holds, regardless of OA status:
+
+   - `needs_manual_verification` is `true` (when the field is present in the candidate)
+   - `doi` starts with `10.1016/`
+   - `landing_page_url` contains `sciencedirect.com` or `linkinghub.elsevier.com`
+   - `publisher` contains `elsevier` (case-insensitive)
+
+   If **any** selected candidate matches, you MUST show this block BEFORE calling `ingest_by_identifiers` and wait for a `Y` reply. Never call ingest in the same turn:
+
+   > ⚠️ 以下论文来自需要用户在 Zotero 点击确认的出版社（如 Elsevier / ScienceDirect）。入库过程中 Zotero Desktop 会弹出 translator 对话框，**请保持 Zotero 在前台，看到弹窗后立刻点击 "Continue"（或"确定"）**：
+   >
+   > - {title} ({publisher or "Elsevier"})
+   > - …
+   >
+   > 如果不及时点击，translator 会超时，且 **切勿重复触发入库**——会在库里留下重复的 item。确认你已经准备好后回复 **Y**。
+
+   - Only list matching candidates in the bullet list.
+   - If none of the selected candidates matches — skip this step entirely.
+   - This is independent from step 4's access check. Step 4 may still run for OA items on IEEE / Wiley / Springer; step 4b CANNOT be skipped on OA grounds either. Elsevier's translator dialog triggers regardless of subscription / OA status.
+
 5. **Ingest**: `ingest_by_identifiers(candidates=selected_search_results)`
    - **Forward search result dicts directly.** `search_academic_databases` already returns structured candidates with `doi`, `arxiv_id`, `landing_page_url`, `is_oa_published`, and `title`. Pass the selected rows unchanged to `candidates=`. Do NOT reconstruct identifier strings from memory, and do NOT use the deprecated `identifiers=` parameter for search results.
    - The `local_duplicate` annotation from search tells you which candidates are already in the library. Filter them out before calling ingest unless the user explicitly wants a metadata refresh.
    - If the tool raises `INBOX collection unavailable`, `ZOTERO_API_KEY` / `ZOTERO_USER_ID` is missing — stop and ask the user to configure credentials before retrying.
 6. **Handle results**:
    - If `action_required` contains `"preflight_blocked"` → **STOP**, show the blocked report and wait for user to complete verification (see **Preflight Blocking** below)
-   - If `action_required` contains `"anti_bot"` (from save_single_and_verify) → **STOP**, tell user to manually open browser for verification, wait for confirmation, retry with IDENTICAL inputs
+   - If `action_required` contains `"anti_bot_detected"` (from save_single_and_verify) → **STOP**, tell user to manually open browser for verification, wait for confirmation, retry with IDENTICAL inputs
    - If `action_required` contains "connector_offline" → **STOP**, surface remediation to user
    - All saved → proceed to Phase 3
 
@@ -64,18 +107,28 @@ description: >
      1. A one-line reason per publisher (publisher + error_code)
      2. The full `urls_to_verify[]` as a clickable / copy-pasteable list
      3. The ask: "请在浏览器中打开以上链接确认页面可访问（必要时完成 CAPTCHA / 登录），完成后回复 Y，我将重新调用 ingest_by_identifiers。"
-   - Do NOT mention `preflight_pending` to the user — it is internal bookkeeping (this candidate passed, just batch-halted).
+   - Passed preflight items may already continue into save in the same batch. Do NOT invent or mention any internal "pending" bookkeeping status to the user.
    - Wait for user confirmation (Y)
-   - Re-run `ingest_by_identifiers` with **IDENTICAL inputs** (include ALL original candidates, both preflight_pending and preflight_blocked)
-
-   **Status meanings (internal — do NOT surface `preflight_pending` to user):**
-   - `preflight_blocked`: this candidate itself failed preflight; user must verify the corresponding URL
-   - `preflight_pending`: passed preflight but batch halted because a sibling blocked — no user action, will save on retry
+   - Re-run `ingest_by_identifiers` with the candidates that still need retry. Do not force already-saved items back through the pipeline unless the user explicitly asks.
 
    **Two anti-bot signals — both require the same user action (open URL manually):**
    - `preflight_blocked` (preflight stage): show URLs from `urls_to_verify`
    - `anti_bot_detected` (save stage, after preflight passed): show the affected URL from the result
-7. **[USER_REQUIRED]** Show ingest results table (title / status / has_pdf / item_key). Items are already in the `INBOX` collection at this point. **STOP here** and ask explicitly:
+7. **[USER_REQUIRED]** Show ingest results using **this exact table** — one row per result, no extra narrative columns:
+
+   ```
+   | # | 状态 | PDF | item_key | 标题 |
+   |---|-----|-----|---------|------|
+   | 1 | ✅ saved_with_pdf | ✅ | JEKDTA66 | NSFnets ... |
+   | 2 | ⚠️ metadata_only | ❌ | Z26SVWHL | Quantifying ... |
+   | 3 | ❌ blocked | — | — | ... (reason: anti_bot_detected) |
+   ```
+
+   - `状态` column: use the `status` field verbatim (`saved_with_pdf` / `saved_metadata_only` / `duplicate` / `blocked` / `failed`) with a matching emoji (✅ / ⚠️ / 📚 / ❌).
+   - `PDF` column: `✅` if `has_pdf: true`, `❌` if false, `—` if no item was created.
+   - For `blocked` / `failed` rows, append `(reason: <error or error_code>)` to 标题.
+   - Items are already in the `INBOX` collection at this point (routed at save time). **STOP here** and ask:
+
    > 入库完成（已归档到 INBOX 集合）。是否继续进入 Phase 3 后处理（标签 + 分类 + 索引）？(Y/N)
 
    Do NOT call **any** post-processing tool (`manage_tags`, `manage_collections`, `create_note`, `index_library`) until the user replies `Y`. If the user replies `N` or only asks for indexing, skip to step 13.

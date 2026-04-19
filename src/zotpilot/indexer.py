@@ -544,6 +544,22 @@ class Indexer:
         if counts["indexed"] > 0 or counts["already_indexed"] > 0:
             self._config_hash_path.write_text(config_hash)
 
+        # Deletions can land in Zotero while a long indexing run is already in
+        # progress. Reconcile once more at the end so a document that was still
+        # visible at startup but moved to trash during this run is removed from
+        # Chroma immediately, without requiring a second index_library call.
+        final_current_doc_ids = {
+            item.item_key
+            for item in self.zotero.get_all_items_with_pdfs()
+            if item.pdf_path and item.pdf_path.exists()
+        }
+        final_reconciliation = reconcile_orphaned_index_docs(self.store, final_current_doc_ids)
+        if final_reconciliation["deleted_count"] > 0:
+            logger.info(
+                "Indexer: removed %d orphaned indexed document(s) after refresh of Zotero library state",
+                final_reconciliation["deleted_count"],
+            )
+
         return {"results": results, **counts}
 
     def _index_document_detailed(self, item: ZoteroItem) -> tuple[int, int, str, dict, str]:

@@ -258,6 +258,23 @@ class TestManageTags:
         with pytest.raises(ToolError, match="manage_tags requires tags"):
             manage_tags(action="add", item_keys="ITEM1")
 
+    @patch("zotpilot.tools.write_ops._get_zotero")
+    @patch("zotpilot.tools.write_ops._get_writer")
+    def test_manage_tags_accepts_json_string_item_keys_batch(self, mock_get_writer, mock_get_zotero):
+        from zotpilot.tools.write_ops import manage_tags
+
+        mock_writer = MagicMock()
+        mock_get_writer.return_value = mock_writer
+        mock_get_zotero.return_value.get_all_tags.return_value = [{"name": "tag1", "count": 1}]
+
+        result = manage_tags(action="add", item_keys='["ITEM1","ITEM2"]', tags=["tag1"])
+
+        assert result["total"] == 2
+        assert result["succeeded"] == 2
+        assert mock_writer.add_item_tags.call_count == 2
+        mock_writer.add_item_tags.assert_any_call("ITEM1", ["tag1"])
+        mock_writer.add_item_tags.assert_any_call("ITEM2", ["tag1"])
+
 
 class TestManageCollections:
     def test_manage_collections_requires_collection_key(self):
@@ -265,6 +282,28 @@ class TestManageCollections:
 
         with pytest.raises(ToolError, match="manage_collections requires collection_key"):
             manage_collections(action="add", item_keys="ITEM1")
+
+    @patch("zotpilot.tools.write_ops._invalidate_collection_cache")
+    @patch("zotpilot.tools.write_ops._get_writer")
+    def test_manage_collections_accepts_json_string_item_keys_batch(
+        self, mock_get_writer, mock_invalidate,
+    ):
+        from zotpilot.tools.write_ops import manage_collections
+
+        mock_writer = MagicMock()
+        mock_get_writer.return_value = mock_writer
+
+        result = manage_collections(
+            action="add",
+            item_keys='["ITEM1","ITEM2"]',
+            collection_key="COL1",
+        )
+
+        assert result["total"] == 2
+        assert result["succeeded"] == 2
+        assert mock_writer.add_to_collection.call_count == 2
+        mock_writer.add_to_collection.assert_any_call("ITEM1", "COL1")
+        mock_writer.add_to_collection.assert_any_call("ITEM2", "COL1")
 
 
 class TestCreateCollection:

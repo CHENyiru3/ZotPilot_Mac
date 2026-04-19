@@ -68,9 +68,15 @@ def _remove_item_tags_impl(item_key: str, tags: list[str]) -> dict:
 
 
 def _normalize_item_keys(item_keys: str | list[str]) -> list[str]:
-    keys = [item_keys] if isinstance(item_keys, str) else _coerce_list(item_keys)
+    if isinstance(item_keys, str):
+        parsed = _coerce_list(item_keys)
+        keys = parsed if parsed else [item_keys]
+    else:
+        keys = _coerce_list(item_keys)
     if not keys:
         raise ToolError("item_keys is required. Pass one item_key string or a list of item keys.")
+    if any(not isinstance(key, str) or not key for key in keys):
+        raise ToolError("item_keys must contain one or more non-empty item key strings.")
     if len(keys) > _BATCH_MAX:
         raise ToolError(f"Batch size {len(keys)} exceeds limit of {_BATCH_MAX}")
     return keys

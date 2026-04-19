@@ -30,7 +30,12 @@ Zotero.AgentAPI = new function() {
 	const BRIDGE_URL = "http://127.0.0.1:2619";
 	const ZOTERO_LOCAL_API_URL = "http://127.0.0.1:23119/api/users/0/items/top";
 	const POLL_INTERVAL = 2000;
-	const SAVE_TIMEOUT_MS = 60000; // Task 1.2: 60s; reports "unconfirmed" not false success
+	// 180s accommodates publishers whose Zotero translator asks for user
+	// verification (ScienceDirect/Elsevier "Continue" prompt, Cell, etc.).
+	// Shorter windows made the extension post "unconfirmed" while the user
+	// was still clicking the verification dialog, and callers then retried
+	// the ingest and created a duplicate item.
+	const SAVE_TIMEOUT_MS = 180000;
 	const HEARTBEAT_INTERVAL_MS = 10000; // Independent heartbeat every 10s — not tied to poll loop
 	const RECENT_ITEMS_LIMIT = 50;
 	const LOCAL_API_TIMEOUT_MS = 5000;
@@ -673,7 +678,7 @@ Zotero.AgentAPI = new function() {
 			// 60s gives slow-loading publishers (CF auto-challenge, heavy SPAs)
 			// enough time to reach a stable "accessible" state. Shorter windows
 			// led to false-positive preflight_timeouts on otherwise OK pages.
-			await _waitForReady(tab.id, 60000);
+			const readyResult = await _waitForReady(tab.id, 60000);
 
 			// Tab may have been closed by Chrome (e.g. PDF download triggered by URL).
 			let title = "";
@@ -686,6 +691,19 @@ Zotero.AgentAPI = new function() {
 				// Tab already closed — PDF download completed, treat as accessible.
 				await _postResult({ request_id, action: "preflight", status: "accessible", url, final_url: url, title: "" });
 				tabId = null;
+				return;
+			}
+
+			// Fast-path: a Zotero translator registered means the page DOM is a
+			// real publisher article page, not a Cloudflare/CAPTCHA challenge
+			// screen. Trust this signal and skip the title anti-bot check —
+			// slow publishers (ScienceDirect, SIAM, AIP) can have transient
+			// "Just a moment" titles while the translator already succeeded.
+			if (readyResult && readyResult.translatorFound) {
+				await _postResult({
+					request_id, action: "preflight", status: "accessible",
+					url, final_url: finalUrl, title,
+				});
 				return;
 			}
 

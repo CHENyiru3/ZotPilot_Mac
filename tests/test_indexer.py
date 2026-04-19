@@ -324,6 +324,35 @@ class TestSkipTracking:
         assert result["indexed"] == 1
         indexer.store.delete_document.assert_called_once_with("K2")
 
+    def test_doc_deleted_during_run_is_removed_by_final_reconciliation(self):
+        from unittest.mock import MagicMock, patch
+
+        item = self._make_item("K1", "Paper A", has_pdf=True)
+        indexer = self._make_indexer([item])
+        self._patch_indexer(indexer)
+
+        # First library snapshot (start of run): item still present.
+        # Second snapshot (end of run): item has disappeared from the library.
+        indexer.zotero.get_all_items_with_pdfs.side_effect = [[item], []]
+        indexer.store.get_indexed_doc_ids.return_value = {"K1"}
+        indexer.store.get_document_meta.return_value = None
+        indexer.store.delete_document = MagicMock()
+
+        mock_extraction = MagicMock()
+        mock_extraction.pages = [MagicMock()]
+        mock_extraction.stats = {"total_pages": 1, "text_pages": 1, "ocr_pages": 0, "empty_pages": 0}
+        mock_extraction.quality_grade = "A"
+        mock_extraction.pending_vision = None
+
+        with patch("zotpilot.indexer.extract_document", return_value=mock_extraction), \
+             patch.object(indexer, "_index_extraction", return_value=(1, 0, "", {}, "A")):
+            result = indexer.index_all(batch_size=None)
+
+        assert result["indexed"] == 1
+        # The document was indexed during this run, then removed when the
+        # refreshed library snapshot no longer contained it.
+        indexer.store.delete_document.assert_called_once_with("K1")
+
 
 class TestVisionBudgetGuards:
     def test_skips_batch_vision_when_table_cap_is_exceeded(self):

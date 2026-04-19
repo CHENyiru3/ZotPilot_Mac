@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import threading
+import time
 from typing import Annotated, Any, Literal
 
 import httpx
@@ -109,26 +110,93 @@ def _ensure_inbox_collection() -> str | None:
     return None
 
 
+_RECENT_SAVES_TTL_S = 900.0  # 15 min
+_RECENT_SAVES: dict[str, tuple[str, float]] = {}
+_PREFLIGHT_PASS_TTL_S = 900.0  # 15 min
+_PREFLIGHT_PASSES: dict[str, float] = {}
+
+
+def _remember_recent_save(key: str | None, item_key: str | None) -> None:
+    """Remember a just-saved (DOI or arXiv) → item_key for short-term dedup.
+
+    Zotero Desktop writes items to SQLite only after the user confirms a
+    translator dialog (Elsevier 'Continue' etc.). During that wait the
+    existing `_lookup_local_item_key_by_doi` call sees nothing, so an
+    agent-side retry of the same ingest would create a duplicate item.
+    This in-process cache plugs that gap within the current MCP session.
+    """
+    if not (key and item_key):
+        return
+    _RECENT_SAVES[key.lower().strip()] = (item_key, time.monotonic())
+
+
+def _lookup_recent_save(key: str | None) -> str | None:
+    if not key:
+        return None
+    entry = _RECENT_SAVES.get(key.lower().strip())
+    if not entry:
+        return None
+    item_key, saved_at = entry
+    if time.monotonic() - saved_at > _RECENT_SAVES_TTL_S:
+        _RECENT_SAVES.pop(key.lower().strip(), None)
+        return None
+    return item_key
+
+
+def _remember_preflight_pass(url: str | None) -> None:
+    if not url:
+        return
+    _PREFLIGHT_PASSES[url] = time.monotonic()
+
+
+def _has_recent_preflight_pass(url: str | None) -> bool:
+    if not url:
+        return False
+    saved_at = _PREFLIGHT_PASSES.get(url)
+    if saved_at is None:
+        return False
+    if time.monotonic() - saved_at > _PREFLIGHT_PASS_TTL_S:
+        _PREFLIGHT_PASSES.pop(url, None)
+        return False
+    return True
+
+
 def _lookup_local_item_key_by_doi(doi: str | None) -> str | None:
-    """Check if a DOI already exists in the local Zotero library."""
+    """Check if a DOI already exists in the local Zotero library.
+
+    Falls back to the in-process recent-saves cache because Zotero Desktop
+    does not commit items to SQLite until the user dismisses a translator
+    dialog (e.g. Elsevier verification). Without this fallback, an agent
+    retry while the dialog is still open would create a duplicate item.
+    """
     if not doi:
         return None
     try:
         zotero = _get_zotero()
-        return zotero.get_item_key_by_doi(doi)
+        found = zotero.get_item_key_by_doi(doi)
+        if found:
+            return found
     except Exception:
-        return None
+        pass
+    return _lookup_recent_save(doi)
 
 
 def _lookup_local_item_key_by_arxiv_extra(arxiv_id: str | None) -> str | None:
-    """Check whether an arXiv ID appears in a local Zotero item's extra field."""
+    """Check whether an arXiv ID appears in a local Zotero item's extra field.
+
+    Falls back to the in-process recent-saves cache (see _lookup_recent_save)
+    to cover the window between Connector save and Zotero SQLite commit.
+    """
     if not arxiv_id:
         return None
     try:
         zotero = _get_zotero()
-        return zotero.get_item_key_by_arxiv_id(arxiv_id)
+        found = zotero.get_item_key_by_arxiv_id(arxiv_id)
+        if found:
+            return found
     except Exception:
-        return None
+        pass
+    return _lookup_recent_save(arxiv_id)
 
 
 def _normalize_arxiv_id(arxiv_id: str | None) -> str | None:
@@ -235,6 +303,66 @@ def _identifiers_to_internal(identifiers: list[str]) -> list[dict]:
 
         internal.append(candidate)
     return internal
+
+
+def _refresh_duplicate_pdf(candidate: dict, *, logger) -> dict:
+    """Return a result for a duplicate-detected candidate.
+
+    If the existing item already has a PDF, report `has_pdf=True`. Otherwise
+    try the OA fallback path (Unpaywall / arXiv) against the existing
+    item_key so a retry after a partial earlier save has a chance to finish
+    the PDF attachment. Falls back to the plain duplicate result if anything
+    in the refresh path raises.
+    """
+    item_key = candidate.get("item_key")
+    if not item_key:
+        return _result_from_candidate(candidate)
+
+    try:
+        from ...state import _get_resolver
+        from . import connector as _conn
+
+        pdf_status = _conn.check_pdf_status(
+            item_key, get_writer=_get_writer, timeout_s=5.0, _logger=logger,
+        )
+        has_pdf = pdf_status == "attached"
+        if has_pdf:
+            return _result_from_candidate(candidate, has_pdf=True)
+
+        doi = candidate.get("doi")
+        arxiv_id = candidate.get("arxiv_id")
+        if not (doi or arxiv_id):
+            return _result_from_candidate(candidate, warning="No PDF and no DOI/arxiv to fetch OA fallback.")
+
+        resolve_id = f"arxiv:{arxiv_id}" if arxiv_id else doi
+        metadata = _get_resolver().resolve(resolve_id)
+        effective_arxiv = metadata.arxiv_id or arxiv_id
+        with _writer_lock:
+            attach_status = _get_writer().try_attach_oa_pdf(
+                item_key,
+                doi=metadata.doi or doi,
+                oa_url=metadata.oa_url,
+                arxiv_id=effective_arxiv,
+            )
+        if attach_status == "attached":
+            logger.info("Duplicate refresh attached PDF to %s", item_key)
+            return _result_from_candidate(candidate, has_pdf=True)
+        if attach_status == "quota_exceeded":
+            return _result_from_candidate(
+                candidate, has_pdf=False,
+                warning=(
+                    "Duplicate found with no PDF; Zotero Web quota is full so "
+                    "the OA fallback aborted. Free cloud quota or right-click "
+                    "the item in Zotero Desktop → 'Find Available PDF'."
+                ),
+            )
+        return _result_from_candidate(
+            candidate, has_pdf=False,
+            warning="Duplicate found with no PDF; OA fallback did not attach one.",
+        )
+    except Exception as exc:
+        logger.debug("Duplicate PDF refresh failed for %s: %s", item_key, exc)
+        return _result_from_candidate(candidate)
 
 
 def _result_from_candidate(
@@ -523,37 +651,37 @@ def ingest_by_identifiers(
 
     # Step 4: Preflight (if Connector online)
     if ext_ok and active_candidates:
-        remaining, preflight_failures, blocking, blocked_publishers = connector.run_preflight_check(
-            active_candidates, DEFAULT_PORT, BridgeServer, logger,
-        )
+        preflight_ready = [c for c in active_candidates if _has_recent_preflight_pass(c.get("url"))]
+        preflight_targets = [c for c in active_candidates if not _has_recent_preflight_pass(c.get("url"))]
 
-        # Blocking behavior: 全批 halt。但只把"真正出问题"的 candidate 和它
-        # 归属的 publisher 报告给用户 — pending（同批连带等待）不出现在用户消息里。
+        remaining: list[dict] = list(preflight_ready)
+        preflight_failures: list[dict] = []
+        blocked_publishers: list[dict] = []
+        blocking: dict | None = None
+
+        if preflight_targets:
+            remaining_fresh, preflight_failures, blocking, blocked_publishers = connector.run_preflight_check(
+                preflight_targets, DEFAULT_PORT, BridgeServer, logger,
+            )
+            remaining.extend(remaining_fresh)
+            for candidate in remaining_fresh:
+                _remember_preflight_pass(candidate.get("url"))
+
         if blocking:
-            # Per-candidate failure lookup, keyed by the candidate's original
-            # URL (preflight_failures[*].url is the URL we probed).
             failure_by_url: dict[str, dict] = {
                 f["url"]: f for f in preflight_failures if f.get("url")
             }
-
             blocked_count = 0
-            pending_count = 0
             for candidate in candidates_internal:
-                if not candidate.get("status"):
-                    cand_url = candidate.get("url", "")
-                    failure = failure_by_url.get(cand_url)
-                    if failure is not None:
-                        candidate["status"] = "preflight_blocked"
-                        candidate["error"] = failure.get("error_code") or "preflight_failed"
-                        blocked_count += 1
-                    else:
-                        # Collateral — this one passed but batch is halted.
-                        # Kept in results for bookkeeping; NOT surfaced to user.
-                        candidate["status"] = "preflight_pending"
-                        candidate["note"] = "passed preflight, waiting for blocked publishers to clear"
-                        pending_count += 1
+                if candidate.get("status"):
+                    continue
+                failure = failure_by_url.get(candidate.get("url", ""))
+                if failure is None:
+                    continue
+                candidate["status"] = "preflight_blocked"
+                candidate["error"] = failure.get("error_code") or "preflight_failed"
+                blocked_count += 1
 
-            # action_required: only the real problems
             publisher_details = blocked_publishers or []
             publisher_names = [d.get("publisher", "") for d in publisher_details]
             if publisher_details:
@@ -565,9 +693,6 @@ def ingest_by_identifiers(
             else:
                 details_str = "、".join(publisher_names)
 
-            # URL list for the user to open manually in their browser —
-            # mirrors the paywall-access-confirmation UX, which is more
-            # predictable than auto-promoting browser tabs.
             urls_to_verify: list[str] = []
             for d in publisher_details:
                 urls_to_verify.extend(d.get("sample_urls") or [])
@@ -580,23 +705,17 @@ def ingest_by_identifiers(
                 "blocked_count": blocked_count,
                 "message": (
                     f"{blocked_count} 篇需要你处理：{details_str}。\n"
-                    "请在浏览器中打开以下链接确认页面可访问"
+                    "以下条目已通过预检，将继续入库；未通过的请在浏览器中打开这些链接确认页面可访问"
                     "（若有 Cloudflare / CAPTCHA / 登录，请完成它）：\n  - "
                     + "\n  - ".join(urls_to_verify)
-                    + "\n确认完成后回复 Y，我将重新调用 ingest_by_identifiers。"
                 ),
             })
 
-            # Return early — 全批不 save，等用户决策后重新调用
-            return {
-                "total": total_inputs,
-                "results": [_result_from_candidate(c) for c in candidates_internal],
-                "action_required": action_required,
-            }
-
-        # When no blocking: use remaining as the filtered candidate list for save
         remaining_ids = {id(c) for c in remaining}
-        candidates_internal = [c for c in candidates_internal if id(c) in remaining_ids]
+        candidates_internal = [
+            c for c in candidates_internal
+            if c.get("status") or id(c) in remaining_ids
+        ]
 
 
 
@@ -605,7 +724,18 @@ def ingest_by_identifiers(
     for index, candidate in enumerate(candidates_internal):
         # Already resolved (failed, duplicate)
         if candidate.get("status"):
-            results.append(_result_from_candidate(candidate))
+            if candidate.get("status") == "duplicate":
+                # Duplicate detected (either via local SQLite or the in-process
+                # recent-saves cache). If the existing item already has a PDF,
+                # just surface it. Otherwise an earlier attempt may have created
+                # the record but failed to attach the PDF — try OA fallback on
+                # the existing item_key so a retry has a chance to fix it
+                # instead of returning has_pdf=False and leaving the user stuck.
+                results.append(
+                    _refresh_duplicate_pdf(candidate, logger=logger)
+                )
+            else:
+                results.append(_result_from_candidate(candidate))
             continue
 
         url = candidate.get("url")
@@ -643,24 +773,21 @@ def ingest_by_identifiers(
             "candidate_index": candidate.get("_index", index),
         })
 
-        # Anti-bot: halt remaining
+        # Record for short-term dedup so an agent retry while the Elsevier
+        # translator dialog is still open (or during the SQLite commit lag)
+        # resolves as "duplicate" instead of creating a second item.
+        if result.get("item_key") and result.get("status") not in {"failed", "blocked"}:
+            _remember_recent_save(candidate.get("doi"), result.get("item_key"))
+            _remember_recent_save(candidate.get("arxiv_id"), result.get("item_key"))
+
+        # Save-stage anti-bot is per-item, not batch-wide. One blocked
+        # publisher must not prevent the rest of the batch from continuing.
         if result.get("status") == "blocked":
             action_required.append({
                 "type": "anti_bot_detected",
                 "message": result.get("action_required", ""),
                 "identifier": candidate.get("identifier", ""),
             })
-            # Mark remaining as blocked
-            for rem in candidates_internal[index + 1:]:
-                if not rem.get("status"):
-                    results.append(
-                        _result_from_candidate(
-                            rem,
-                            status="blocked",
-                            error="batch_halted_by_anti_bot",
-                        )
-                    )
-            break
 
     return {
         "total": total_inputs,

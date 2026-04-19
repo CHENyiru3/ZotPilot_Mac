@@ -181,6 +181,17 @@ def test_action_required_hard_halt_rule() -> None:
     assert "anti_bot" in lowered or "anti-bot" in lowered
 
 
+def test_access_check_rules_cover_non_oa_and_selected_publishers() -> None:
+    """Institutional-access confirmation must not rely on OA alone."""
+    skill_text = SKILL_PATH.read_text().lower()
+    assert "always check" in skill_text
+    assert "is_oa_published: false" in skill_text
+    assert "ieee" in skill_text
+    assert "wiley" in skill_text
+    assert "springer" in skill_text
+    assert "actual selected rows" in skill_text
+
+
 def test_post_processing_covers_full_pipeline() -> None:
     """ztp-research must cover tag cleanup, tag assignment, collection, index verification."""
     skill_text = SKILL_PATH.read_text()

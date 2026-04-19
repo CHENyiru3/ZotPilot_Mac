@@ -243,6 +243,42 @@ class TestSaveSingleAndVerify:
         )
 
         mock_pdf.assert_called_once()
+        assert mock_pdf.call_args.kwargs.get("timeout_s") == 45.0
+        assert result["status"] == "saved_with_pdf"
+        assert result["has_pdf"] is True
+
+    @patch("zotpilot.tools.ingestion.connector.check_pdf_status", return_value="attached")
+    @patch("zotpilot.tools.ingestion.connector.validate_saved_item")
+    @patch("zotpilot.tools.ingestion.connector.poll_single_save_result")
+    @patch("zotpilot.tools.ingestion.connector.enqueue_save_request")
+    def test_elsevier_like_save_keeps_long_pdf_poll(
+        self, mock_enqueue, mock_poll, mock_validate, mock_pdf,
+    ):
+        from zotpilot.tools.ingestion.connector import save_single_and_verify
+
+        mock_enqueue.return_value = ("req-1", None)
+        mock_poll.return_value = {
+            "success": True,
+            "item_key": "KEY1",
+            "title": "Paper",
+        }
+        mock_validate.return_value = {
+            "valid": True, "item_type": "journalArticle",
+            "title": "Paper", "reason": None,
+        }
+
+        result = save_single_and_verify(
+            "https://doi.org/10.1016/j.cma.2024.116813",
+            doi="10.1016/j.cma.2024.116813",
+            title="Paper",
+            collection_key=None, tags=None,
+            bridge_url="http://127.0.0.1:23119",
+            get_writer=lambda: MagicMock(),
+            writer_lock=MagicMock(),
+        )
+
+        mock_pdf.assert_called_once()
+        assert mock_pdf.call_args.kwargs.get("timeout_s") == 300.0
         assert result["status"] == "saved_with_pdf"
         assert result["has_pdf"] is True
 
@@ -531,4 +567,3 @@ class TestRunPreflightCheck:
         assert blocking is not None
         scopes = sorted(p["scope"] for p in publishers)
         assert scopes == ["publisher", "url", "url"]
-
