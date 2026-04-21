@@ -29,8 +29,9 @@ def test_plan_runtime_changes_is_noop_when_runtime_matches_desired():
                 detected=True,
                 registered=True,
                 command="/usr/bin/zotpilot",
-                args=(),
-                env={"GEMINI_API_KEY": "x"},
+                args=("mcp", "serve"),
+                env={},
+                has_embedded_secrets=False,
                 skill_dirs=("/tmp/skills/zotpilot",),
                 skill_hash_ok=True,
                 registration_hash_ok=True,
@@ -39,8 +40,8 @@ def test_plan_runtime_changes_is_noop_when_runtime_matches_desired():
     )
     desired = DesiredRuntime(
         command="/usr/bin/zotpilot",
-        args=(),
-        env={"GEMINI_API_KEY": "x"},
+        args=("mcp", "serve"),
+        env={},
         targets=("codex",),
     )
 
@@ -78,8 +79,8 @@ def test_plan_runtime_changes_detects_skill_and_registration_drift():
     )
     desired = DesiredRuntime(
         command="/new/zotpilot",
-        args=(),
-        env={"GEMINI_API_KEY": "x"},
+        args=("mcp", "serve"),
+        env={},
         targets=("codex", "claude-code"),
     )
 
@@ -91,7 +92,7 @@ def test_plan_runtime_changes_detects_skill_and_registration_drift():
 
 def test_register_delegates_to_reconcile_runtime():
     fake_result = MagicMock()
-    fake_result.changes = ChangeSet(("codex",), ("codex",), "needs-sync", {"codex": ["env-drift"]})
+    fake_result.changes = ChangeSet(("codex",), ("codex",), "needs-sync", {"codex": ["embedded-secrets"]})
     fake_result.applied = ApplyResult(("codex",), ("codex",), True)
     fake_result.current = RuntimeState(
         package_version="0.5.0",
@@ -104,40 +105,33 @@ def test_register_delegates_to_reconcile_runtime():
     assert mock_reconcile.call_args.kwargs["apply"] is True
 
 
-def test_cmd_update_uses_reconcile_runtime_for_runtime_sync(capsys):
-    args = argparse.Namespace(cli_only=False, skill_only=False, check=False, dry_run=False)
-    fake_result = MagicMock()
-    fake_result.applied = ApplyResult(("codex",), ("codex",), True)
-    fake_result.current.supported_targets = ("codex",)
+def test_cmd_update_re_registers_when_drift_present(capsys):
+    args = argparse.Namespace(
+        cli_only=False, skill_only=False, check=False, dry_run=False,
+        migrate_secrets=False, re_register=False,
+    )
     with (
         patch("zotpilot.cli._get_current_version", return_value="0.5.0"),
         patch("zotpilot.cli._get_latest_pypi_version", return_value="0.5.0"),
         patch("zotpilot.cli._detect_cli_installer", return_value=("editable", None)),
-        patch("zotpilot.cli._import_runtime_env_to_config", return_value={}),
-        patch("zotpilot._platforms.reconcile_runtime", return_value=fake_result) as mock_reconcile,
+        patch(
+            "zotpilot.cli._deployment_status",
+            return_value={"drift_state": "needs-sync", "legacy_embedded_secrets_detected": False},
+        ),
+        patch("zotpilot.cli.resolve_runtime_config", return_value=MagicMock()),
+        patch("zotpilot._platforms.register", return_value={"codex": True}) as mock_register,
     ):
         assert cmd_update(args) == 0
-    assert mock_reconcile.call_args.kwargs["apply"] is True
+    mock_register.assert_called_once()
 
 
-def test_cmd_sync_runs_reconcile_runtime(capsys):
+def test_cmd_sync_uses_register(capsys):
     args = argparse.Namespace(dry_run=False)
-    fake_result = MagicMock()
-    fake_result.applied = ApplyResult(("codex",), ("codex",), True)
     with (
-        patch("zotpilot.cli.Config.load") as mock_load,
-        patch("zotpilot.cli._import_runtime_env_to_config", return_value={}),
-        patch("zotpilot._platforms.reconcile_runtime", return_value=fake_result) as mock_reconcile,
+        patch("zotpilot._platforms.register", return_value={"codex": True}) as mock_register,
     ):
-        mock_cfg = mock_load.return_value
-        mock_cfg.gemini_api_key = "k"
-        mock_cfg.dashscope_api_key = None
-        mock_cfg.zotero_api_key = "z"
-        mock_cfg.zotero_user_id = "1"
         assert cmd_sync(args) == 0
-    assert mock_reconcile.call_args.kwargs["apply"] is True
-    assert mock_reconcile.call_args.kwargs["gemini_key"] == "k"
-    assert mock_reconcile.call_args.kwargs["zotero_api_key"] == "z"
+    mock_register.assert_called_once()
 
 
 def test_run_py_register_bootstraps_then_delegates(tmp_path):

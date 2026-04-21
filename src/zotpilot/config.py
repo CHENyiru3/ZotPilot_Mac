@@ -83,7 +83,7 @@ class Config:
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "Config":
-        """Load config from file and/or environment."""
+        """Load shared non-sensitive config from disk."""
         if path is not None:
             config_path = Path(path).expanduser()
         else:
@@ -123,8 +123,8 @@ class Config:
             embedding_dimensions=data.get("embedding_dimensions", default_dims),
             chunk_size=data.get("chunk_size", 400),
             chunk_overlap=data.get("chunk_overlap", 100),
-            gemini_api_key=os.environ.get("GEMINI_API_KEY") or data.get("gemini_api_key"),
-            dashscope_api_key=os.environ.get("DASHSCOPE_API_KEY") or data.get("dashscope_api_key"),
+            gemini_api_key=None,
+            dashscope_api_key=None,
             embedding_provider=data.get("embedding_provider", "gemini"),
             embedding_timeout=data.get("embedding_timeout", 120.0),
             embedding_max_retries=data.get("embedding_max_retries", 3),
@@ -136,18 +136,18 @@ class Config:
             oversample_topic_factor=data.get("oversample_topic_factor", 5),
             stats_sample_limit=data.get("stats_sample_limit", 10000),
             ocr_language=data.get("ocr_language", "eng"),
-            openalex_email=os.environ.get("OPENALEX_EMAIL") or data.get("openalex_email"),
+            openalex_email=data.get("openalex_email"),
             vision_enabled=data.get("vision_enabled", True),
             vision_model=data.get("vision_model", "claude-haiku-4-5-20251001"),
-            anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY") or data.get("anthropic_api_key"),
+            anthropic_api_key=None,
             vision_max_tables_per_run=data.get("vision_max_tables_per_run"),
             vision_max_cost_usd=data.get("vision_max_cost_usd"),
             max_pages=data.get("max_pages", 40),
             preflight_enabled=data.get("preflight_enabled", True),
-            zotero_api_key=os.environ.get("ZOTERO_API_KEY") or data.get("zotero_api_key"),
-            zotero_user_id=os.environ.get("ZOTERO_USER_ID") or data.get("zotero_user_id"),
+            zotero_api_key=None,
+            zotero_user_id=data.get("zotero_user_id"),
             zotero_library_type=data.get("zotero_library_type", "user"),
-            semantic_scholar_api_key=os.environ.get("S2_API_KEY") or data.get("semantic_scholar_api_key"),
+            semantic_scholar_api_key=None,
         )
 
     def save(self, path: Path | str | None = None) -> None:
@@ -182,7 +182,8 @@ class Config:
             "vision_enabled": self.vision_enabled,
             "vision_model": self.vision_model,
             # SECURITY: API keys are deliberately excluded from persisted config.
-            # Keys should only come from environment variables, never saved to disk.
+            # Secrets are resolved at runtime from ZotPilot's secure store or
+            # explicit environment overrides, never written to shared config.
             "vision_max_tables_per_run": self.vision_max_tables_per_run,
             "vision_max_cost_usd": self.vision_max_cost_usd,
             "max_pages": self.max_pages,

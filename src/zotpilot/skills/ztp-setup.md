@@ -19,7 +19,7 @@ description: >
    - **dashscope**: Aliyun service. Preferred for Chinese users.
    - **local**: No API key required, completely private, but indexing runs slowly.
    - **none**: Disables vector indexing. Only metadata/SQL search remains available.
-5. **API Key Setup**: `zotpilot register --gemini-key KEY` (replace flag based on provider), or instruct user to set environment variables.
+5. **API Key Setup**: Prefer `zotpilot setup` or `zotpilot config set gemini_api_key KEY` / `zotpilot config set zotero_api_key KEY` over passing keys to `register`.
 6. Configure: `zotpilot setup --non-interactive --provider [selected_provider]`
 7. Register MCP: `zotpilot register`
 8. Initial Index: `zotpilot index --limit 20` (first-time quick index)

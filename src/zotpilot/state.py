@@ -9,7 +9,7 @@ from collections.abc import Callable
 
 from fastmcp import FastMCP
 
-from .config import Config
+from .config import Config  # noqa: F401 - backward-compatible test/import surface
 
 # Re-exports for backward compatibility (tools other than search.py import from here)
 from .filters import (  # noqa: F401
@@ -25,6 +25,7 @@ from .result_utils import (  # noqa: F401
     _result_to_dict,
     _stored_chunk_to_retrieval_result,
 )
+from .runtime_settings import resolve_runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -168,8 +169,10 @@ filters. The default core profile provides browse/write/indexing tools such as \
 `browse_library`, `manage_tags`, and `index_library`. \
 Use `browse_library(view="feeds")` for RSS feeds. `get_index_stats` also \
 handles unindexed-paper pagination plus optional reranking and vision-cost details. \
-Write operations (tags, collections, notes) require ZOTERO_API_KEY \
-and ZOTERO_USER_ID environment variables.
+Write operations (tags, collections, notes) require zotero_api_key in \
+ZotPilot's secure credential store and zotero_user_id in shared config. \
+Environment variables remain supported as temporary overrides. Prefer \
+`zotpilot setup` or `zotpilot config set ...` over editing client config.
 """
 
 mcp = FastMCP("zotpilot", instructions=_MCP_INSTRUCTIONS)
@@ -189,7 +192,7 @@ def _get_retriever():
     if _retriever is None:
         with _init_lock:
             if _retriever is None:
-                _config = Config.load()
+                _config = resolve_runtime_config()
                 if _config.embedding_provider == "none":
                     raise ToolError(
                         "Semantic search requires indexing. "
@@ -235,7 +238,7 @@ def _get_zotero():
         with _init_lock:
             if _zotero is None:
                 if _config is None:
-                    _config = Config.load()
+                    _config = resolve_runtime_config()
                 from .zotero_client import ZoteroClient
 
                 override = _get_library_override()
@@ -270,7 +273,7 @@ def _get_writer():
         with _init_lock:
             if _writer is None:
                 if _config is None:
-                    _config = Config.load()
+                    _config = resolve_runtime_config()
                 if not _config.zotero_api_key:
                     raise ToolError("ZOTERO_API_KEY not set -- write operations unavailable")
                 if not _config.zotero_user_id:
@@ -303,7 +306,7 @@ def _get_api_reader():
         with _init_lock:
             if _api_reader is None:
                 if _config is None:
-                    _config = Config.load()
+                    _config = resolve_runtime_config()
                 if not _config.zotero_api_key:
                     raise ToolError("ZOTERO_API_KEY not set -- annotation reading unavailable")
                 if not _config.zotero_user_id:
@@ -332,7 +335,7 @@ def _get_config():
     if _config is None:
         with _init_lock:
             if _config is None:
-                _config = Config.load()
+                _config = resolve_runtime_config()
     return _config
 
 

@@ -10,6 +10,10 @@ import tempfile
 
 os.environ["ZOTPILOT_SESSIONS_DIR"] = tempfile.mkdtemp(prefix="zotpilot-test-sessions-")
 os.environ["ZOTPILOT_BATCHES_DIR"] = tempfile.mkdtemp(prefix="zotpilot-test-batches-")
+os.environ["ZOTPILOT_SECRET_BACKEND"] = "local-file"
+os.environ["ZOTPILOT_LOCAL_SECRETS_PATH"] = os.path.join(
+    tempfile.mkdtemp(prefix="zotpilot-test-secrets-"), "secrets.json"
+)
 
 from unittest.mock import MagicMock
 

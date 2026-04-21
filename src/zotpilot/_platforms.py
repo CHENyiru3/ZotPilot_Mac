@@ -1,15 +1,15 @@
 # TODO: This is a copy of scripts/platforms.py for wheel distribution.
 # Deduplicate once install bootstrap is reworked. Keep in sync manually.
-"""Cross-platform MCP server registration for ZotPilot.
+"""Cross-platform MCP registration for ZotPilot.
 
-Supports:
-  Tier 1 (Skill + MCP): Claude Code, Codex CLI, OpenCode, Gemini CLI, Cursor, Windsurf
-  Tier 2 (MCP only):    Cline, Roo Code
+Currently supported clients:
+  - Claude Code
+  - Codex CLI
+  - OpenCode
 
-Security note: CLI-based platforms (claude, codex, gemini) require passing
-env vars via -e flags on the command line. This briefly exposes keys in the
-process table. This is the only mechanism these CLIs provide. For higher
-security, register manually and use environment variables or secret managers.
+Registration writes only the ZotPilot MCP command (`zotpilot mcp serve`) into
+client config. Credentials are resolved at runtime by ZotPilot from shared
+config, secure storage, and explicit environment overrides.
 """
 import dataclasses
 import hashlib
@@ -86,6 +86,7 @@ class PlatformRuntimeState:
     command: str | None = None
     args: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=dict)
+    has_embedded_secrets: bool = False
     skill_dirs: tuple[str, ...] = ()
     skill_hash_ok: bool = False
     registration_hash_ok: bool = False
@@ -239,6 +240,17 @@ def _claude_config_path() -> Path:
     return _home() / ".claude.json"
 
 
+def _backup_config_file(path: Path | None) -> Path | None:
+    if path is None:
+        return None
+    expanded = path.expanduser()
+    if not expanded.exists():
+        return None
+    backup = expanded.with_suffix(expanded.suffix + ".bak")
+    shutil.copy2(expanded, backup)
+    return backup
+
+
 # ---------------------------------------------------------------------------
 # Detection
 # ---------------------------------------------------------------------------
@@ -382,6 +394,12 @@ def _build_env(
     return env
 
 
+def _runtime_invocation(source_dir: Path | None = None) -> tuple[str, tuple[str, ...]]:
+    if source_dir:
+        return "uv", ("run", "--directory", str(source_dir), "zotpilot", "mcp", "serve")
+    return _zotpilot_command(), ("mcp", "serve")
+
+
 def _skill_state_for_platform(plat: str) -> tuple[tuple[str, ...], bool]:
     info = PLATFORMS.get(plat, {})
     skills_dir = info.get("skills_dir")
@@ -430,20 +448,19 @@ def inspect_current_state(
 
     target_names = tuple(_supported_targets(targets))
     detected = set(detect_platforms())
-    desired_command = _zotpilot_command()
-    desired_args: tuple[str, ...] = ()
-    desired_env = config_env or {}
+    desired_command, desired_args = _runtime_invocation()
 
     states: dict[str, PlatformRuntimeState] = {}
     for plat, info in PLATFORMS.items():
         registered, command, args, env, config_path = _inspect_registration(plat)
         skill_dirs, skill_hash_ok = _skill_state_for_platform(plat)
         supported = plat in SUPPORTED_PLATFORM_NAMES
+        has_embedded_secrets = any(key in env for key in CREDENTIAL_ENV_KEYS)
         registration_hash_ok = (
             registered
             and command == desired_command
             and tuple(args) == desired_args
-            and all(env.get(k) == v for k, v in desired_env.items())
+            and not has_embedded_secrets
         )
         states[plat] = PlatformRuntimeState(
             platform=plat,
@@ -455,6 +472,7 @@ def inspect_current_state(
             command=command,
             args=args,
             env=env,
+            has_embedded_secrets=has_embedded_secrets,
             skill_dirs=skill_dirs,
             skill_hash_ok=skill_hash_ok,
             registration_hash_ok=registration_hash_ok,
@@ -483,9 +501,9 @@ def plan_runtime_changes(desired: DesiredRuntime, current: RuntimeState) -> Chan
         elif not _commands_equivalent(state.command, desired.command) or tuple(state.args) != desired.args:
             register.append(plat)
             platform_reasons.append("command-drift")
-        elif any(state.env.get(k) != v for k, v in desired.env.items()):
+        elif state.has_embedded_secrets:
             register.append(plat)
-            platform_reasons.append("env-drift")
+            platform_reasons.append("embedded-secrets")
         if platform_reasons:
             reasons[plat] = platform_reasons
 
@@ -539,12 +557,12 @@ def reconcile_runtime(
     apply: bool = False,
     dev_source_dir: Path | None = None,
 ) -> ReconcileResult:
-    desired_env = _build_env(gemini_key, dashscope_key, zotero_api_key, zotero_user_id)
-    current = inspect_current_state(desired_env, platforms)
+    current = inspect_current_state({}, platforms)
+    command, args = _runtime_invocation(dev_source_dir)
     desired = DesiredRuntime(
-        command="uv" if dev_source_dir else _zotpilot_command(),
-        args=("run", "--directory", str(dev_source_dir), "zotpilot") if dev_source_dir else (),
-        env=desired_env,
+        command=command,
+        args=args,
+        env={},
         targets=current.supported_targets,
         source_dir=dev_source_dir,
     )
@@ -786,7 +804,7 @@ def deploy_skills(platforms: list[str] | None = None) -> dict[str, bool]:
             skip, reason = _should_skip_deploy(target, __version__, source_files)
             if skip:
                 print(f"  {info['label']}: {target.name} {reason}")
-                platform_ok = platform_ok and (reason == "up-to-date")
+                platform_ok = platform_ok and reason in ("up-to-date", "target-newer-than-package")
                 continue
 
             target.mkdir(parents=True, exist_ok=True)
@@ -815,21 +833,11 @@ def _register_claude_code(env: dict[str, str], source_dir: Path | None = None) -
     values.  To avoid that, put ``<name>`` and ``<commandOrUrl>`` FIRST and the
     variadic ``-e`` flags LAST.
     """
-    if source_dir:
-        zp = shutil.which("uv") or "uv"
-        cmd_parts = [zp, "run", "--directory", str(source_dir), "zotpilot"]
-    else:
-        try:
-            zp = _zotpilot_command(allow_fallback=False)
-        except RuntimeError as e:
-            print(f"  ERROR: {e}", file=sys.stderr)
-            return False
-        cmd_parts = [zp]
+    command, args = _runtime_invocation(source_dir)
+    _backup_config_file(_claude_config_path())
     subprocess.run(["claude", "mcp", "remove", "zotpilot"],
                    capture_output=True, text=True)
-    cmd = ["claude", "mcp", "add", "--scope", "user", "zotpilot"] + cmd_parts
-    for k, v in env.items():
-        cmd.extend(["-e", f"{k}={v}"])
+    cmd = ["claude", "mcp", "add", "--scope", "user", "zotpilot", command] + list(args)
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"  ERROR: {result.stderr.strip()}", file=sys.stderr)
@@ -839,58 +847,20 @@ def _register_claude_code(env: dict[str, str], source_dir: Path | None = None) -
 
 def _register_codex(env: dict[str, str], source_dir: Path | None = None) -> bool:
     """Register via `codex mcp add`."""
-    if source_dir:
-        zp_parts = ["uv", "run", "--directory", str(source_dir), "zotpilot"]
-    else:
-        try:
-            zp_parts = [_zotpilot_command(allow_fallback=False)]
-        except RuntimeError as e:
-            print(f"  ERROR: {e}", file=sys.stderr)
-            return False
+    command, args = _runtime_invocation(source_dir)
+    _backup_config_file(_codex_config_path())
     subprocess.run(["codex", "mcp", "remove", "zotpilot"],
                    capture_output=True, text=True)
     cmd = ["codex", "mcp", "add", "zotpilot"]
-    for k, v in env.items():
-        cmd.extend(["--env", f"{k}={v}"])
-    cmd.extend(["--"] + zp_parts)
+    cmd.extend(["--", command] + list(args))
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"  ERROR: {result.stderr.strip()}", file=sys.stderr)
         return False
     return True
-
-
-def _register_gemini(env: dict[str, str], source_dir: Path | None = None) -> bool:
-    """Register via `gemini mcp add`.
-
-    Syntax: gemini mcp add [options] <name> <command> [args...]
-    No -- separator; command is a positional argument.
-    """
-    if source_dir:
-        zp = shutil.which("uv") or "uv"
-        extra_args = ["run", "--directory", str(source_dir), "zotpilot"]
-    else:
-        try:
-            zp = _zotpilot_command(allow_fallback=False)
-        except RuntimeError as e:
-            print(f"  ERROR: {e}", file=sys.stderr)
-            return False
-        extra_args = []
-    subprocess.run(["gemini", "mcp", "remove", "zotpilot"],
-                   capture_output=True, text=True)
-    cmd = ["gemini", "mcp", "add", "-s", "user"]
-    for k, v in env.items():
-        cmd.extend(["-e", f"{k}={v}"])
-    cmd.extend(["zotpilot", zp] + extra_args)  # <name> <command> [args...]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"  ERROR: {result.stderr.strip()}", file=sys.stderr)
-        return False
-    return True
-
 
 # ---------------------------------------------------------------------------
-# Config-file-based registration (OpenCode + Tier 2)
+# Config-file-based registration (OpenCode)
 # ---------------------------------------------------------------------------
 
 def _write_mcp_config(config_path: Path, env: dict[str, str], source_dir: Path | None = None) -> bool:
@@ -931,23 +901,11 @@ def _write_mcp_config(config_path: Path, env: dict[str, str], source_dir: Path |
             return False
 
     # Build zotpilot MCP entry
-    if source_dir:
-        if is_opencode:
-            entry: dict = {"type": "local", "command": ["uv", "run", "--directory", str(source_dir), "zotpilot"]}
-        else:
-            entry = {"type": "stdio", "command": "uv", "args": ["run", "--directory", str(source_dir), "zotpilot"]}
+    command, args = _runtime_invocation(source_dir)
+    if is_opencode:
+        entry: dict = {"type": "local", "command": [command, *args]}
     else:
-        try:
-            zp = _zotpilot_command(allow_fallback=False)
-        except RuntimeError as e:
-            print(f"  ERROR: {e}", file=sys.stderr)
-            return False
-        if is_opencode:
-            entry = {"type": "local", "command": [zp]}
-        else:
-            entry = {"type": "stdio", "command": zp, "args": []}
-    if env:
-        entry["environment" if is_opencode else "env"] = env
+        entry = {"type": "stdio", "command": command, "args": list(args)}
     if is_opencode:
         # OpenCode: set experimental.mcp_timeout for long-running tool calls.
         # The per-server "timeout" only controls tool discovery, not execution.
@@ -965,7 +923,7 @@ def _write_mcp_config(config_path: Path, env: dict[str, str], source_dir: Path |
     try:
         # Backup existing file (skip if already backed up from parse failure)
         if config_path.exists() and not already_backed_up:
-            shutil.copy2(config_path, config_path.with_suffix(config_path.suffix + ".bak"))
+            _backup_config_file(config_path)
 
         fd, tmp_path = tempfile.mkstemp(
             dir=config_path.parent, suffix=".tmp", prefix="zotpilot_"
@@ -1001,29 +959,10 @@ def _register_opencode(env: dict[str, str], source_dir: Path | None = None) -> b
         return False
     return _write_mcp_config(config_path, env, source_dir=source_dir)
 
-
-def _register_ide(plat: str, env: dict[str, str], source_dir: Path | None = None) -> bool:
-    """Register for IDE platforms (Cursor, Windsurf, Cline, Roo)."""
-    config_path = _mcp_config_path(plat)
-    if not config_path:
-        print(f"  ERROR: Unknown config path for {plat}", file=sys.stderr)
-        return False
-    return _write_mcp_config(config_path, env, source_dir=source_dir)
-
-
-# ---------------------------------------------------------------------------
-# Dispatch
-# ---------------------------------------------------------------------------
-
 _REGISTER_FNS = {
     "claude-code": _register_claude_code,
     "codex": _register_codex,
-    "gemini": _register_gemini,
     "opencode": _register_opencode,
-    "cursor": lambda env, source_dir=None: _register_ide("cursor", env, source_dir),
-    "windsurf": lambda env, source_dir=None: _register_ide("windsurf", env, source_dir),
-    "cline": lambda env, source_dir=None: _register_ide("cline", env, source_dir),
-    "roo": lambda env, source_dir=None: _register_ide("roo", env, source_dir),
 }
 
 
@@ -1036,19 +975,6 @@ def register(
     dev_source_dir: Path | None = None,
 ) -> dict[str, bool]:
     """Compatibility wrapper over runtime reconciliation."""
-    # Auto-fill from config file if not passed as CLI args
-    if not all([gemini_key, dashscope_key, zotero_api_key, zotero_user_id]):
-        try:
-            cfg = Config.load()
-            gemini_key = gemini_key or cfg.gemini_api_key
-            dashscope_key = dashscope_key or cfg.dashscope_api_key
-            zotero_api_key = zotero_api_key or cfg.zotero_api_key
-            zotero_user_id = zotero_user_id or cfg.zotero_user_id
-            if any([cfg.gemini_api_key, cfg.zotero_api_key]):
-                print("Credentials loaded from config file.")
-        except Exception:
-            pass
-
     supported_targets = _supported_targets(platforms)
     if not supported_targets:
         if platforms:
@@ -1066,10 +992,6 @@ def register(
     print(f"Reconciling runtime for: {', '.join(PLATFORMS[p]['label'] for p in supported_targets)}")
     result = reconcile_runtime(
         platforms=supported_targets,
-        gemini_key=gemini_key,
-        dashscope_key=dashscope_key,
-        zotero_api_key=zotero_api_key,
-        zotero_user_id=zotero_user_id,
         apply=True,
         dev_source_dir=dev_source_dir,
     )
@@ -1094,32 +1016,25 @@ def register(
 
 def _print_manual_fallback(plat: str, env: dict[str, str]) -> None:
     """Print manual registration instructions when auto-registration fails."""
-    zp = _zotpilot_command()
+    command, args = _runtime_invocation()
     if plat == "claude-code":
-        env_flags = " ".join(f"-e {k}={_mask_secret(v)}" for k, v in env.items())
-        print(f"    Manual: claude mcp add --scope user zotpilot {zp} {env_flags}")
+        print(f"    Manual: claude mcp add --scope user zotpilot {command} {' '.join(args)}")
     elif plat == "codex":
-        env_flags = " ".join(f"--env {k}={_mask_secret(v)}" for k, v in env.items())
-        print(f"    Manual: codex mcp add zotpilot {env_flags} -- {zp}")
+        print(f"    Manual: codex mcp add zotpilot -- {command} {' '.join(args)}")
     elif plat == "gemini":
-        env_flags = " ".join(f"-e {k}={_mask_secret(v)}" for k, v in env.items())
-        print(f"    Manual: gemini mcp add -s user {env_flags} zotpilot {zp}")
+        print(f"    Manual: gemini mcp add -s user zotpilot {command} {' '.join(args)}")
     else:
         config_path = _mcp_config_path(plat)
         is_opencode = "opencode" in str(config_path) if config_path else False
         if is_opencode:
             mcp_key = "mcp"
-            entry: dict = {"type": "local", "command": [zp]}
-            if env:
-                entry["environment"] = {k: _mask_secret(v) for k, v in env.items()}
+            entry: dict = {"type": "local", "command": [command, *args]}
             print(f"    Manual: Add to {config_path}:")
             print(f'    {{"{mcp_key}": {{"zotpilot": {json.dumps(entry)}}},')
             print('     "experimental": {"mcp_timeout": 600000}}')
         else:
             mcp_key = "mcpServers"
-            entry = {"type": "stdio", "command": zp, "args": []}
-            if env:
-                entry["env"] = {k: _mask_secret(v) for k, v in env.items()}
+            entry = {"type": "stdio", "command": command, "args": list(args)}
             print(f"    Manual: Add to {config_path}:")
             print(f'    {{"{mcp_key}": {{"zotpilot": {json.dumps(entry)}}}}}')
 
@@ -1275,14 +1190,7 @@ def _get_skill_dirs() -> list[SkillDir]:
 def _deployment_status(config: Config | None = None) -> dict:
     """Return platform detection, registration, skill dirs, and drift."""
     try:
-
-        desired_keys = _desired_env_from_config(config)
-
         reconcile = reconcile_runtime(
-            gemini_key=desired_keys.get("GEMINI_API_KEY"),
-            dashscope_key=desired_keys.get("DASHSCOPE_API_KEY"),
-            zotero_api_key=desired_keys.get("ZOTERO_API_KEY"),
-            zotero_user_id=desired_keys.get("ZOTERO_USER_ID"),
             apply=False,
         )
         detected = [plat for plat, state in reconcile.current.platforms.items() if state.detected]
@@ -1300,7 +1208,9 @@ def _deployment_status(config: Config | None = None) -> dict:
             }
             for skill_dir in _get_skill_dirs()
         ]
-        divergence = compute_divergent_registration(reconcile.current)
+        embedded_secret_platforms = [
+            plat for plat, state in reconcile.current.platforms.items() if state.has_embedded_secrets
+        ]
         return {
             "detected_platforms": detected,
             "registered_platforms": registered,
@@ -1317,9 +1227,8 @@ def _deployment_status(config: Config | None = None) -> dict:
             "skill_dirs": skill_dirs,
             "drift_state": reconcile.changes.drift_state,
             "restart_required": reconcile.changes.drift_state != "clean",
-            "divergent_registration": divergence["divergent_registration"],
-            "divergent_registration_platforms": divergence["divergent_registration_platforms"],
-            "divergent_registration_fields": divergence["divergent_registration_fields"],
+            "legacy_embedded_secrets_detected": bool(embedded_secret_platforms),
+            "legacy_embedded_secret_platforms": embedded_secret_platforms,
         }
     except Exception as exc:
         logger.debug("deployment status inspection failed", exc_info=True)
@@ -1332,24 +1241,9 @@ def _deployment_status(config: Config | None = None) -> dict:
             "drift_state": "unknown",
             "restart_required": False,
             "deployment_warning": str(exc),
-            "divergent_registration": False,
-            "divergent_registration_platforms": [],
-            "divergent_registration_fields": [],
-}
-
-def _desired_env_from_config(config: Config | None) -> dict[str, str]:
-    desired_keys: dict[str, str] = {}
-    if config is None:
-        return desired_keys
-    if config.gemini_api_key:
-        desired_keys["GEMINI_API_KEY"] = config.gemini_api_key
-    if config.dashscope_api_key:
-        desired_keys["DASHSCOPE_API_KEY"] = config.dashscope_api_key
-    if config.zotero_api_key:
-        desired_keys["ZOTERO_API_KEY"] = config.zotero_api_key
-    if config.zotero_user_id:
-        desired_keys["ZOTERO_USER_ID"] = config.zotero_user_id
-    return desired_keys
+            "legacy_embedded_secrets_detected": False,
+            "legacy_embedded_secret_platforms": [],
+        }
 
 
 CREDENTIAL_ENV_KEYS: tuple[str, ...] = (
@@ -1378,43 +1272,9 @@ def compute_divergent_registration(state: RuntimeState) -> dict:
             "divergent_registration_fields": list[str],
         }
     """
-    # Collect registered supported platforms, sorted lexicographically
-    registered_supported = sorted(
-        plat for plat, ps in state.platforms.items()
-        if ps.registered and ps.supported
-    )
-
-    # Zero or one platform → no divergence possible
-    if len(registered_supported) <= 1:
-        return {
-            "divergent_registration": False,
-            "divergent_registration_platforms": list(registered_supported),
-            "divergent_registration_fields": [],
-        }
-
-    # Build normalized credential record per platform
-    def _credential_env(plat: str) -> dict[str, str]:
-        ps = state.platforms[plat]
-        return {key: ps.env.get(key, "") for key in CREDENTIAL_ENV_KEYS}
-
-    baseline_env = _credential_env(registered_supported[0])
-
-    # Compare each platform's credential_env to baseline
-    divergent_platforms: list[str] = []
-    divergent_fields: set[str] = set()
-
-    for plat in registered_supported:
-        plat_env = _credential_env(plat)
-        has_divergence = False
-        for key in CREDENTIAL_ENV_KEYS:
-            if plat_env.get(key, "") != baseline_env.get(key, ""):
-                divergent_fields.add(key)
-                has_divergence = True
-        if has_divergence:
-            divergent_platforms.append(plat)
-
+    embedded = [plat for plat, ps in state.platforms.items() if ps.registered and ps.has_embedded_secrets]
     return {
-        "divergent_registration": bool(divergent_fields),
-        "divergent_registration_platforms": registered_supported if divergent_fields else [],
-        "divergent_registration_fields": sorted(divergent_fields),
+        "divergent_registration": bool(embedded),
+        "divergent_registration_platforms": embedded,
+        "divergent_registration_fields": list(CREDENTIAL_ENV_KEYS) if embedded else [],
     }

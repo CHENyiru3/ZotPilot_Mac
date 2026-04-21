@@ -11,13 +11,15 @@ from pathlib import Path
 
 from ._platforms import (
     _deployment_status,
-    _desired_env_from_config,
     _detect_cli_installer,
     _get_current_version,
     _get_latest_pypi_version,
     _get_skill_dirs,  # noqa: F401 — re-exported for test patching compatibility
 )
 from .config import Config, _default_config_dir
+from .credential_migration import migrate_secrets
+from .runtime_settings import resolve_runtime_config, resolve_runtime_settings
+from .secret_store import SecretStoreError, delete_secret, describe_backend, set_secret
 
 logger = logging.getLogger(__name__)
 
@@ -30,16 +32,42 @@ def _default_config_path() -> Path:
 def _split_validate_errors(errors: list[str]) -> tuple[list[str], list[str]]:
     """Split config.validate() errors into (blocking_errors, api_key_warnings).
 
-    API key errors are non-blocking warnings when keys may live in MCP config
-    environment section (injected at server startup, not in system env).
+    API key errors are non-blocking warnings when keys may be configured in the
+    ZotPilot secure credential store or provided via environment overrides.
     """
     warnings = [e for e in errors if "_API_KEY not set" in e]
     blocking = [e for e in errors if e not in warnings]
     return blocking, warnings
 
 
+def _store_secret(field: str, value: str | None) -> str | None:
+    if not value:
+        return None
+    return set_secret(field, value)
+
+
+def _import_register_secret_overrides(args, config_path: Path) -> bool:
+    imported_any = False
+    if getattr(args, "gemini_key", None):
+        _store_secret("gemini_api_key", args.gemini_key)
+        imported_any = True
+    if getattr(args, "dashscope_key", None):
+        _store_secret("dashscope_api_key", args.dashscope_key)
+        imported_any = True
+    if getattr(args, "zotero_api_key", None):
+        _store_secret("zotero_api_key", args.zotero_api_key)
+        imported_any = True
+    if getattr(args, "zotero_user_id", None):
+        cfg = Config.load(path=config_path)
+        cfg.zotero_user_id = args.zotero_user_id
+        cfg.save(path=config_path)
+        imported_any = True
+    return imported_any
+
+
 def cmd_setup(args):
     """Interactive or non-interactive setup wizard."""
+    from ._platforms import register as register_runtime
     from .config import _default_config_dir, _default_data_dir, _old_config_path
     from .zotero_detector import detect_zotero_data_dir
 
@@ -48,7 +76,7 @@ def cmd_setup(args):
     for flag, opt in [("gemini_key", "--gemini-key"), ("dashscope_key", "--dashscope-key")]:
         if getattr(args, flag, None):
             print(
-                f"Note: {opt} is not a setup argument — API keys go in MCP config.\n"
+                f"Note: {opt} is not a setup argument — credentials go into ZotPilot's secure store.\n"
                 f"Pass it to 'register' instead:\n"
                 f"  zotpilot register {opt} <key>"
             )
@@ -118,6 +146,12 @@ def cmd_setup(args):
 
     # Step 3: Configure API key (interactive only)
     gemini_api_key = None
+    dashscope_api_key = None
+    zotero_api_key = None
+    zotero_user_id = None
+    if non_interactive:
+        zotero_user_id = os.environ.get("ZOTERO_USER_ID") or None
+        zotero_api_key = os.environ.get("ZOTERO_API_KEY") or None
     if embedding_provider == "gemini":
         import os as _os
         existing_key = _os.environ.get("GEMINI_API_KEY")
@@ -139,23 +173,55 @@ def cmd_setup(args):
         import os as _os
         existing_key = _os.environ.get("DASHSCOPE_API_KEY")
         if non_interactive:
-            if not existing_key:
+            dashscope_api_key = existing_key
+            if not dashscope_api_key:
                 print("NOTE: DASHSCOPE_API_KEY not set. Set it before running the MCP server.", file=sys.stderr)
         else:
             print("\n[3/5] DashScope API key:")
             if existing_key:
                 print("  Found DASHSCOPE_API_KEY in environment (***hidden)")
+                if input("  Use this key? [Y/n] ").strip().lower() not in ("n", "no"):
+                    dashscope_api_key = existing_key
             else:
                 print("  Get a key at https://bailian.console.aliyun.com/")
                 print("  Set it as: export DASHSCOPE_API_KEY='your-key'")
+            if not dashscope_api_key:
+                dashscope_api_key = input("  Enter DashScope API key: ").strip()
+                if not dashscope_api_key:
+                    print("  WARNING: No API key provided. Set DASHSCOPE_API_KEY env var later.")
     elif not non_interactive:
         print("\n[3/5] Skipping API key (local embeddings selected)")
 
-    # Step 4: Check for existing deep-zotero config
+    if not non_interactive:
+        print("\n[4/6] Zotero Web API (optional, needed for ingest/tags/collections/notes):")
+        enable_write = input("  Configure Zotero write credentials now? [Y/n] ").strip().lower()
+        if enable_write not in ("n", "no"):
+            print("  Need your Zotero numeric User ID and a private key with library/write access.")
+            existing_user_id = os.environ.get("ZOTERO_USER_ID")
+            if existing_user_id:
+                print(f"  Found ZOTERO_USER_ID in environment: {existing_user_id}")
+                if input("  Use this User ID? [Y/n] ").strip().lower() not in ("n", "no"):
+                    zotero_user_id = existing_user_id
+            if not zotero_user_id:
+                zotero_user_id = input("  Enter Zotero numeric User ID: ").strip() or None
+                if zotero_user_id and not zotero_user_id.isdigit():
+                    print("  WARNING: Zotero User ID should be numeric, not a username.")
+
+            existing_zotero_key = os.environ.get("ZOTERO_API_KEY")
+            if existing_zotero_key:
+                print("  Found ZOTERO_API_KEY in environment (***hidden)")
+                if input("  Use this key? [Y/n] ").strip().lower() not in ("n", "no"):
+                    zotero_api_key = existing_zotero_key
+            if not zotero_api_key:
+                zotero_api_key = input("  Enter Zotero API key: ").strip() or None
+                if not zotero_api_key:
+                    print("  WARNING: No Zotero API key provided. Write operations will stay disabled.")
+
+    # Step 5: Check for existing deep-zotero config
     chroma_db_path = _default_data_dir() / "chroma"
 
     if not non_interactive:
-        print("\n[4/5] Checking for existing configuration...")
+        print("\n[5/6] Checking for existing configuration...")
         old_config = _old_config_path()
         old_chroma = _default_data_dir().parent / "deep-zotero" / "chroma"
 
@@ -170,9 +236,9 @@ def cmd_setup(args):
                     if input("  Reuse existing index? [Y/n] ").strip().lower() not in ("n", "no"):
                         chroma_db_path = old_chroma
 
-    # Step 5: Write config
+    # Step 6: Write config
     if not non_interactive:
-        print("\n[5/5] Writing configuration...")
+        print("\n[6/6] Writing configuration...")
 
     config_path = _default_config_dir() / "config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -182,47 +248,75 @@ def cmd_setup(args):
     # Load defaults, override setup-chosen fields, then save (no secrets persisted)
     from .config import Config as _Config
 
+    base_config = _Config.load(config_path)
     config = replace(
-        _Config.load(),
+        base_config,
         zotero_data_dir=zotero_path,
         chroma_db_path=chroma_db_path,
         embedding_provider=embedding_provider,
+        zotero_user_id=zotero_user_id or base_config.zotero_user_id,
     )
     config.save(config_path)
 
-    # Runtime reconcile (no secret back-import)
-    from ._platforms import reconcile_runtime
+    try:
+        stored_fields: list[str] = []
+        if gemini_api_key:
+            _store_secret("gemini_api_key", gemini_api_key)
+            stored_fields.append("GEMINI_API_KEY")
+        if dashscope_api_key:
+            _store_secret("dashscope_api_key", dashscope_api_key)
+            stored_fields.append("DASHSCOPE_API_KEY")
+        if zotero_api_key:
+            _store_secret("zotero_api_key", zotero_api_key)
+            stored_fields.append("ZOTERO_API_KEY")
+        if stored_fields:
+            print(f"Secrets stored in {describe_backend().name}: {', '.join(stored_fields)}")
+    except SecretStoreError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
-    reconcile = reconcile_runtime(platforms=None, apply=True)
+    results = register_runtime(platforms=None)
 
     if non_interactive:
         print(f"Config written to: {config_path}")
-        if reconcile.applied and reconcile.applied.restart_required:
-            print("Runtime configured for Codex/Claude Code. Restart your AI agent.")
+        if results:
+            print("Client registrations updated. Restart your AI agent.")
+        print(f"Shared config saved to {config_path}; secrets are managed via {describe_backend().name}.")
         # Tell user how to provide API keys
         if embedding_provider == "gemini":
             print("Set your API key via:")
             print("  export GEMINI_API_KEY='<your-key>'")
-            print("  or: zotpilot register --gemini-key <key>")
+            print("  or: zotpilot config set gemini_api_key <key>")
         elif embedding_provider == "dashscope":
             print("Set your API key via:")
             print("  export DASHSCOPE_API_KEY='<your-key>'")
-            print("  or: zotpilot register --dashscope-key <key>")
+            print("  or: zotpilot config set dashscope_api_key <key>")
+        print("For Zotero write operations:")
+        print("  zotpilot config set zotero_user_id <numeric-id>")
+        print("  zotpilot config set zotero_api_key <your-key>")
     else:
         print(f"  Config written to: {config_path}")
 
         import os as _os
         if gemini_api_key and not _os.environ.get("GEMINI_API_KEY"):
             masked = gemini_api_key[:4] + "..." + gemini_api_key[-4:] if len(gemini_api_key) > 8 else "****"
-            print("\n  NOTE: Set GEMINI_API_KEY as an environment variable:")
-            print(f"    export GEMINI_API_KEY='{masked}'  # (masked for security)")
-            print("  Or use: zotpilot register --gemini-key <key>")
+            print("\n  NOTE: GEMINI_API_KEY was stored in the secure credential store.")
+            print(f"    Masked value: {masked}")
+        if dashscope_api_key and not _os.environ.get("DASHSCOPE_API_KEY"):
+            masked = dashscope_api_key[:4] + "..." + dashscope_api_key[-4:] if len(dashscope_api_key) > 8 else "****"
+            print("\n  NOTE: DASHSCOPE_API_KEY was stored in the secure credential store.")
+            print(f"    Masked value: {masked}")
+        if zotero_api_key and not _os.environ.get("ZOTERO_API_KEY"):
+            masked = zotero_api_key[:4] + "..." + zotero_api_key[-4:] if len(zotero_api_key) > 8 else "****"
+            print("\n  NOTE: ZOTERO_API_KEY was stored in the secure credential store.")
+            print(f"    Masked value: {masked}")
 
         print("\n" + "=" * 40)
         print("Setup complete!")
         print()
-        print("Codex / Claude Code runtime has been synchronized.")
+        print("Detected client runtimes have been registered with the new ZotPilot MCP command.")
         print("Restart your AI agent to load the new MCP config and skills.")
+        print(f"Shared config lives in {config_path}; secrets are managed via {describe_backend().name}.")
 
     return 0
 
@@ -236,7 +330,7 @@ def cmd_index(args):
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     )
 
-    config = Config.load(args.config)
+    config = resolve_runtime_config(args.config)
     errors = config.validate()
     blocking_errors, api_warnings = _split_validate_errors(errors)
     if blocking_errors:
@@ -244,7 +338,7 @@ def cmd_index(args):
             print(f"Config error: {e}", file=sys.stderr)
         return 1
     for w in api_warnings:
-        print(f"Warning: {w} (OK if set in MCP config via 'register')", file=sys.stderr)
+        print(f"Warning: {w} (configure with `zotpilot setup` or `zotpilot config set ...`)", file=sys.stderr)
 
     if args.no_vision:
         from dataclasses import replace
@@ -325,7 +419,8 @@ def cmd_status(args):
     from . import __version__
     output_json = getattr(args, "json", False)
 
-    config = Config.load(args.config)
+    resolved = resolve_runtime_settings(args.config)
+    config = resolved.config
     errors = config.validate()
     blocking_errors, api_warnings = _split_validate_errors(errors)
     deployment = _deployment_status(config)
@@ -334,13 +429,15 @@ def cmd_status(args):
         result = {
             "version": __version__,
             "zotpilot_installed": True,
-            "config_exists": (Path(args.config) if args.config else _default_config_path()).exists(),
+            "config_exists": resolved.runtime_config_path.exists(),
             "zotero_dir": str(config.zotero_data_dir),
             "zotero_dir_valid": config.zotero_data_dir.exists()
                 and (config.zotero_data_dir / "zotero.sqlite").exists(),
             "embedding_provider": config.embedding_provider,
             "gemini_key_set": bool(config.gemini_api_key),
             "dashscope_key_set": bool(config.dashscope_api_key),
+            "secret_backend": resolved.secret_backend,
+            "write_ops_ready": bool(config.zotero_api_key and config.zotero_user_id),
             "index_ready": False,
             "doc_count": 0,
             "chunk_count": 0,
@@ -353,6 +450,10 @@ def cmd_status(args):
             "skill_dirs": deployment["skill_dirs"],
             "drift_state": deployment["drift_state"],
             "restart_required": deployment["restart_required"],
+            "legacy_embedded_secrets_detected": deployment.get("legacy_embedded_secrets_detected", False),
+            "legacy_embedded_secret_platforms": deployment.get("legacy_embedded_secret_platforms", []),
+            "credentials_source": resolved.sources,
+            "runtime_config_path": str(resolved.runtime_config_path),
         }
         if deployment.get("deployment_warning"):
             result["warnings"].append(
@@ -387,6 +488,8 @@ def cmd_status(args):
     print(f"  Zotero data dir:    {config.zotero_data_dir}")
     print(f"  ChromaDB path:      {config.chroma_db_path}")
     print(f"  Embedding provider: {config.embedding_provider}")
+    print(f"  Secret backend:     {resolved.secret_backend}")
+    print(f"  Write ops ready:    {'yes' if (config.zotero_api_key and config.zotero_user_id) else 'no'}")
     print(f"  Embedding model:    {config.embedding_model}")
     print(f"  Embedding dims:     {config.embedding_dimensions}")
     print(f"  Reranking enabled:  {config.rerank_enabled}")
@@ -424,7 +527,7 @@ def cmd_status(args):
     if api_warnings:
         print("\n  Warnings:")
         for w in api_warnings:
-            print(f"    ⚠ {w} (OK if set in MCP config via 'register')")
+            print(f"    ⚠ {w} (configure with `zotpilot setup` or `zotpilot config set ...`)")
 
     try:
         from .embeddings import create_embedder
@@ -457,17 +560,15 @@ def cmd_doctor(args):
 
     results = run_checks(config_path=args.config, full=full)
 
-    # Check for divergent registration
+    # Check for runtime drift / embedded secrets
     try:
-        config = Config.load(args.config)
+        config = resolve_runtime_config(args.config)
         deployment = _deployment_status(config)
-        divergent = deployment.get("divergent_registration", False)
-        divergent_platforms = deployment.get("divergent_registration_platforms", [])
-        divergent_fields = deployment.get("divergent_registration_fields", [])
+        embedded = deployment.get("legacy_embedded_secrets_detected", False)
+        embedded_platforms = deployment.get("legacy_embedded_secret_platforms", [])
     except Exception:
-        divergent = False
-        divergent_platforms = []
-        divergent_fields = []
+        embedded = False
+        embedded_platforms = []
 
     if output_json:
         summary = {"pass": 0, "warn": 0, "fail": 0}
@@ -476,9 +577,8 @@ def cmd_doctor(args):
         data = {
             "checks": [{"name": r.name, "status": r.status, "message": r.message} for r in results],
             "summary": summary,
-            "divergent_registration": divergent,
-            "divergent_registration_platforms": divergent_platforms,
-            "divergent_registration_fields": divergent_fields,
+            "legacy_embedded_secrets_detected": embedded,
+            "legacy_embedded_secret_platforms": embedded_platforms,
         }
         print(json.dumps(data, indent=2))
     else:
@@ -489,16 +589,16 @@ def cmd_doctor(args):
             icon = status_icons[r.status]
             print(f"  [{icon}] {r.name}: {r.message}")
         print()
-        if divergent:
-            print(f"  [FAIL] divergent_registration: credentials differ across {', '.join(divergent_platforms)}")
-            print(f"    Fields: {', '.join(divergent_fields)}")
+        if embedded:
+            print(f"  [FAIL] legacy_embedded_secrets: found embedded client secrets in {', '.join(embedded_platforms)}")
+            print("    Run `zotpilot config migrate-secrets` and then restart affected clients.")
         counts = {"pass": 0, "warn": 0, "fail": 0}
         for r in results:
             counts[r.status] += 1
         print(f"  Summary: {counts['pass']} passed, {counts['warn']} warnings, {counts['fail']} failures")
 
     has_fail = any(r.status == "fail" for r in results)
-    return 1 if (has_fail or divergent) else 0
+    return 1 if (has_fail or embedded) else 0
 
 def _mask_secret(v: str) -> str:
     return v[:4] + "****" if len(v) > 4 else "****"
@@ -506,7 +606,7 @@ def _mask_secret(v: str) -> str:
 
 _SENSITIVE_FIELDS = {
     "gemini_api_key", "dashscope_api_key", "anthropic_api_key",
-    "zotero_api_key",
+    "zotero_api_key", "semantic_scholar_api_key",
 }
 
 _SENSITIVE_REGISTER_FLAGS = {
@@ -575,6 +675,8 @@ _ENV_TO_CONFIG = {
     "DASHSCOPE_API_KEY": "dashscope_api_key",
     "ZOTERO_API_KEY": "zotero_api_key",
     "ZOTERO_USER_ID": "zotero_user_id",
+    "OPENALEX_EMAIL": "openalex_email",
+    "S2_API_KEY": "semantic_scholar_api_key",
 }
 
 
@@ -601,7 +703,7 @@ def _import_runtime_env_to_config(
 
 def cmd_config(args):
     """Manage ZotPilot configuration."""
-    config_path = _default_config_path()
+    config_path = Path(getattr(args, "config", _default_config_path()) or _default_config_path()).expanduser()
 
     # Known fields from Config dataclass
     from .config import Config as _Cfg
@@ -623,25 +725,13 @@ def cmd_config(args):
             print(f"Warning: zotero_user_id should be a numeric ID, not a username (got '{value}').\n"
                   f"Find your numeric ID at https://www.zotero.org/settings/keys")
         if key in _SENSITIVE_FIELDS:
-            register_hint = _SENSITIVE_REGISTER_FLAGS.get(key)
-            if key == "zotero_api_key":
-                runtime_hint = (
-                    "Prefer environment variables for local shell use. "
-                    "If you need client runtime injection, use "
-                    "`zotpilot register --zotero-api-key <value>` and ensure "
-                    "`ZOTERO_USER_ID` or `zotero_user_id` is also configured."
-                )
-            elif register_hint:
-                runtime_hint = (
-                    f"Prefer environment variables for local shell use. "
-                    f"If you need client runtime injection, use `zotpilot register {register_hint} <value>`."
-                )
-            else:
-                runtime_hint = "Prefer environment variables for local shell use."
-            print(f"Error: Field '{key}' is runtime-only and is no longer persisted in config.json. "
-                  f"{runtime_hint}",
-                  file=sys.stderr)
-            return 1
+            try:
+                backend = _store_secret(key, value)
+            except SecretStoreError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+            print(f"✓ Stored '{key}' in secure credential store [{backend}]")
+            return 0
         try:
             _config_set(key, value, config_path)
             print(f"✓ Saved to {config_path}")
@@ -655,42 +745,73 @@ def cmd_config(args):
         if key not in known_fields:
             print(f"Error: unknown field '{key}'.", file=sys.stderr)
             return 1
-        cfg = Config.load()
+        resolved = resolve_runtime_settings(config_path)
+        cfg = resolved.config
         val = getattr(cfg, key, None)
         if val is None:
             print(f"{key}: (not set)")
         elif key in _SENSITIVE_FIELDS:
-            print(f"{key}: {_mask_secret(str(val))}")
+            src = resolved.sources.get(key, "unset")
+            print(f"{key}: {_mask_secret(str(val))} [{src}]")
         else:
-            print(f"{key}: {val}")
+            src = resolved.sources.get(key, "config")
+            print(f"{key}: {val} [{src}]")
         return 0
 
     if subcmd == "list":
-        cfg = Config.load()
-        for field in sorted(known_fields):
-            val = getattr(cfg, field, None)
+        base = Config.load(config_path)
+        resolved = resolve_runtime_settings(config_path)
+        print("Shared config:")
+        for field in sorted(known_fields - _SENSITIVE_FIELDS):
+            val = getattr(base, field, None)
             if val is None:
                 continue
-            if field in _SENSITIVE_FIELDS:
-                import os
-                env_map = {
-                    "gemini_api_key": "GEMINI_API_KEY",
-                    "dashscope_api_key": "DASHSCOPE_API_KEY",
-                    "anthropic_api_key": "ANTHROPIC_API_KEY",
-                    "zotero_api_key": "ZOTERO_API_KEY",
-                }
-                src = "env" if os.environ.get(env_map.get(field, "")) else "file"
-                print(f"  {field}: {_mask_secret(str(val))} [{src}]")
-            else:
-                print(f"  {field}: {val}")
+            print(f"  {field}: {val}")
+        print("Secure credentials:")
+        for field in sorted(_SENSITIVE_FIELDS):
+            val = getattr(resolved.config, field, None)
+            if val is None:
+                continue
+            src = resolved.sources.get(field, "secure-store")
+            print(f"  {field}: {_mask_secret(str(val))} [{src}]")
+        env_overrides = {field: src for field, src in resolved.sources.items() if src == "env-override"}
+        print("Active env overrides:")
+        if not env_overrides:
+            print("  (none)")
+        else:
+            for field in sorted(env_overrides):
+                print(f"  {field}")
         return 0
 
     if subcmd == "unset":
         key = args.key
+        if key in _SENSITIVE_FIELDS:
+            delete_secret(key)
+            print(f"✓ Removed '{key}' from secure credential store")
+            return 0
         cfg = Config.load(path=config_path)
         setattr(cfg, key, None)
         cfg.save(path=config_path)
         print(f"✓ Removed '{key}' from {config_path}")
+        return 0
+
+    if subcmd == "migrate-secrets":
+        try:
+            result = migrate_secrets(config_path=config_path, force=getattr(args, "force", False))
+        except SecretStoreError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print("Secret migration complete.")
+        if result.imported:
+            print(f"  Imported: {', '.join(sorted(result.imported))}")
+        if result.preserved:
+            print(f"  Preserved existing secure-store values: {', '.join(sorted(result.preserved))}")
+        if result.config_updated:
+            print("  Updated shared config with zotero_user_id")
+        if result.re_registered_platforms:
+            print(f"  Re-registered platforms: {', '.join(result.re_registered_platforms)}")
+        if result.backups:
+            print(f"  Legacy config sources inspected: {', '.join(result.backups)}")
         return 0
 
     return 0
@@ -766,6 +887,7 @@ def cmd_update(args):
     errors: list[str] = []
     warnings: list[str] = []
     installer, uv_cmd = _detect_cli_installer()
+    config_path = _default_config_path()
 
     # Step 1: Version info
     old_ver = _get_current_version()
@@ -852,51 +974,41 @@ def cmd_update(args):
             print("  pip install --upgrade zotpilot")
             errors.append("installer unknown: cannot auto-update CLI")
 
-    # Step 4: Runtime reconcile (unless --cli-only)
+    # Step 4: Runtime / registration maintenance (unless --cli-only)
     if not args.cli_only:
-        from ._platforms import reconcile_runtime
-
-        config_path = _default_config_path()
-        # Runtime reconcile only — no secret back-import
-        runtime_config = Config.load(config_path)
-        runtime_config = Config.load(config_path)
-        desired_keys = _desired_env_from_config(runtime_config)
+        from ._platforms import register as register_runtime
 
         if installer == "editable":
             print("Dev install detected — code update remains manual, but runtime will be synchronized")
             warnings.append("editable install: code update skipped")
 
+        if getattr(args, "migrate_secrets", False):
+            try:
+                migrate_secrets(config_path=config_path, force=False)
+                print("Legacy secrets migrated to secure store.")
+            except SecretStoreError as exc:
+                print(f"Secret migration failed: {exc}", file=sys.stderr)
+                errors.append("secret migration failed")
+
         if args.dry_run:
             try:
-                reconcile = reconcile_runtime(
-                    platforms=None,
-                    gemini_key=desired_keys.get("GEMINI_API_KEY"),
-                    dashscope_key=desired_keys.get("DASHSCOPE_API_KEY"),
-                    zotero_api_key=desired_keys.get("ZOTERO_API_KEY"),
-                    zotero_user_id=desired_keys.get("ZOTERO_USER_ID"),
-                    apply=False,
-                )
-                print(f"[dry-run] Drift: {reconcile.changes.drift_state}")
-                for plat, reasons in sorted(reconcile.changes.reasons.items()):
-                    print(f"[dry-run] {plat}: {', '.join(reasons)}")
+                deployment = _deployment_status(resolve_runtime_config(config_path))
+                print(f"[dry-run] Drift: {deployment['drift_state']}")
+                if deployment.get("legacy_embedded_secrets_detected"):
+                    print(
+                        "[dry-run] legacy embedded secrets: "
+                        + ", ".join(deployment.get("legacy_embedded_secret_platforms", []))
+                    )
             except Exception as exc:
                 print(f"Runtime reconcile failed: {exc}", file=sys.stderr)
                 errors.append("runtime reconcile failed")
         else:
             try:
-                reconcile = reconcile_runtime(
-                    platforms=None,
-                    gemini_key=desired_keys.get("GEMINI_API_KEY"),
-                    dashscope_key=desired_keys.get("DASHSCOPE_API_KEY"),
-                    zotero_api_key=desired_keys.get("ZOTERO_API_KEY"),
-                    zotero_user_id=desired_keys.get("ZOTERO_USER_ID"),
-                    apply=True,
-                )
-                if reconcile.applied and reconcile.applied.restart_required:
-                    print(
-                        "Runtime synchronized for: "
-                        + ", ".join(reconcile.current.supported_targets)
-                    )
+                deployment = _deployment_status(resolve_runtime_config(config_path))
+                if getattr(args, "re_register", False) or deployment["drift_state"] != "clean":
+                    results = register_runtime(platforms=None)
+                    if results:
+                        print("Client registrations refreshed.")
             except Exception as exc:
                 print(f"Runtime reconcile failed: {exc}", file=sys.stderr)
                 errors.append("runtime reconcile failed")
@@ -916,31 +1028,15 @@ def cmd_update(args):
 
 def cmd_sync(args):
     """Developer-facing runtime synchronize command."""
-    from ._platforms import reconcile_runtime
-    config_path = _default_config_path()
-    # Runtime reconcile only — no secret back-import
-    runtime_config = Config.load(config_path)
-    # Runtime reconcile only — no secret back-import
-    runtime_config = Config.load(config_path)
-    runtime_config = Config.load(config_path)
-    desired_keys = _desired_env_from_config(runtime_config)
-
+    from ._platforms import register as register_runtime
     try:
-        reconcile = reconcile_runtime(
-            platforms=None,
-            gemini_key=desired_keys.get("GEMINI_API_KEY"),
-            dashscope_key=desired_keys.get("DASHSCOPE_API_KEY"),
-            zotero_api_key=desired_keys.get("ZOTERO_API_KEY"),
-            zotero_user_id=desired_keys.get("ZOTERO_USER_ID"),
-            apply=not getattr(args, "dry_run", False),
-        )
         if getattr(args, "dry_run", False):
-            print(f"[dry-run] Drift: {reconcile.changes.drift_state}")
-            for plat, reasons in sorted(reconcile.changes.reasons.items()):
-                print(f"[dry-run] {plat}: {', '.join(reasons)}")
+            deployment = _deployment_status(resolve_runtime_config(_default_config_path()))
+            print(f"[dry-run] Drift: {deployment['drift_state']}")
             return 0
 
-        if reconcile.applied and reconcile.applied.restart_required:
+        results = register_runtime(platforms=None)
+        if results:
             print("Runtime synchronized. Restart your AI agent to load the new config and skills.")
         else:
             print("Runtime already in sync.")
@@ -971,6 +1067,13 @@ def cmd_bridge(args):
     return 0
 
 
+def cmd_mcp_serve(_args):
+    from .server import main as run_server
+
+    run_server()
+    return 0
+
+
 def cmd_register(args):
     """Register ZotPilot MCP server on AI agent platforms.
 
@@ -987,12 +1090,20 @@ def cmd_register(args):
         from pathlib import Path
         dev_source_dir = Path(dev_arg).resolve() if dev_arg else Path(__file__).parent.parent.parent.resolve()
 
+    config_path = _default_config_path()
+    try:
+        imported_any = _import_register_secret_overrides(args, config_path)
+    except SecretStoreError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    if imported_any:
+        print(
+            "Warning: register --*-key flags are deprecated for interactive use. "
+            "Credentials were imported into the secure store instead."
+        )
+
     results = register(
         platforms=args.platforms,
-        gemini_key=args.gemini_key,
-        dashscope_key=args.dashscope_key,
-        zotero_api_key=args.zotero_api_key,
-        zotero_user_id=args.zotero_user_id,
         dev_source_dir=dev_source_dir,
     )
     return 0 if results and all(results.values()) else 1
@@ -1053,6 +1164,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # config
     sub_config = subparsers.add_parser("config", help="Manage ZotPilot configuration")
+    sub_config.add_argument("--config", default=str(_default_config_path()), help=argparse.SUPPRESS)
     config_sub = sub_config.add_subparsers(dest="config_subcmd")
 
     cfg_set = config_sub.add_parser("set", help="Set a config value")
@@ -1068,6 +1180,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg_unset.add_argument("key", help="Config field name")
 
     config_sub.add_parser("path", help="Print config file path")
+    cfg_migrate = config_sub.add_parser("migrate-secrets", help="Import legacy secrets into the secure store")
+    cfg_migrate.add_argument("--force", action="store_true", help="Overwrite existing secure-store values")
     sub_config.set_defaults(func=cmd_config)
 
     # update
@@ -1080,6 +1194,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Check for updates without installing (always exits 0)")
     mode_grp.add_argument("--dry-run", action="store_true",
         help="Preview update actions without making changes (skips PyPI)")
+    sub_update.add_argument(
+        "--migrate-secrets",
+        action="store_true",
+        help="Migrate legacy secrets into the secure store",
+    )
+    sub_update.add_argument(
+        "--re-register",
+        action="store_true",
+        help="Force re-register ZotPilot on detected clients",
+    )
     sub_update.set_defaults(func=cmd_update)
 
     # sync
@@ -1091,6 +1215,12 @@ def main(argv: list[str] | None = None) -> int:
     sub_bridge = subparsers.add_parser("bridge", help="Run HTTP bridge for ZotPilot Connector")
     sub_bridge.add_argument("--port", type=int, default=2619, help="HTTP port (default: 2619)")
     sub_bridge.set_defaults(func=cmd_bridge)
+
+    # mcp
+    sub_mcp = subparsers.add_parser("mcp", help="Internal MCP server commands")
+    mcp_sub = sub_mcp.add_subparsers(dest="mcp_subcmd")
+    mcp_serve = mcp_sub.add_parser("serve", help="Run the ZotPilot MCP server")
+    mcp_serve.set_defaults(func=cmd_mcp_serve)
 
     # register
     sub_register = subparsers.add_parser("register", help="Register ZotPilot MCP server")

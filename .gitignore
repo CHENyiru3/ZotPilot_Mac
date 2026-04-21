@@ -26,6 +26,8 @@ data/
 docs/*
 !docs/e2e-scenarios/
 !docs/e2e-scenarios/**
+!docs/decisions.md
+!docs/tech-design-config-runtime-v0.6.md
 docs/test-runs/
 
 # Playwright MCP logs

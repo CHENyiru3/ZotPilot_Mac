@@ -283,7 +283,7 @@ class TestThreadSafety:
             # Reset to force initialization
             state_mod._config = None
 
-            with patch("zotpilot.state.Config.load", return_value=mock_config):
+            with patch("zotpilot.state.resolve_runtime_config", return_value=mock_config):
                 results = [None] * 10
                 def worker(idx):
                     results[idx] = state_mod._get_config()

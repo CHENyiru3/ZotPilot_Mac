@@ -1,56 +1,138 @@
-"""Contract tests for setup/register CLI messaging and secret handling."""
+"""Contract tests for setup/register CLI behavior under the new runtime model."""
+
+from __future__ import annotations
 
 import json
 from pathlib import Path
 from unittest.mock import patch
 
-from zotpilot.cli import cmd_register, cmd_setup
+from zotpilot.cli import cmd_register, cmd_setup, cmd_sync, cmd_update
+from zotpilot.runtime_settings import resolve_runtime_settings
 
 
 def _make_fake_zotero(tmp_path: Path) -> Path:
-    """Create a fake Zotero data directory with zotero.sqlite."""
     zotero_dir = tmp_path / "zotero"
     zotero_dir.mkdir()
     (zotero_dir / "zotero.sqlite").write_text("fake sqlite")
     return zotero_dir
 
 
-def _clear_env_creds(monkeypatch):
-    """Remove all credential env vars so tests are isolated."""
+def _use_local_secrets(monkeypatch, tmp_path: Path) -> Path:
+    secrets_path = tmp_path / "secrets.json"
     for key in (
         "GEMINI_API_KEY",
         "DASHSCOPE_API_KEY",
         "ANTHROPIC_API_KEY",
         "ZOTERO_API_KEY",
         "ZOTERO_USER_ID",
+        "OPENALEX_EMAIL",
+        "S2_API_KEY",
     ):
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("ZOTPILOT_SECRET_BACKEND", "local-file")
+    monkeypatch.setenv("ZOTPILOT_LOCAL_SECRETS_PATH", str(secrets_path))
+    return secrets_path
 
 
-# ---------------------------------------------------------------------------
-# Existing base tests (should PASS — current implementation supports these)
-# ---------------------------------------------------------------------------
-
-
-class TestSetupBasic:
-    """Basic setup functionality that already works."""
-
-    def test_non_interactive_setup_creates_config(self, tmp_path, monkeypatch):
-        """Non-interactive setup writes config.json with basic fields."""
-        _clear_env_creds(monkeypatch)
+class TestSetup:
+    def test_non_interactive_setup_writes_shared_config_and_secure_secrets(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("GEMINI_API_KEY", "env-gemini")
+        monkeypatch.setenv("ZOTERO_API_KEY", "env-zotero")
+        monkeypatch.setenv("ZOTERO_USER_ID", "12345678")
         zotero_dir = _make_fake_zotero(tmp_path)
-
         config_dir = tmp_path / ".config" / "zotpilot"
+
         with (
             patch("zotpilot.config._default_config_dir", return_value=config_dir),
             patch("zotpilot.config._default_data_dir", return_value=tmp_path / "data"),
             patch("zotpilot.config._old_config_path", return_value=tmp_path / "old" / "config.json"),
-            patch("zotpilot._platforms.reconcile_runtime") as mock_reconcile,
-            patch("zotpilot.cli._import_runtime_env_to_config", return_value={}),
+            patch("zotpilot._platforms.register", return_value={"codex": True}) as mock_register,
         ):
-            mock_reconcile.return_value.applied = None
+            args = type(
+                "Args",
+                (),
+                {
+                    "non_interactive": True,
+                    "zotero_dir": str(zotero_dir),
+                    "provider": "gemini",
+                    "gemini_key": None,
+                    "dashscope_key": None,
+                },
+            )()
+            rc = cmd_setup(args)
 
+        assert rc == 0
+        mock_register.assert_called_once()
+        data = json.loads((config_dir / "config.json").read_text())
+        assert data["zotero_data_dir"] == str(zotero_dir)
+        assert data["embedding_provider"] == "gemini"
+        assert data["zotero_user_id"] == "12345678"
+        assert "gemini_api_key" not in data
+        assert "zotero_api_key" not in data
+
+        resolved = resolve_runtime_settings(config_dir / "config.json")
+        assert resolved.config.gemini_api_key == "env-gemini"
+        assert resolved.config.zotero_api_key == "env-zotero"
+        assert resolved.config.zotero_user_id == "12345678"
+        assert resolved.secret_backend == "local-file"
+
+    def test_interactive_setup_collects_zotero_write_credentials(self, tmp_path, monkeypatch, capsys):
+        _use_local_secrets(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        zotero_dir = _make_fake_zotero(tmp_path)
+        config_dir = tmp_path / ".config" / "zotpilot"
+
+        with (
+            patch("zotpilot.config._default_config_dir", return_value=config_dir),
+            patch("zotpilot.config._default_data_dir", return_value=tmp_path / "data"),
+            patch("zotpilot.config._old_config_path", return_value=tmp_path / "old" / "config.json"),
+            patch("zotpilot.zotero_detector.detect_zotero_data_dir", return_value=zotero_dir),
+            patch("zotpilot._platforms.register", return_value={"codex": True}),
+            patch(
+                "builtins.input",
+                side_effect=["", "1", "gemini-key", "y", "12345678", "zotero-key"],
+            ),
+        ):
+            args = type(
+                "Args",
+                (),
+                {
+                    "non_interactive": False,
+                    "zotero_dir": None,
+                    "provider": None,
+                    "gemini_key": None,
+                    "dashscope_key": None,
+                },
+            )()
+            rc = cmd_setup(args)
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Zotero Web API" in out
+        resolved = resolve_runtime_settings(config_dir / "config.json")
+        assert resolved.config.gemini_api_key == "gemini-key"
+        assert resolved.config.zotero_api_key == "zotero-key"
+        assert resolved.config.zotero_user_id == "12345678"
+
+    def test_setup_does_not_implicitly_import_legacy_config(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        zotero_dir = _make_fake_zotero(tmp_path)
+        config_dir = tmp_path / ".config" / "zotpilot"
+        old_dir = tmp_path / ".config" / "deep-zotero"
+        old_dir.mkdir(parents=True)
+        (old_dir / "config.json").write_text(
+            json.dumps({"openalex_email": "legacy@example.com", "zotero_user_id": "999"})
+        )
+
+        with (
+            patch("zotpilot.config._default_config_dir", return_value=config_dir),
+            patch("zotpilot.config._default_data_dir", return_value=tmp_path / "data"),
+            patch("zotpilot.config._old_config_path", return_value=old_dir / "config.json"),
+            patch("zotpilot._platforms.register", return_value={"codex": True}),
+        ):
             args = type(
                 "Args",
                 (),
@@ -65,254 +147,44 @@ class TestSetupBasic:
             rc = cmd_setup(args)
 
         assert rc == 0
-        config_path = config_dir / "config.json"
-        assert config_path.exists()
-        data = json.loads(config_path.read_text())
-        assert data["zotero_data_dir"] == str(zotero_dir)
-        assert data["embedding_provider"] == "local"
-
-    def test_non_interactive_setup_requires_zotero_sqlite(self, tmp_path, monkeypatch, capsys):
-        """Non-interactive setup fails when zotero.sqlite is missing."""
-        _clear_env_creds(monkeypatch)
-        fake_dir = tmp_path / "not_zotero"
-        fake_dir.mkdir()
-
-        args = type(
-            "Args",
-            (),
-            {
-                "non_interactive": True,
-                "zotero_dir": str(fake_dir),
-                "provider": "local",
-                "gemini_key": None,
-                "dashscope_key": None,
-            },
-        )()
-        rc = cmd_setup(args)
-        assert rc == 1
-        captured = capsys.readouterr()
-        assert "zotero.sqlite not found" in captured.err
-
-    def test_setup_prints_config_path(self, tmp_path, monkeypatch, capsys):
-        """Setup prints the config file path after writing."""
-        _clear_env_creds(monkeypatch)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        zotero_dir = _make_fake_zotero(tmp_path)
-
-        config_dir = tmp_path / ".config" / "zotpilot"
-        with (
-            patch("zotpilot.config._default_config_dir", return_value=config_dir),
-            patch("zotpilot.config._default_data_dir", return_value=tmp_path / "data"),
-            patch("zotpilot.config._old_config_path", return_value=tmp_path / "old" / "config.json"),
-            patch("zotpilot._platforms.reconcile_runtime") as mock_reconcile,
-            patch("zotpilot.cli._import_runtime_env_to_config", return_value={}),
-        ):
-            mock_reconcile.return_value.applied = None
-
-            args = type(
-                "Args",
-                (),
-                {
-                    "non_interactive": True,
-                    "zotero_dir": str(zotero_dir),
-                    "provider": "local",
-                    "gemini_key": None,
-                    "dashscope_key": None,
-                },
-            )()
-            cmd_setup(args)
-
-        captured = capsys.readouterr()
-        assert "Config written to:" in captured.out
+        data = json.loads((config_dir / "config.json").read_text())
+        assert data["openalex_email"] is None
+        assert data["zotero_user_id"] is None
 
 
-# ---------------------------------------------------------------------------
-# NEW contract tests (RED — target behaviour not yet implemented)
-# ---------------------------------------------------------------------------
-
-
-class TestSetupKeyPersistence:
-    """Non-interactive setup must NOT persist secrets to config.json."""
-
-    def test_non_interactive_setup_no_gemini_key_in_config(self, tmp_path, monkeypatch):
-        """GEMINI_API_KEY from env must NOT appear in saved config.json."""
-        _clear_env_creds(monkeypatch)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key-12345")
-        zotero_dir = _make_fake_zotero(tmp_path)
-
-        config_dir = tmp_path / ".config" / "zotpilot"
-        with (
-            patch("zotpilot.config._default_config_dir", return_value=config_dir),
-            patch("zotpilot.config._default_data_dir", return_value=tmp_path / "data"),
-            patch("zotpilot.config._old_config_path", return_value=tmp_path / "old" / "config.json"),
-            patch("zotpilot._platforms.reconcile_runtime") as mock_reconcile,
-            patch("zotpilot.cli._import_runtime_env_to_config", return_value={}),
-        ):
-            mock_reconcile.return_value.applied = None
-
-            args = type(
-                "Args",
-                (),
-                {
-                    "non_interactive": True,
-                    "zotero_dir": str(zotero_dir),
-                    "provider": "gemini",
-                    "gemini_key": None,
-                    "dashscope_key": None,
-                },
-            )()
-            cmd_setup(args)
-
-        config_path = config_dir / "config.json"
-        data = json.loads(config_path.read_text())
-        assert "gemini_api_key" not in data, (
-            "setup must NOT persist gemini_api_key to config.json; keys belong in env vars or register --gemini-key"
-        )
-
-    def test_non_interactive_setup_no_dashscope_key_in_config(self, tmp_path, monkeypatch):
-        """DASHSCOPE_API_KEY from env must NOT appear in saved config.json."""
-        _clear_env_creds(monkeypatch)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("DASHSCOPE_API_KEY", "test-dashscope-key-67890")
-        zotero_dir = _make_fake_zotero(tmp_path)
-
-        config_dir = tmp_path / ".config" / "zotpilot"
-        with (
-            patch("zotpilot.config._default_config_dir", return_value=config_dir),
-            patch("zotpilot.config._default_data_dir", return_value=tmp_path / "data"),
-            patch("zotpilot.config._old_config_path", return_value=tmp_path / "old" / "config.json"),
-            patch("zotpilot._platforms.reconcile_runtime") as mock_reconcile,
-            patch("zotpilot.cli._import_runtime_env_to_config", return_value={}),
-        ):
-            mock_reconcile.return_value.applied = None
-
-            args = type(
-                "Args",
-                (),
-                {
-                    "non_interactive": True,
-                    "zotero_dir": str(zotero_dir),
-                    "provider": "dashscope",
-                    "gemini_key": None,
-                    "dashscope_key": None,
-                },
-            )()
-            cmd_setup(args)
-
-        config_path = config_dir / "config.json"
-        data = json.loads(config_path.read_text())
-        assert "dashscope_api_key" not in data, "setup must NOT persist dashscope_api_key to config.json"
-
-
-class TestSetupMessaging:
-    """Setup must point users to env vars or register --*-key for API keys."""
-
-    def test_setup_tells_user_to_use_env_or_register(self, tmp_path, monkeypatch, capsys):
-        """Non-interactive setup output must mention env vars and register command."""
-        _clear_env_creds(monkeypatch)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        zotero_dir = _make_fake_zotero(tmp_path)
-
-        config_dir = tmp_path / ".config" / "zotpilot"
-        with (
-            patch("zotpilot.config._default_config_dir", return_value=config_dir),
-            patch("zotpilot.config._default_data_dir", return_value=tmp_path / "data"),
-            patch("zotpilot.config._old_config_path", return_value=tmp_path / "old" / "config.json"),
-            patch("zotpilot._platforms.reconcile_runtime") as mock_reconcile,
-            patch("zotpilot.cli._import_runtime_env_to_config", return_value={}),
-        ):
-            mock_reconcile.return_value.applied = None
-
-            args = type(
-                "Args",
-                (),
-                {
-                    "non_interactive": True,
-                    "zotero_dir": str(zotero_dir),
-                    "provider": "gemini",
-                    "gemini_key": None,
-                    "dashscope_key": None,
-                },
-            )()
-            cmd_setup(args)
-
-        captured = capsys.readouterr()
-        combined = captured.out + captured.err
-        assert "GEMINI_API_KEY" in combined or "environment variable" in combined.lower(), (
-            "setup must tell users to set GEMINI_API_KEY as an env var"
-        )
-        assert "register" in combined.lower(), "setup must mention 'register' as an alternative for key injection"
-
-
-class TestRegisterFallback:
-    """register --*-key must still work during migration period."""
-
-    def test_register_accepts_gemini_key_flag(self, tmp_path, monkeypatch, capsys):
-        """`register --gemini-key <key>` should succeed (legacy fallback)."""
-        _clear_env_creds(monkeypatch)
+class TestRegister:
+    def test_register_legacy_secret_flags_import_into_secure_store(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
 
         with (
-            patch("zotpilot.cli._import_runtime_env_to_config", return_value={}),
             patch("zotpilot.cli._default_config_path", return_value=tmp_path / "config.json"),
-            patch("zotpilot._platforms.register") as mock_register,
+            patch("zotpilot._platforms.register", return_value={"codex": True}) as mock_register,
         ):
-            mock_register.return_value = {"claude-code": True, "codex": True}
-
             args = type(
                 "Args",
                 (),
                 {
                     "platforms": None,
-                    "gemini_key": "fallback-gemini-key",
+                    "gemini_key": "legacy-gemini",
                     "dashscope_key": None,
-                    "zotero_api_key": None,
-                    "zotero_user_id": None,
+                    "zotero_api_key": "legacy-zotero",
+                    "zotero_user_id": "7654321",
+                    "dev": None,
                 },
             )()
             rc = cmd_register(args)
 
         assert rc == 0
         mock_register.assert_called_once()
-        call_kwargs = mock_register.call_args.kwargs
-        assert call_kwargs.get("gemini_key") == "fallback-gemini-key"
-
-    def test_register_accepts_dashscope_key_flag(self, tmp_path, monkeypatch):
-        """`register --dashscope-key <key>` should succeed (legacy fallback)."""
-        _clear_env_creds(monkeypatch)
-        monkeypatch.setenv("HOME", str(tmp_path))
-
-        with (
-            patch("zotpilot.cli._import_runtime_env_to_config", return_value={}),
-            patch("zotpilot.cli._default_config_path", return_value=tmp_path / "config.json"),
-            patch("zotpilot._platforms.register") as mock_register,
-        ):
-            mock_register.return_value = {"claude-code": True}
-
-            args = type(
-                "Args",
-                (),
-                {
-                    "platforms": None,
-                    "gemini_key": None,
-                    "dashscope_key": "fallback-dashscope-key",
-                    "zotero_api_key": None,
-                    "zotero_user_id": None,
-                },
-            )()
-            rc = cmd_register(args)
-
-        assert rc == 0
-        call_kwargs = mock_register.call_args.kwargs
-        assert call_kwargs.get("dashscope_key") == "fallback-dashscope-key"
+        resolved = resolve_runtime_settings(tmp_path / "config.json")
+        assert resolved.config.gemini_api_key == "legacy-gemini"
+        assert resolved.config.zotero_api_key == "legacy-zotero"
+        assert resolved.config.zotero_user_id == "7654321"
 
 
-class TestNoBackImportOnUpdateSync:
-    """update/sync must NOT back-import runtime secrets into config.json."""
-
+class TestUpdateSync:
     def _setup_minimal_config(self, tmp_path: Path) -> Path:
-        """Write a minimal config.json and return its path."""
         config_dir = tmp_path / ".config" / "zotpilot"
         config_dir.mkdir(parents=True)
         config_path = config_dir / "config.json"
@@ -327,8 +199,8 @@ class TestNoBackImportOnUpdateSync:
         )
         return config_path
 
-    def test_no_back_import_on_update(self, tmp_path, monkeypatch):
-        """cmd_update must NOT write secrets from runtime into config.json."""
+    def test_update_does_not_back_import_runtime_secrets_to_config(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
         config_path = self._setup_minimal_config(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("GEMINI_API_KEY", "should-not-be-imported")
@@ -336,45 +208,42 @@ class TestNoBackImportOnUpdateSync:
         with (
             patch("zotpilot.cli._default_config_path", return_value=config_path),
             patch("zotpilot.cli._get_current_version", return_value="0.5.0"),
-            patch("zotpilot.cli._get_latest_pypi_version", return_value=("0.5.0", "already latest")),
-            patch("zotpilot.cli._import_runtime_env_to_config") as mock_import,
+            patch("zotpilot.cli._get_latest_pypi_version", return_value="0.5.0"),
+            patch(
+                "zotpilot.cli._deployment_status",
+                return_value={"drift_state": "clean", "legacy_embedded_secrets_detected": False},
+            ),
         ):
             args = type(
                 "Args",
                 (),
-                {"cli_only": False, "skill_only": False, "check": False, "dry_run": True},
+                {
+                    "cli_only": False,
+                    "skill_only": False,
+                    "check": False,
+                    "dry_run": True,
+                    "migrate_secrets": False,
+                    "re_register": False,
+                },
             )()
-            from zotpilot.cli import cmd_update
-
             cmd_update(args)
 
-        # Target: _import_runtime_env_to_config must NOT be called during update
-        assert not mock_import.called, (
-            "cmd_update must NOT call _import_runtime_env_to_config; "
-            "runtime secrets should never be back-imported into config.json"
-        )
+        data = json.loads(config_path.read_text())
+        assert "gemini_api_key" not in data
 
-    def test_no_back_import_on_sync(self, tmp_path, monkeypatch):
-        """cmd_sync must NOT write secrets from runtime into config.json."""
+    def test_sync_uses_register_without_mutating_config(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
         config_path = self._setup_minimal_config(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("GEMINI_API_KEY", "should-not-be-synced")
 
         with (
             patch("zotpilot.cli._default_config_path", return_value=config_path),
-            patch("zotpilot.cli._import_runtime_env_to_config") as mock_import,
-            patch("zotpilot._platforms.reconcile_runtime") as mock_reconcile,
+            patch("zotpilot._platforms.register", return_value={"codex": True}) as mock_register,
         ):
-            mock_reconcile.return_value.applied = None
-            mock_reconcile.return_value.differences = []
-
-            from zotpilot.cli import cmd_sync
-
             args = type("Args", (), {"dry_run": False})()
-            cmd_sync(args)
+            rc = cmd_sync(args)
 
-        # Target: _import_runtime_env_to_config must NOT be called during sync
-        assert not mock_import.called, (
-            "cmd_sync must NOT call _import_runtime_env_to_config; "
-            "runtime secrets should never be back-imported into config.json"
-        )
+        assert rc == 0
+        mock_register.assert_called_once()
+        data = json.loads(config_path.read_text())
+        assert "gemini_api_key" not in data

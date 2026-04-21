@@ -11,15 +11,16 @@ def _check_skill_drift():
     """Check if the deployment environment is drifted from the codebase."""
     try:
         from ._platforms import _deployment_status
-        from .config import Config
-        config = Config.load()
+        from .runtime_settings import resolve_runtime_config
+
+        config = resolve_runtime_config()
         status = _deployment_status(config)
         if status.get("restart_required"):
             from .state import mcp
             mcp.instructions += (
                 "\n\n⚠️ ZotPilot skills or configuration paths are outdated "
                 "or not in sync with the current system.\n"
-                "Please run `zotpilot register --sync` or `zotpilot upgrade` "
+                "Please run `zotpilot update --re-register` or `zotpilot register` "
                 "to fix this issue."
             )
     except Exception:

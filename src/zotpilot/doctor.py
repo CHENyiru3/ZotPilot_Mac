@@ -1,13 +1,14 @@
 """Health-check diagnostics for ZotPilot environment."""
 from __future__ import annotations
 
-import os
 import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import Config, _default_config_dir
+from .config import _default_config_dir
+from .runtime_settings import resolve_runtime_settings
+from .secret_store import describe_backend
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,24 @@ def _check_embedding_api_key(config) -> CheckResult:
     return CheckResult("embedding_api_key", "fail", f"Unknown provider: {provider}")
 
 
+def _check_secret_backend(config=None) -> CheckResult:
+    backend = describe_backend()
+    needs_secret_backend = (
+        config is not None
+        and (
+            config.embedding_provider in {"gemini", "dashscope"}
+            or bool(config.anthropic_api_key)
+            or bool(config.zotero_api_key)
+        )
+    )
+    if backend.available:
+        detail = backend.name if not backend.path else f"{backend.name} ({backend.path})"
+        return CheckResult("secret_backend", "pass", detail)
+    if not needs_secret_backend:
+        return CheckResult("secret_backend", "pass", f"unused ({backend.detail or 'no secure backend configured'})")
+    return CheckResult("secret_backend", "fail", backend.detail or "No secret backend available")
+
+
 def _check_chromadb_index(config) -> CheckResult:
     """Check ChromaDB index health."""
     try:
@@ -104,14 +123,10 @@ def _check_chromadb_index(config) -> CheckResult:
         return CheckResult("chromadb_index", "fail", f"Cannot open index: {exc}")
 
 
-def _check_zotero_web_api(config) -> CheckResult:
+def _check_zotero_web_api(config, sources: dict[str, str]) -> CheckResult:
     """Check Zotero Web API credentials presence and source."""
     api_key = config.zotero_api_key
     user_id = config.zotero_user_id
-
-    # Determine credential source for display
-    api_key_from_env = bool(os.environ.get("ZOTERO_API_KEY"))
-    user_id_from_env = bool(os.environ.get("ZOTERO_USER_ID"))
 
     if api_key and user_id:
         if not user_id.isdigit():
@@ -122,8 +137,8 @@ def _check_zotero_web_api(config) -> CheckResult:
                 f"not a username (got '{user_id}'). "
                 f"Fix: zotpilot config set zotero_user_id <numeric_id>",
             )
-        key_src = "env" if api_key_from_env else "config file"
-        id_src = "env" if user_id_from_env else "config file"
+        key_src = sources.get("zotero_api_key", "unset")
+        id_src = sources.get("zotero_user_id", "config")
         return CheckResult(
             "zotero_web_api",
             "pass",
@@ -138,9 +153,10 @@ def _check_zotero_web_api(config) -> CheckResult:
     return CheckResult(
         "zotero_web_api",
         "warn",
-        f"Missing: {', '.join(missing)} (write operations will not work). "
-        "Use environment variables for local shell use, and if needed run "
-        "`zotpilot register --zotero-api-key <key>` with `ZOTERO_USER_ID`/`zotero_user_id` also configured.",
+        f"Missing: {', '.join(missing)}. This is optional until you need write operations "
+        "(ingest/tag/collections/notes). Store `zotero_user_id` in shared config with "
+        "`zotpilot config set zotero_user_id <numeric_id>`, store `zotero_api_key` with "
+        "`zotpilot config set zotero_api_key <key>`, or run `zotpilot setup` to configure both.",
     )
 
 
@@ -178,29 +194,34 @@ def run_checks(config_path: str | None = None, full: bool = False) -> list[Check
     # 1. Python version
     results.append(_check_python_version())
 
+    resolved = resolve_runtime_settings(config_path)
     # 2. Config file exists
     if config_path:
         resolved_config_path = Path(config_path).expanduser()
     else:
-        resolved_config_path = _default_config_dir() / "config.json"
+        candidate = _default_config_dir() / "config.json"
+        resolved_config_path = candidate if candidate.exists() else resolved.runtime_config_path
     results.append(_check_config_exists(resolved_config_path))
 
     # Load config (needed for remaining checks)
-    config = Config.load(config_path)
+    config = resolved.config
 
     # 3. Zotero data directory + sqlite
     results.append(_check_zotero_data(config))
 
-    # 4. Embedding API key
+    # 4. Secret backend
+    results.append(_check_secret_backend(config))
+
+    # 5. Embedding API key
     results.append(_check_embedding_api_key(config))
 
-    # 5. ChromaDB index
+    # 6. ChromaDB index
     results.append(_check_chromadb_index(config))
 
-    # 6. Zotero Web API credentials
-    results.append(_check_zotero_web_api(config))
+    # 7. Zotero Web API credentials
+    results.append(_check_zotero_web_api(config, resolved.sources))
 
-    # 7. Write connectivity (only with --full)
+    # 8. Write connectivity (only with --full)
     if full:
         results.append(_check_write_connectivity(config))
 

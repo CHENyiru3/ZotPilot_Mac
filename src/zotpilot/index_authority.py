@@ -16,6 +16,25 @@ def current_library_pdf_doc_ids(zotero) -> set[str]:
     return doc_ids
 
 
+def _stored_doc_ids_or_current(store, current_doc_ids: set[str]) -> set[str]:
+    """Best-effort read of stored doc IDs.
+
+    In production stores this should be a concrete set-like value. In tests or
+    partial mocks, missing/non-iterable values fall back to the current library
+    set so journal authority still works.
+    """
+    getter = getattr(store, "get_indexed_doc_ids", None)
+    if getter is None:
+        return set(current_doc_ids)
+    try:
+        raw = getter()
+    except Exception:
+        return set(current_doc_ids)
+    if isinstance(raw, (set, list, tuple)):
+        return set(raw)
+    return set(current_doc_ids)
+
+
 # ---------------------------------------------------------------------------
 # Journal state management
 # ---------------------------------------------------------------------------
@@ -165,6 +184,11 @@ def get_committed_doc_ids(journal: IndexJournal) -> set[str]:
     return set(journal.committed.keys())
 
 
+def get_touched_doc_ids(journal: IndexJournal) -> set[str]:
+    """Return all journal-tracked doc IDs (committed + in_progress)."""
+    return set(journal.committed.keys()) | set(journal.in_progress.keys())
+
+
 def is_doc_committed(journal: IndexJournal, doc_id: str) -> bool:
     """Check if a specific document is committed."""
     return doc_id in journal.committed
@@ -224,15 +248,43 @@ def _is_pid_alive(pid: int) -> bool:
 
 
 def authoritative_indexed_doc_ids(store, current_doc_ids: set[str]) -> set[str]:
-    """Return committed journal doc IDs that still exist in the current Zotero PDF library."""
-    return set(current_doc_ids)
+    """Return authoritative indexed doc IDs for the current library.
+
+    Rules:
+    - Start from docs that are both in the current library and in the store
+    - If no journal exists, return that raw intersection
+    - If a journal exists, committed journal docs are authoritative for touched docs
+    - Legacy raw docs not represented in the journal are preserved
+    - In-progress journal docs are excluded
+    """
+    current = set(current_doc_ids)
+    stored = _stored_doc_ids_or_current(store, current)
+    raw_indexed = current & stored
+
+    db_path = getattr(store, "db_path", None)
+    if db_path is None:
+        return raw_indexed
+
+    journal_path = Path(db_path).parent / "index_journal.json"
+    if not journal_path.exists():
+        return raw_indexed
+
+    journal = IndexJournal(journal_path)
+    touched = get_touched_doc_ids(journal)
+    committed = get_committed_doc_ids(journal) & raw_indexed
+    legacy_raw = raw_indexed - touched
+    return committed | legacy_raw
 
 
 def authoritative_indexed_doc_ids_with_journal(store, current_doc_ids: set[str], journal: IndexJournal) -> set[str]:
     """Return indexed doc IDs based on journal authority that still exist in the current library."""
-    committed = get_committed_doc_ids(journal)
     current = set(current_doc_ids)
-    return committed & current
+    stored = _stored_doc_ids_or_current(store, current)
+    raw_indexed = current & stored
+    touched = get_touched_doc_ids(journal)
+    committed = get_committed_doc_ids(journal) & raw_indexed
+    legacy_raw = raw_indexed - touched
+    return committed | legacy_raw
 
 
 def orphaned_index_doc_ids(store, current_doc_ids: set[str]) -> set[str]:

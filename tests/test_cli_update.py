@@ -510,16 +510,19 @@ class TestCmdUpdate:
              patch("zotpilot.cli._get_latest_pypi_version", return_value="0.2.1"), \
              patch("zotpilot.cli._get_skill_dirs", return_value=[sd]), \
              patch("zotpilot.cli._detect_cli_installer", return_value=("editable", None)), \
-             patch("zotpilot.cli._import_runtime_env_to_config", return_value={}), \
-             patch("zotpilot._platforms.reconcile_runtime") as mock_reconcile, \
+             patch(
+                 "zotpilot.cli._deployment_status",
+                 return_value={"drift_state": "needs-sync", "legacy_embedded_secrets_detected": False},
+             ), \
+             patch("zotpilot.cli.resolve_runtime_config", return_value=MagicMock()), \
+             patch("zotpilot._platforms.register", return_value={"codex": True}) as mock_register, \
              patch("zotpilot.cli.subprocess.run") as mock_run:
-            mock_reconcile.return_value.applied = None
             result = cmd_update(args)
 
         assert result == 0
         out = capsys.readouterr().out
         assert "code update remains manual" in out
-        mock_reconcile.assert_called_once()
+        mock_register.assert_called_once()
         mock_run.assert_not_called()
 
     def test_skill_only_noneditable_uses_reconcile_runtime(self, capsys):
@@ -529,13 +532,16 @@ class TestCmdUpdate:
         with patch("zotpilot.cli._get_current_version", return_value="0.2.0"), \
              patch("zotpilot.cli._get_latest_pypi_version", return_value="0.2.1"), \
              patch("zotpilot.cli._detect_cli_installer", return_value=("pip", None)), \
-             patch("zotpilot.cli._import_runtime_env_to_config", return_value={}), \
-             patch("zotpilot._platforms.reconcile_runtime") as mock_reconcile:
-            mock_reconcile.return_value.applied = None
+             patch(
+                 "zotpilot.cli._deployment_status",
+                 return_value={"drift_state": "needs-sync", "legacy_embedded_secrets_detected": False},
+             ), \
+             patch("zotpilot.cli.resolve_runtime_config", return_value=MagicMock()), \
+             patch("zotpilot._platforms.register", return_value={"codex": True}) as mock_register:
             result = cmd_update(args)
 
         assert result == 0
-        mock_reconcile.assert_called_once()
+        mock_register.assert_called_once()
 
     def test_symlink_skill_dir_skipped(self, tmp_path, capsys):
         """skill dir is_symlink=True → git pull not called."""

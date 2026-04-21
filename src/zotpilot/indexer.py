@@ -235,9 +235,18 @@ class Indexer:
             items = [i for i in items if pattern.search(i.title)]
             logger.info(f"Title filter: {len(items)} papers match '{title_pattern}'")
 
+        if journal is not None and journal.in_progress:
+            in_progress_first = set(journal.in_progress.keys())
+            items = sorted(items, key=lambda item: (item.item_key not in in_progress_first, item.item_key))
+
         if limit:
             items = items[:limit]
             logger.info(f"Limit applied: processing at most {limit} papers")
+
+        deferred_by_batch = False
+        if batch_size is not None and batch_size > 0 and len(items) > batch_size:
+            deferred_by_batch = True
+            items = items[:batch_size]
 
         if force_reindex:
             indexed_ids = set()
@@ -264,13 +273,13 @@ class Indexer:
         results: list[IndexResult] = []
         to_index: list[ZoteroItem] = []
         reindex_reasons: dict[str, str] = {}
-
         for item in items:
-            if item.item_key in indexed_ids:
+            if journal is not None and item.item_key in journal.in_progress and item.item_key in indexed_ids:
+                reindex_reasons[item.item_key] = "stale_in_progress"
+                logger.info(f"Reindexing {item.item_key}: stale in-progress journal entry")
+            elif item.item_key in indexed_ids:
                 needs_reindex, reason = self._needs_reindex(item)
                 if needs_reindex:
-                    self.store.delete_document(item.item_key)
-                    indexed_ids.discard(item.item_key)
                     reindex_reasons[item.item_key] = reason
                     logger.info(f"Reindexing {item.item_key}: {reason}")
                 else:
@@ -312,8 +321,17 @@ class Indexer:
 
         # Batch slicing: record total before cutting
         total_to_index = len(to_index)
-        if batch_size is not None and batch_size > 0:
-            to_index = to_index[:batch_size]
+
+        keys_requiring_delete = {
+            item.item_key
+            for item in to_index
+            if reindex_reasons.get(item.item_key) in {"changed", "no_hash"}
+        }
+        if journal is not None and journal.in_progress:
+            keys_requiring_delete |= {
+                item.item_key for item in to_index
+                if item.item_key in journal.in_progress and item.item_key in indexed_ids
+            }
 
         # Deferred force_reindex deletion: only delete docs in current batch
         if force_reindex:
@@ -321,6 +339,10 @@ class Indexer:
             keys_to_delete = {item.item_key for item in to_index}
             for doc_id in keys_to_delete & existing:
                 self.store.delete_document(doc_id)
+        else:
+            for doc_id in keys_requiring_delete:
+                self.store.delete_document(doc_id)
+                indexed_ids.discard(doc_id)
 
         reindex_count = len(reindex_reasons)
         n_skipped = sum(1 for r in results if r.status == "skipped")
@@ -353,6 +375,8 @@ class Indexer:
         for i, item in enumerate(tqdm(to_index, desc="Extracting"), 1):
             t0 = time.perf_counter()
             try:
+                if self.journal is not None and item.item_key in reindex_reasons:
+                    mark_in_progress(self.journal, item.item_key)
                 logger.debug(
                     f"Starting extraction {item.item_key}: "
                     f"title={item.title!r}, pdf={item.pdf_path}"
@@ -533,7 +557,7 @@ class Indexer:
         # Batch metadata
         counts["total_to_index"] = total_to_index
         counts["batch_size"] = batch_size
-        counts["has_more"] = total_to_index > len(to_index) if batch_size else False
+        counts["has_more"] = deferred_by_batch or (total_to_index > len(to_index) if batch_size else False)
         counts["vision_pending_tables"] = vision_pending_tables
         counts["vision_estimated_cost_usd"] = vision_estimated_cost_usd
         counts["vision_budget_skipped"] = vision_budget_skipped
