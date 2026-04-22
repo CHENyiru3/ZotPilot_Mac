@@ -49,3 +49,19 @@ class IngestCandidate(BaseModel):
         default=None,
         description="OpenAlex work ID for traceability.",
     )
+    publisher: str | None = Field(
+        default=None,
+        description="Publisher label from the search result, used for risk classification.",
+    )
+    needs_manual_verification: bool | None = Field(
+        default=None,
+        description="Whether the publisher is known to require translator dialog confirmation.",
+    )
+    existing_item_key: str | None = Field(
+        default=None,
+        description="Existing local Zotero item key when the search layer already knows this is a duplicate.",
+    )
+    resume_action: str | None = Field(
+        default=None,
+        description="Internal hint for follow-up ingest retries (e.g. reconcile_existing or retry_save).",
+    )

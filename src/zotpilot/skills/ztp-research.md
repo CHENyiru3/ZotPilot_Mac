@@ -64,6 +64,11 @@ description: >
    >
    > 确认可以正常访问后回复 **Y** 继续入库；无法访问请先启用机构网络/VPN 后告诉我。
 
+   Gate semantics:
+   - A `Y` reply to **step 4** only authorizes continuing **Phase 2 ingestion**.
+   - It MUST trigger step 5 (`ingest_by_identifiers`) next.
+   - It MUST NOT be interpreted as approval for Phase 3 post-processing.
+
    Connector save uses the user's **current network context**. Do not assume OA means "no login / no subscription confirmation needed" on IEEE, Wiley, or Springer — those publishers can still require user login or institutional access even for papers marked OA by upstream metadata. This reminder pre-empts the common `saved_metadata_only` failure mode.
 
    **4b. Manual-verification notice** [USER_REQUIRED when applicable — MANDATORY gate, do NOT skip even when `is_oa_published` is true]. A candidate is "Elsevier-like" and triggers this warning whenever **any** of the following holds, regardless of OA status:
@@ -82,6 +87,11 @@ description: >
    >
    > 如果不及时点击，translator 会超时，且 **切勿重复触发入库**——会在库里留下重复的 item。确认你已经准备好后回复 **Y**。
 
+   Gate semantics:
+   - A `Y` reply to **step 4b** only authorizes continuing **Phase 2 ingestion**.
+   - It MUST trigger step 5 (`ingest_by_identifiers`) next.
+   - It MUST NOT be interpreted as approval for Phase 3 post-processing.
+
    - Only list matching candidates in the bullet list.
    - If none of the selected candidates matches — skip this step entirely.
    - This is independent from step 4's access check. Step 4 may still run for OA items on IEEE / Wiley / Springer; step 4b CANNOT be skipped on OA grounds either. Elsevier's translator dialog triggers regardless of subscription / OA status.
@@ -95,6 +105,12 @@ description: >
    - If `action_required` contains `"anti_bot_detected"` (from save_single_and_verify) → **STOP**, tell user to manually open browser for verification, wait for confirmation, retry with IDENTICAL inputs
    - If `action_required` contains "connector_offline" → **STOP**, surface remediation to user
    - All saved → proceed to Phase 3
+
+   Gate semantics:
+   - Replies to step 4 / 4b / anti-bot / manual-completion prompts are scoped to the pending Phase 2 action only.
+   - Do not treat a bare `Y` from any of those prompts as consent for Phase 3.
+   - Phase 3 may start only after step 7's ingest-results prompt is shown and the user replies `Y` to that specific prompt.
+   - If any `action_required` entry is present after ingest, you MAY still show step 7's results table for visibility, but you MUST pair it with the retry / remediation instruction for that action and then STOP. In that case, do NOT ask the Phase 3 question yet.
 
    **Preflight Blocking** — when `action_required` contains `"preflight_blocked"`:
    - Preflight detected a real problem (anti-bot, subscription wall, or timeout) before save. **Preflight does NOT auto-open browser tabs — the user must open the URLs themselves.** Never tell the user that a tab was auto-opened.
@@ -127,11 +143,13 @@ description: >
    - `状态` column: use the `status` field verbatim (`saved_with_pdf` / `saved_metadata_only` / `duplicate` / `blocked` / `failed`) with a matching emoji (✅ / ⚠️ / 📚 / ❌).
    - `PDF` column: `✅` if `has_pdf: true`, `❌` if false, `—` if no item was created.
    - For `blocked` / `failed` rows, append `(reason: <error or error_code>)` to 标题.
-   - Items are already in the `INBOX` collection at this point (routed at save time). **STOP here** and ask:
+   - Items are already in the `INBOX` collection at this point (routed at save time).
+   - If `action_required` is non-empty, show the table first, then show the blocking / retry instruction (for example, manual browser verification + "完成后回复 Y，我将重新调用 ingest_by_identifiers"), and **STOP there**. Do NOT ask about Phase 3 yet. A bare `Y` after that message must resume the pending Phase 2 retry only.
+   - Only when `action_required` is empty, **STOP here** and ask:
 
    > 入库完成（已归档到 INBOX 集合）。是否继续进入 Phase 3 后处理（标签 + 分类 + 索引）？(Y/N)
 
-   Do NOT call **any** post-processing tool (`manage_tags`, `manage_collections`, `create_note`, `index_library`) until the user replies `Y`. If the user replies `N` or only asks for indexing, skip to step 13.
+   Do NOT call **any** post-processing tool (`manage_tags`, `manage_collections`, `create_note`, `index_library`) until the user replies `Y` to that specific Phase 3 question. If the user replies `N` or only asks for indexing, skip to step 13.
 
 ## Phase 3 — Post-processing
 
@@ -280,6 +298,7 @@ If `unresolved_filters` is non-empty, correct the name and retry (e.g. `"TPAMI"`
 ## Hard Rules
 - Never skip Phase 1 step 3 (user must select candidates before ingest)
 - Never skip the Phase 2 step 7 gate — user must reply `Y` before any Phase 3 tool runs
+- A `Y` reply to step 4 / 4b / preflight / anti-bot / manual-completion gates is **not** Phase 3 approval; it only authorizes the pending Phase 2 retry / ingest action
 - If `action_required` is non-empty → STOP, surface to user, do NOT work around
 - Never substitute web search for `search_academic_databases`
 - **Never flatten structured search results.** Phase 1 selection returns full candidate dicts; Phase 2 ingest must receive them via `candidates=`, never via reconstructed `identifiers=[...]`. The `identifiers` parameter is deprecated and only exists for manual user input.

@@ -33,7 +33,7 @@
 ### 已有用户
 
 - 修改配置：`zotpilot config set ...`
-- 重新挂载客户端：`zotpilot register`
+- 重新挂载客户端：`zotpilot install`（`register` 为兼容别名）
 - 迁移旧 secret：`zotpilot config migrate-secrets`
 - 升级：`zotpilot update [--migrate-secrets] [--re-register]`
 
@@ -130,7 +130,7 @@
 - secret 字段写 secure store
 - `migrate-secrets` 是唯一正式迁移执行面
 
-### `register`
+### `register` / `install`
 
 - 只负责客户端接线
 - 不向客户端配置写 secret
@@ -163,6 +163,7 @@
 
 - Codex / Claude / OpenCode 只保存 `zotpilot mcp serve`
 - 不再在客户端配置中写 `env` / `environment`
+- 用户面只暴露稳定安装态入口；源码态注册不作为公开 CLI 契约
 
 drift 判定：
 

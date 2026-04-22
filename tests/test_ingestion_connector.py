@@ -216,7 +216,7 @@ class TestSaveSingleAndVerify:
     @patch("zotpilot.tools.ingestion.connector.validate_saved_item")
     @patch("zotpilot.tools.ingestion.connector.poll_single_save_result")
     @patch("zotpilot.tools.ingestion.connector.enqueue_save_request")
-    def test_no_pdf_signal_uses_pdf_poll(
+    def test_normal_save_uses_short_pdf_poll(
         self, mock_enqueue, mock_poll, mock_validate, mock_pdf,
     ):
         from zotpilot.tools.ingestion.connector import save_single_and_verify
@@ -240,10 +240,11 @@ class TestSaveSingleAndVerify:
             bridge_url="http://127.0.0.1:23119",
             get_writer=lambda: MagicMock(),
             writer_lock=MagicMock(),
+            risk_class="normal",
         )
 
         mock_pdf.assert_called_once()
-        assert mock_pdf.call_args.kwargs.get("timeout_s") == 45.0
+        assert mock_pdf.call_args.kwargs.get("timeout_s") == 10.0
         assert result["status"] == "saved_with_pdf"
         assert result["has_pdf"] is True
 
@@ -251,7 +252,7 @@ class TestSaveSingleAndVerify:
     @patch("zotpilot.tools.ingestion.connector.validate_saved_item")
     @patch("zotpilot.tools.ingestion.connector.poll_single_save_result")
     @patch("zotpilot.tools.ingestion.connector.enqueue_save_request")
-    def test_elsevier_like_save_keeps_long_pdf_poll(
+    def test_manual_verification_save_uses_short_post_save_poll(
         self, mock_enqueue, mock_poll, mock_validate, mock_pdf,
     ):
         from zotpilot.tools.ingestion.connector import save_single_and_verify
@@ -275,10 +276,11 @@ class TestSaveSingleAndVerify:
             bridge_url="http://127.0.0.1:23119",
             get_writer=lambda: MagicMock(),
             writer_lock=MagicMock(),
+            risk_class="manual_verification",
         )
 
         mock_pdf.assert_called_once()
-        assert mock_pdf.call_args.kwargs.get("timeout_s") == 300.0
+        assert mock_pdf.call_args.kwargs.get("timeout_s") == 15.0
         assert result["status"] == "saved_with_pdf"
         assert result["has_pdf"] is True
 

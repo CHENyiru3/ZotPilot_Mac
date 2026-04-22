@@ -170,7 +170,6 @@ class TestRegister:
                     "dashscope_key": None,
                     "zotero_api_key": "legacy-zotero",
                     "zotero_user_id": "7654321",
-                    "dev": None,
                 },
             )()
             rc = cmd_register(args)

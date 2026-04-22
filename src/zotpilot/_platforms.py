@@ -837,7 +837,7 @@ def _register_claude_code(env: dict[str, str], source_dir: Path | None = None) -
     _backup_config_file(_claude_config_path())
     subprocess.run(["claude", "mcp", "remove", "zotpilot"],
                    capture_output=True, text=True)
-    cmd = ["claude", "mcp", "add", "--scope", "user", "zotpilot", command] + list(args)
+    cmd = ["claude", "mcp", "add", "--scope", "user", "zotpilot", "--", command] + list(args)
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"  ERROR: {result.stderr.strip()}", file=sys.stderr)
@@ -1018,7 +1018,7 @@ def _print_manual_fallback(plat: str, env: dict[str, str]) -> None:
     """Print manual registration instructions when auto-registration fails."""
     command, args = _runtime_invocation()
     if plat == "claude-code":
-        print(f"    Manual: claude mcp add --scope user zotpilot {command} {' '.join(args)}")
+        print(f"    Manual: claude mcp add --scope user zotpilot -- {command} {' '.join(args)}")
     elif plat == "codex":
         print(f"    Manual: codex mcp add zotpilot -- {command} {' '.join(args)}")
     elif plat == "gemini":

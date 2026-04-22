@@ -229,6 +229,11 @@ def _candidates_to_internal(input_candidates: list[IngestCandidate]) -> list[dic
             "title": candidate.title,
             "arxiv_id": arxiv_id,
             "source_doi": source_doi,
+            "landing_page_url": candidate.landing_page_url,
+            "publisher": candidate.publisher,
+            "needs_manual_verification": candidate.needs_manual_verification,
+            "existing_item_key": candidate.existing_item_key,
+            "resume_action": candidate.resume_action,
             "_index": index,
             "url": None,
             "doi": None,
@@ -264,6 +269,11 @@ def _identifiers_to_internal(identifiers: list[str]) -> list[dict]:
         candidate: dict = {
             "identifier": identifier,
             "title": None,
+            "landing_page_url": None,
+            "publisher": None,
+            "needs_manual_verification": None,
+            "existing_item_key": None,
+            "resume_action": None,
             "url": None,
             "doi": None,
             "arxiv_id": None,
@@ -389,6 +399,46 @@ def _result_from_candidate(
         "action_required": action_required,
         "warning": warning,
         **extra,
+    }
+
+
+def _lookup_existing_item_key(candidate: dict) -> str | None:
+    doi = candidate.get("source_doi") or candidate.get("doi")
+    item_key = _lookup_local_item_key_by_doi(doi)
+    if item_key:
+        return item_key
+    arxiv_id = candidate.get("arxiv_id")
+    if arxiv_id:
+        return _lookup_local_item_key_by_arxiv_extra(arxiv_id)
+    return None
+
+
+def _build_manual_completion_action(
+    *,
+    pending_candidate: dict,
+    current_result: dict | None,
+    retry_payload: list[dict],
+    completed_count: int,
+    completed_indexes: list[int],
+    message: str,
+) -> dict:
+    item_key = None
+    if current_result is not None:
+        item_key = current_result.get("item_key")
+    item_key = item_key or pending_candidate.get("existing_item_key")
+    return {
+        "type": "manual_completion_required",
+        "pending_candidate": _candidate_retry_payload(
+            pending_candidate,
+            resume_action=(current_result or {}).get("resume_action"),
+            existing_item_key=item_key,
+        ),
+        "retry_payload": retry_payload,
+        "timeout_stage": (current_result or {}).get("timeout_stage", "manual_queue"),
+        "completed_count": completed_count,
+        "completed_indexes": completed_indexes,
+        "item_key": item_key,
+        "message": message,
     }
 
 
@@ -609,9 +659,17 @@ def ingest_by_identifiers(
         candidates_internal = _identifiers_to_internal(identifiers or [])
 
     # Step 2: Local dedup — check journal DOI, arXiv DOI variant, and extra field
+    seen_batch_keys: dict[str, dict] = {}
     for candidate in candidates_internal:
         if candidate.get("status"):
             continue
+
+        canonical_key = _canonical_candidate_key(candidate)
+        if canonical_key in seen_batch_keys:
+            candidate["status"] = "duplicate"
+            candidate["item_key"] = seen_batch_keys[canonical_key].get("item_key")
+            continue
+        seen_batch_keys[canonical_key] = candidate
 
         doi_candidates: list[str] = []
         for value in (candidate.get("source_doi"), candidate.get("doi")):
@@ -637,6 +695,7 @@ def ingest_by_identifiers(
         if existing_key:
             candidate["status"] = "duplicate"
             candidate["item_key"] = existing_key
+            seen_batch_keys[canonical_key]["item_key"] = existing_key
 
     # Step 3: Check Connector availability
     active_candidates = [c for c in candidates_internal if not c.get("status") and c.get("url")]
@@ -719,40 +778,47 @@ def ingest_by_identifiers(
 
 
 
+    manual_candidates = [
+        c for c in candidates_internal
+        if not c.get("status") and _classify_execution_group(c) == "manual_verification"
+    ]
+    access_candidates = [
+        c for c in candidates_internal
+        if not c.get("status") and _classify_execution_group(c) == "access_sensitive"
+    ]
+    normal_candidates = [
+        c for c in candidates_internal
+        if not c.get("status") and _classify_execution_group(c) == "normal"
+    ]
+    manual_deferred = manual_candidates[1:] if manual_candidates else []
+    execution_plan = (manual_candidates[:1] if manual_candidates else []) + access_candidates + normal_candidates
+
     # Step 5: Sequential save + verify
     results: list[dict] = []
-    for index, candidate in enumerate(candidates_internal):
-        # Already resolved (failed, duplicate)
+    manual_completion: dict | None = None
+    for candidate in candidates_internal:
         if candidate.get("status"):
             if candidate.get("status") == "duplicate":
-                # Duplicate detected (either via local SQLite or the in-process
-                # recent-saves cache). If the existing item already has a PDF,
-                # just surface it. Otherwise an earlier attempt may have created
-                # the record but failed to attach the PDF — try OA fallback on
-                # the existing item_key so a retry has a chance to fix it
-                # instead of returning has_pdf=False and leaving the user stuck.
-                results.append(
-                    _refresh_duplicate_pdf(candidate, logger=logger)
-                )
+                results.append(_refresh_duplicate_pdf(candidate, logger=logger))
             else:
                 results.append(_result_from_candidate(candidate))
-            continue
 
+    for position, candidate in enumerate(execution_plan):
         url = candidate.get("url")
         doi = candidate.get("doi")
         title = candidate.get("title")
+        risk_class = _classify_execution_group(candidate)
 
         if ext_ok and url:
-            # Connector route. tags=None is invariant — see tool docstring.
             result = connector.save_single_and_verify(
                 url, doi, title,
                 arxiv_id=candidate.get("arxiv_id"),
                 collection_key=collection_key, tags=None,
                 bridge_url=bridge_url, get_writer=get_writer,
                 writer_lock=_writer_lock, _logger=logger,
+                risk_class=risk_class,
             )
         elif doi:
-            # API-only route. tags=None is invariant — see tool docstring.
             result = connector._doi_api_fallback(
                 doi, title,
                 arxiv_id=candidate.get("arxiv_id"),
@@ -767,21 +833,60 @@ def ingest_by_identifiers(
                 "action_required": None, "warning": None,
             }
 
-        results.append({
+        if result.get("status") == "__manual_completion_required__":
+            existing_item_key = result.get("item_key") or _lookup_existing_item_key(candidate)
+            pending_candidate = dict(candidate)
+            pending_candidate["existing_item_key"] = existing_item_key
+            pending_candidate["item_key"] = existing_item_key
+            deferred = manual_deferred + execution_plan[position + 1:]
+            retry_payload = sorted(
+                [
+                    _candidate_retry_payload(
+                        pending_candidate,
+                        resume_action=result.get("resume_action"),
+                        existing_item_key=existing_item_key,
+                    ),
+                    *[
+                        _candidate_retry_payload(
+                            c,
+                            resume_action=c.get("resume_action"),
+                            existing_item_key=c.get("existing_item_key"),
+                        )
+                        for c in deferred
+                    ],
+                ],
+                key=lambda row: row.get("candidate_index", 0),
+            )
+            completed_count = sum(
+                1 for row in results if row["status"] in {"saved_with_pdf", "saved_metadata_only", "duplicate"}
+            )
+            completed_indexes = sorted(
+                row["candidate_index"] for row in results if row.get("candidate_index") is not None
+            )
+            manual_completion = _build_manual_completion_action(
+                pending_candidate=pending_candidate,
+                current_result=result,
+                retry_payload=retry_payload,
+                completed_count=completed_count,
+                completed_indexes=completed_indexes,
+                message=(
+                    "部分高风险出版社条目需要你先在 Zotero Desktop 中完成 translator 对话框 / PDF 挂载。"
+                    "请检查 Zotero 是否已有条目，若仍有 Continue/确认弹窗请先点击，然后回复 Y 继续；不要整批重试。"
+                ),
+            )
+            break
+
+        row = {
             **result,
             "identifier": candidate.get("identifier", ""),
-            "candidate_index": candidate.get("_index", index),
-        })
+            "candidate_index": candidate.get("_index"),
+        }
+        results.append(row)
 
-        # Record for short-term dedup so an agent retry while the Elsevier
-        # translator dialog is still open (or during the SQLite commit lag)
-        # resolves as "duplicate" instead of creating a second item.
         if result.get("item_key") and result.get("status") not in {"failed", "blocked"}:
             _remember_recent_save(candidate.get("doi"), result.get("item_key"))
             _remember_recent_save(candidate.get("arxiv_id"), result.get("item_key"))
 
-        # Save-stage anti-bot is per-item, not batch-wide. One blocked
-        # publisher must not prevent the rest of the batch from continuing.
         if result.get("status") == "blocked":
             action_required.append({
                 "type": "anti_bot_detected",
@@ -789,10 +894,50 @@ def ingest_by_identifiers(
                 "identifier": candidate.get("identifier", ""),
             })
 
+    if manual_completion is not None:
+        action_required.append(manual_completion)
+    elif manual_deferred:
+        retry_payload = sorted(
+            [
+                _candidate_retry_payload(
+                    c,
+                    resume_action=c.get("resume_action"),
+                    existing_item_key=c.get("existing_item_key"),
+                )
+                for c in manual_deferred
+            ],
+            key=lambda row: row.get("candidate_index", 0),
+        )
+        completed_count = sum(
+            1 for row in results if row["status"] in {"saved_with_pdf", "saved_metadata_only", "duplicate"}
+        )
+        completed_indexes = sorted(
+            row["candidate_index"] for row in results if row.get("candidate_index") is not None
+        )
+        action_required.append(
+            _build_manual_completion_action(
+                pending_candidate=manual_deferred[0],
+                current_result={"resume_action": "retry_save", "timeout_stage": "manual_queue", "item_key": None},
+                retry_payload=retry_payload,
+                completed_count=completed_count,
+                completed_indexes=completed_indexes,
+                message=(
+                    "为控制单次入库时长，本轮只处理了一个需要人工确认的出版社条目。"
+                    "如需继续后续高风险条目，请回复 Y；不要整批重试。"
+                ),
+            )
+        )
+
     return {
         "total": total_inputs,
         "results": results,
         "action_required": action_required,
+        "completed_count": sum(
+            1 for row in results if row["status"] in {"saved_with_pdf", "saved_metadata_only", "duplicate"}
+        ),
+        "completed_indexes": sorted(
+            row["candidate_index"] for row in results if row.get("candidate_index") is not None
+        ),
     }
 
 
@@ -801,7 +946,91 @@ def ingest_by_identifiers(
 # ---------------------------------------------------------------------------
 
 _ARXIV_ID_RE = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$", re.IGNORECASE)
+_ACCESS_SENSITIVE_PUBLISHER_KEYWORDS = (
+    "ieee",
+    "wiley",
+    "springer",
+)
+_ACCESS_SENSITIVE_HOST_MARKERS = (
+    "ieeexplore.ieee.org",
+    "wiley.com",
+    "onlinelibrary.wiley.com",
+    "springer.com",
+    "springerlink.com",
+    "link.springer.com",
+)
+_MANUAL_VERIFICATION_HOST_MARKERS = (
+    "sciencedirect.com",
+    "linkinghub.elsevier.com",
+    "elsevier.com",
+)
 
 
 def _looks_like_arxiv_id(s: str) -> bool:
     return bool(_ARXIV_ID_RE.match(s.strip()))
+
+
+def _candidate_host(candidate: dict, *, prefer_landing: bool = False) -> str:
+    source = candidate.get("landing_page_url") if prefer_landing else None
+    if not source:
+        source = candidate.get("landing_page_url") or candidate.get("url") or ""
+    return connector.extract_publisher_domain(source)
+
+
+def _classify_execution_group(candidate: dict) -> str:
+    publisher = (candidate.get("publisher") or "").lower()
+    landing_host = _candidate_host(candidate, prefer_landing=True)
+    execution_host = _candidate_host(candidate)
+    doi = (candidate.get("doi") or candidate.get("source_doi") or "").lower()
+    manual_hint = candidate.get("needs_manual_verification")
+
+    if manual_hint is True:
+        return "manual_verification"
+    if doi.startswith("10.1016/"):
+        return "manual_verification"
+    if any(marker in landing_host or marker in execution_host for marker in _MANUAL_VERIFICATION_HOST_MARKERS):
+        return "manual_verification"
+    if "elsevier" in publisher:
+        return "manual_verification"
+
+    if any(keyword in publisher for keyword in _ACCESS_SENSITIVE_PUBLISHER_KEYWORDS):
+        return "access_sensitive"
+    if any(marker in landing_host or marker in execution_host for marker in _ACCESS_SENSITIVE_HOST_MARKERS):
+        return "access_sensitive"
+
+    return "normal"
+
+
+def _candidate_retry_payload(
+    candidate: dict,
+    *,
+    resume_action: str | None = None,
+    existing_item_key: str | None = None,
+) -> dict:
+    return {
+        "candidate_index": candidate.get("_index"),
+        "identifier": candidate.get("identifier"),
+        "doi": candidate.get("source_doi") or candidate.get("doi"),
+        "arxiv_id": candidate.get("arxiv_id"),
+        "landing_page_url": candidate.get("landing_page_url"),
+        "url": candidate.get("url"),
+        "title": candidate.get("title"),
+        "publisher": candidate.get("publisher"),
+        "needs_manual_verification": candidate.get("needs_manual_verification"),
+        "existing_item_key": existing_item_key,
+        "resume_action": resume_action,
+    }
+
+
+def _canonical_candidate_key(candidate: dict) -> str:
+    for key in (
+        candidate.get("source_doi"),
+        candidate.get("doi"),
+        candidate.get("arxiv_id"),
+        candidate.get("landing_page_url"),
+        candidate.get("url"),
+        candidate.get("identifier"),
+    ):
+        if key:
+            return str(key).lower().strip()
+    return f"candidate-index:{candidate.get('_index')}"

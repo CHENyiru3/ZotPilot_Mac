@@ -220,6 +220,99 @@ def test_save_stage_anti_bot_does_not_halt_remaining_items(ingest_env, monkeypat
     }]
 
 
+def test_manual_completion_required_returns_retry_payload(ingest_env, monkeypatch):
+    monkeypatch.setattr(
+        ingestion_tool.connector,
+        "check_connector_availability",
+        lambda *args, **kwargs: (True, None, None),
+    )
+    monkeypatch.setattr(
+        ingestion_tool.connector,
+        "run_preflight_check",
+        lambda candidates, *args, **kwargs: (list(candidates), [], None, []),
+    )
+
+    def _save_single(url, doi, title, **kwargs):
+        return {
+            "status": "__manual_completion_required__",
+            "method": "connector",
+            "item_key": "KEY-EXISTING",
+            "has_pdf": False,
+            "title": title or "",
+            "resume_action": "reconcile_existing",
+            "timeout_stage": "save_confirmation",
+            "action_required": None,
+            "warning": None,
+        }
+
+    monkeypatch.setattr(ingestion_tool.connector, "save_single_and_verify", _save_single)
+
+    result = ingestion_tool.ingest_by_identifiers(
+        candidates=[
+            IngestCandidate(
+                doi="10.1016/a",
+                title="A",
+                publisher="Elsevier BV",
+                needs_manual_verification=True,
+                is_oa_published=False,
+            ),
+            IngestCandidate(
+                doi="10.1000/b",
+                title="B",
+                is_oa_published=True,
+            ),
+        ]
+    )
+
+    assert result["results"] == []
+    assert result["completed_count"] == 0
+    assert result["action_required"][0]["type"] == "manual_completion_required"
+    payload = result["action_required"][0]["retry_payload"]
+    assert [row["candidate_index"] for row in payload] == [0, 1]
+    assert payload[0]["resume_action"] == "reconcile_existing"
+    assert payload[0]["existing_item_key"] == "KEY-EXISTING"
+
+
+def test_only_one_manual_verification_candidate_runs_per_call(ingest_env, monkeypatch):
+    monkeypatch.setattr(
+        ingestion_tool.connector,
+        "check_connector_availability",
+        lambda *args, **kwargs: (True, None, None),
+    )
+    monkeypatch.setattr(
+        ingestion_tool.connector,
+        "run_preflight_check",
+        lambda candidates, *args, **kwargs: (list(candidates), [], None, []),
+    )
+    seen = []
+
+    def _save_single(url, doi, title, **kwargs):
+        seen.append(doi)
+        return {
+            "status": "saved_metadata_only",
+            "method": "connector",
+            "item_key": f"KEY-{doi}",
+            "has_pdf": False,
+            "title": title or "",
+            "action_required": None,
+            "warning": None,
+        }
+
+    monkeypatch.setattr(ingestion_tool.connector, "save_single_and_verify", _save_single)
+
+    result = ingestion_tool.ingest_by_identifiers(
+        candidates=[
+            IngestCandidate(doi="10.1016/a", title="A", publisher="Elsevier BV", is_oa_published=False),
+            IngestCandidate(doi="10.1016/b", title="B", publisher="Elsevier BV", is_oa_published=False),
+            IngestCandidate(doi="10.1000/c", title="C", is_oa_published=True),
+        ]
+    )
+
+    assert seen == ["10.1016/a", "10.1000/c"]
+    assert result["action_required"][0]["type"] == "manual_completion_required"
+    assert [row["candidate_index"] for row in result["action_required"][0]["retry_payload"]] == [1]
+
+
 def test_candidate_accepts_minimal_doi():
     candidate = IngestCandidate(doi="10.1/x")
     assert candidate.doi == "10.1/x"
@@ -255,6 +348,10 @@ def test_candidate_extras_ignored():
         "is_oa_published",
         "title",
         "openalex_id",
+        "publisher",
+        "needs_manual_verification",
+        "existing_item_key",
+        "resume_action",
     }
 
 
@@ -268,6 +365,10 @@ def test_candidate_empty_is_valid_at_pydantic_layer():
         "is_oa_published": False,
         "title": None,
         "openalex_id": None,
+        "publisher": None,
+        "needs_manual_verification": None,
+        "existing_item_key": None,
+        "resume_action": None,
     }
 
 

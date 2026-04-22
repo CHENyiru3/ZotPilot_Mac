@@ -1008,7 +1008,8 @@ def cmd_update(args):
                 if getattr(args, "re_register", False) or deployment["drift_state"] != "clean":
                     results = register_runtime(platforms=None)
                     if results:
-                        print("Client registrations refreshed.")
+                        if not _report_registration_results(results, context="Client registrations refreshed"):
+                            errors.append("client registration failed")
             except Exception as exc:
                 print(f"Runtime reconcile failed: {exc}", file=sys.stderr)
                 errors.append("runtime reconcile failed")
@@ -1037,7 +1038,11 @@ def cmd_sync(args):
 
         results = register_runtime(platforms=None)
         if results:
-            print("Runtime synchronized. Restart your AI agent to load the new config and skills.")
+            if _report_registration_results(results, context="Runtime synchronized"):
+                print("Restart your AI agent to load the new config and skills.")
+            else:
+                print("Runtime sync incomplete. Fix the failed platforms and retry.", file=sys.stderr)
+                return 1
         else:
             print("Runtime already in sync.")
         return 0
@@ -1074,8 +1079,20 @@ def cmd_mcp_serve(_args):
     return 0
 
 
+def _report_registration_results(results: dict[str, bool], *, context: str) -> bool:
+    """Print a concise multi-platform registration summary."""
+    succeeded = [plat for plat, ok in results.items() if ok]
+    failed = [plat for plat, ok in results.items() if not ok]
+
+    if succeeded:
+        print(f"{context}: {', '.join(succeeded)}")
+    if failed:
+        print(f"Failed: {', '.join(failed)}", file=sys.stderr)
+    return not failed
+
+
 def cmd_register(args):
-    """Register ZotPilot MCP server on AI agent platforms.
+    """Install/register ZotPilot MCP server on AI agent platforms.
 
     The `register()` call handles both skill file deployment and MCP server
     registration as a single flow — the two are deliberately decoupled at the
@@ -1083,12 +1100,6 @@ def cmd_register(args):
     add command fails on that platform.
     """
     from ._platforms import register
-
-    dev_source_dir = None
-    dev_arg = getattr(args, "dev", None)
-    if dev_arg is not None:
-        from pathlib import Path
-        dev_source_dir = Path(dev_arg).resolve() if dev_arg else Path(__file__).parent.parent.parent.resolve()
 
     config_path = _default_config_path()
     try:
@@ -1104,9 +1115,10 @@ def cmd_register(args):
 
     results = register(
         platforms=args.platforms,
-        dev_source_dir=dev_source_dir,
     )
-    return 0 if results and all(results.values()) else 1
+    if not results:
+        return 1
+    return 0 if _report_registration_results(results, context="Configured") else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1222,20 +1234,18 @@ def main(argv: list[str] | None = None) -> int:
     mcp_serve = mcp_sub.add_parser("serve", help="Run the ZotPilot MCP server")
     mcp_serve.set_defaults(func=cmd_mcp_serve)
 
-    # register
-    sub_register = subparsers.add_parser("register", help="Register ZotPilot MCP server")
+    # register / install
+    sub_register = subparsers.add_parser(
+        "register",
+        aliases=["install"],
+        help="Install and register ZotPilot on detected AI agent platforms",
+    )
     sub_register.add_argument("--platform", action="append", dest="platforms",
                               help="Target platform (repeatable). Auto-detects if omitted.")
     sub_register.add_argument("--gemini-key", dest="gemini_key")
     sub_register.add_argument("--dashscope-key", dest="dashscope_key")
     sub_register.add_argument("--zotero-api-key", dest="zotero_api_key")
     sub_register.add_argument("--zotero-user-id", dest="zotero_user_id")
-    sub_register.add_argument(
-        "--dev", nargs="?", const="", metavar="SOURCE_DIR",
-        help="Register using source directory (default: auto-detect repo root). "
-             "Use for development: runs 'uv run --directory <dir> zotpilot' so "
-             "source code changes take effect after MCP server restart.",
-    )
     sub_register.set_defaults(func=cmd_register)
 
     args = parser.parse_args(argv)

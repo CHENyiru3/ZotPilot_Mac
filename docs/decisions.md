@@ -161,7 +161,22 @@ tab、可能在 Zotero 留快照/错误条目）。
 
 **方案**：为 `zotpilot register` 新增 `--dev [SOURCE_DIR]` flag，写入 `uv run --directory <repo> zotpilot` 代替二进制路径。`--dev` 无参数时自动探测 repo 根目录。不加 `--dev` 时行为与之前完全一致，不影响普通用户。变更范围：`_platforms.py`（`DesiredRuntime.source_dir`、6 个注册函数、`reconcile_runtime`、`register`）和 `cli.py`（argparse + `cmd_register`）。
 
-**影响**：开发循环简化为"改源码 → `/mcp` 重启 → 立即生效"，无需重新安装。仅本地 dev 环境使用，PyPI 发布包行为不变。同时将 `.claude.json` 中的注册命令从安装二进制修正为 `uv run --directory /Users/zxd/ZotPilot zotpilot`。
+**影响**：开发循环简化为"改源码 → `/mcp` 重启 → 立即生效"，无需重新安装。该能力保留在实现内部，用于维护者和自动化，但不再作为面向终端用户的公开 CLI 契约。
+
+---
+
+## 2026-04-22 | 多平台安装/注册入口收敛到稳定用户路径
+
+**背景**：`--dev` 虽然解决了源码态开发循环问题，但它把运行时选择策略暴露成了终端用户 CLI 契约，和发布用户的安装/注册模型混在一起。同时，真实环境里还暴露出两个问题：Claude Code 的 stdio 注册命令缺少 `--` 分隔符，`update` / `sync` 在部分平台注册失败时会假成功。
+
+**决策**：
+- 用户面入口统一为 `zotpilot setup`（首次配置）和 `zotpilot install` / `zotpilot register`（重注册、修 drift）
+- `install` 作为 `register` 的显式别名，强调“部署 skills + 注册 MCP”是一体化动作
+- 不再公开 `register --dev`；源码态运行时选择保留为内部实现能力，不作为文档化 CLI 契约
+- 修正 Claude Code 注册命令为 `claude mcp add ... -- <command>`
+- `update` / `sync` 在部分平台失败时返回非零，并列出失败平台
+
+**影响**：终端用户的安装/注册模型更接近单入口、多平台自动接线的产品心智；维护者仍可保留源码态能力，但不再增加公开 CLI 表面的复杂度。
 
 ---
 

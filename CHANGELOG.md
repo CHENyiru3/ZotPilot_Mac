@@ -24,7 +24,7 @@ zotpilot update --dry-run    # 预览操作，不执行
 - **索引可靠性大修**（Issue #7）：增量索引、中断恢复、不再丢失已完成的索引数据
 
 ### Added
-- **`zotpilot register --dev [SOURCE_DIR]`** — 开发者模式注册：MCP server 直接跑源码（`uv run --directory <repo> zotpilot`），改代码后只需重启 MCP 连接无需重新安装
+- **`zotpilot install` 命令别名** — 与 `zotpilot register` 等价，用作统一的多平台安装/注册入口
 - **Connector 浏览器扩展** — 基于 Zotero Connector fork，加入 AI agent 调用路径。Agent 通过本地 bridge 触发浏览器保存，带机构权限下载 PDF。从 [GitHub Release](https://github.com/xunhe730/ZotPilot/releases) 下载 zip，加载到 Chrome 即可
 - **`ingest_by_identifiers` 工具** — 给 DOI / arXiv ID / URL 即可入库，自动去重、验证 PDF、失败时走 API fallback。返回每篇论文的最终状态（`saved_with_pdf` / `saved_metadata_only` / `duplicate` / `failed`）
 - **`profile_library` 工具** — 分析文献库的主题分布、期刊结构、时间跨度，帮助 agent 理解你的研究方向
@@ -36,6 +36,9 @@ zotpilot update --dry-run    # 预览操作，不执行
 - **入库即时验证** — Connector 保存后通过本地 Zotero API 验证 itemType + title，自动识别并清理出版商 translator 产生的网页快照垃圾 item，失败时走 DOI API fallback
 
 ### Changed
+- **安装/注册用户入口收敛** — 推荐入口统一为 `zotpilot setup`（首次配置）和 `zotpilot install` / `zotpilot register`（重注册 / 修复 drift），不再向终端用户暴露 `register --dev`
+- **多平台注册失败传播** — `update` / `sync` 遇到部分平台注册失败时会显式失败并列出平台，不再假成功
+- **Claude Code 注册语法修正** — stdio 注册改为 `claude mcp add ... -- <command>`，兼容 `uv run --directory ...`
 - **AGENTS.md / CLAUDE.md** — 同步到 v0.5.0 三 Agent 协作模型（Claude / OpenCode / Codex），更新架构描述和文档维护规则
 - **MCP 工具从 33 个精简到 18 个**：
   - `search_papers` 新增 `section_type` 参数，可搜表格和图表（替代 `search_tables` / `search_figures`）
@@ -78,7 +81,7 @@ zotpilot update --dry-run    # 预览操作，不执行
 
 ```bash
 pip install --upgrade zotpilot     # 或 uv tool upgrade zotpilot
-zotpilot register                  # 必须：工具签名变了，需重新注册
+zotpilot install                   # 必须：工具签名变了，需重新注册
 ```
 
 Connector 浏览器扩展是 Research 工作流的核心组件，从 [GitHub Release](https://github.com/xunhe730/ZotPilot/releases) 下载安装到 Chrome。没有 Connector，入库功能降级为 metadata-only（无 PDF），纯 URL 入库会失败。搜索、引用、整理功能不受影响。

@@ -1123,6 +1123,7 @@ def save_single_and_verify(
     writer_lock,
     _logger=None,
     _retry_count: int = 0,
+    risk_class: str = "normal",
 ) -> dict:
     """逐条 save + 即时验证。v0.5.0 入库的核心函数。
 
@@ -1171,7 +1172,13 @@ def save_single_and_verify(
     assert request_id is not None
 
     # Step 2: Poll result
-    save_result = poll_single_save_result(bridge_url, request_id, timeout_s=60.0)
+    if risk_class == "manual_verification":
+        save_timeout_s = 180.0
+    elif risk_class == "access_sensitive":
+        save_timeout_s = 90.0
+    else:
+        save_timeout_s = 45.0
+    save_result = poll_single_save_result(bridge_url, request_id, timeout_s=save_timeout_s)
 
     # Step 2.5: Timeout recovery.
     # Slow publishers (AIP, Cloudflare-protected sites, JS-heavy pages) can
@@ -1193,6 +1200,18 @@ def save_single_and_verify(
                 "Recovered timed-out Connector save: item_key=%s for %s",
                 discovered_key, url,
             )
+            if risk_class in {"manual_verification", "access_sensitive"}:
+                return {
+                    "status": "__manual_completion_required__",
+                    "method": "connector",
+                    "item_key": discovered_key,
+                    "has_pdf": False,
+                    "title": title or "",
+                    "action_required": None,
+                    "warning": None,
+                    "resume_action": "reconcile_existing",
+                    "timeout_stage": "save_confirmation",
+                }
             save_result = {"success": True, "item_key": discovered_key}
 
     if not save_result.get("success"):
@@ -1214,6 +1233,18 @@ def save_single_and_verify(
         # (5s delay + 15s wait). If still no_translator, one more attempt with a
         # fresh tab — DNS/TLS cache is now warm and JS hydration should be faster.
         if error_code == "no_translator" and _retry_count == 0:
+            if risk_class != "normal":
+                return {
+                    "status": "failed",
+                    "method": "connector",
+                    "error": error_text,
+                    "error_code": error_code,
+                    "item_key": None,
+                    "has_pdf": False,
+                    "title": title or "",
+                    "action_required": None,
+                    "warning": None,
+                }
             _logger.info(
                 "no_translator after Connector retry for %s — retrying with fresh tab",
                 url,
@@ -1225,7 +1256,19 @@ def save_single_and_verify(
                 writer_lock=writer_lock, _logger=_logger,
                 _retry_count=1,
             )
-        if doi:
+        if risk_class == "manual_verification":
+            return {
+                "status": "__manual_completion_required__",
+                "method": "connector",
+                "item_key": None,
+                "has_pdf": False,
+                "title": title or "",
+                "action_required": None,
+                "warning": None,
+                "resume_action": "retry_save",
+                "timeout_stage": "save_confirmation",
+            }
+        if doi and risk_class == "normal":
             _logger.info("Connector failed for %s, trying DOI API fallback", url)
             return _doi_api_fallback(
                 doi, title, arxiv_id=arxiv_id,
@@ -1243,7 +1286,19 @@ def save_single_and_verify(
 
     if not item_key:
         _logger.warning("Connector success but no item_key for %s", url)
-        if doi:
+        if risk_class in {"manual_verification", "access_sensitive"}:
+            return {
+                "status": "__manual_completion_required__",
+                "method": "connector",
+                "item_key": None,
+                "has_pdf": False,
+                "title": title or "",
+                "action_required": None,
+                "warning": None,
+                "resume_action": "retry_save",
+                "timeout_stage": "save_confirmation",
+            }
+        if doi and risk_class == "normal":
             return _doi_api_fallback(
                 doi, title, collection_key=collection_key, tags=tags,
                 get_writer=get_writer, writer_lock=writer_lock, _logger=_logger,
@@ -1263,6 +1318,18 @@ def save_single_and_verify(
         # a generic webpage save.  Retry with a fresh tab (warm cache) before
         # falling back to the API-only path which loses Connector PDF access.
         if "webpage" in reason and _retry_count == 0:
+            if risk_class != "normal":
+                return {
+                    "status": "failed",
+                    "method": "connector",
+                    "error": f"invalid_item:{reason}",
+                    "error_code": "invalid_item",
+                    "item_key": item_key,
+                    "has_pdf": False,
+                    "title": title or "",
+                    "action_required": None,
+                    "warning": None,
+                }
             _logger.info(
                 "Connector saved webpage for %s (item %s) — retrying with fresh tab",
                 url, item_key,
@@ -1287,7 +1354,7 @@ def save_single_and_verify(
         if not deleted:
             delete_warn = f"Failed to delete invalid item {item_key}. Manual cleanup may be needed."
             _logger.warning(delete_warn)
-        if doi:
+        if doi and risk_class == "normal":
             return _doi_api_fallback(
                 doi, title, arxiv_id=arxiv_id,
                 collection_key=collection_key, tags=tags,
@@ -1348,11 +1415,11 @@ def save_single_and_verify(
     if connector_pdf_confirmed:
         pdf_poll_timeout = 10.0
     elif connector_pdf_failed:
-        pdf_poll_timeout = 30.0
-    elif needs_long_pdf_wait(url, doi):
-        pdf_poll_timeout = 300.0
+        pdf_poll_timeout = 20.0 if risk_class == "normal" else 15.0
+    elif risk_class in {"manual_verification", "access_sensitive"}:
+        pdf_poll_timeout = 15.0
     else:
-        pdf_poll_timeout = 45.0
+        pdf_poll_timeout = 10.0
     pdf_status = check_pdf_status(
         item_key, get_writer=get_writer,
         timeout_s=pdf_poll_timeout,
@@ -1399,6 +1466,19 @@ def save_single_and_verify(
         except Exception as exc:
             _logger.debug("OA PDF fallback failed for %s: %s", item_key, exc)
             attach_status = "attach_failed"
+
+    if risk_class in {"manual_verification", "access_sensitive"} and pdf_status != "attached":
+        return {
+            "status": "__manual_completion_required__",
+            "method": "connector",
+            "item_key": item_key,
+            "has_pdf": False,
+            "title": real_title,
+            "action_required": None,
+            "warning": None,
+            "resume_action": "reconcile_existing",
+            "timeout_stage": "manual_completion",
+        }
 
     status = "saved_with_pdf" if pdf_status == "attached" else "saved_metadata_only"
     if pdf_status == "attached":
