@@ -52,6 +52,8 @@ zotpilot setup                 # 交互式配置 + 自动部署 skills + 注册 
 
 **前置**：[Zotero 8](https://www.zotero.org/download/)（已安装并至少启动过一次）· Python 3.10+ · 支持的 AI Agent 客户端（Claude Code / Codex / OpenCode）。入库工作流还需要 [Connector 浏览器扩展](#安装详情)。
 
+Codex 当前优先使用 `~/.agents/skills` 存放用户 skill，同时兼容旧的 `$CODEX_HOME/skills`（默认通常是 `~/.codex/skills`）。如果你的 Codex 桌面环境显示的是 `~/.codex/skills`，这是兼容路径，不是 ZotPilot 特例。
+
 ---
 
 ## 能做什么

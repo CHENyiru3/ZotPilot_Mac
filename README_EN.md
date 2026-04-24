@@ -52,6 +52,8 @@ Then tell your agent "search my library for X" or "survey recent papers on Y". I
 
 **Prerequisites**: [Zotero 8](https://www.zotero.org/download/) installed and launched at least once · Python 3.10+ · a supported AI agent client (Claude Code / Codex / OpenCode). The ingestion workflow also needs the [Connector browser extension](#install-details).
 
+Current Codex builds prefer `~/.agents/skills` for user-installed skills, while still keeping the old `$CODEX_HOME/skills` location for backward compatibility. When `CODEX_HOME` is unset, that legacy path is usually `~/.codex/skills`.
+
 ---
 
 ## What it does
