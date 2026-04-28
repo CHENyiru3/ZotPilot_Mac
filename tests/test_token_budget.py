@@ -102,9 +102,11 @@ class TestSearchContracts:
         retriever.search.side_effect = search_side_effect
         reranker.rerank.side_effect = lambda items, *args, **kwargs: items
 
+        store = MagicMock()
         with (
             patch("zotpilot.tools.search._get_retriever", return_value=retriever),
             patch("zotpilot.tools.search._get_reranker", return_value=reranker),
+            patch("zotpilot.tools.search._get_store_optional", return_value=store),
             patch("zotpilot.tools.search._get_config", return_value=config),
             patch(
                 "zotpilot.tools.search._get_zotero",
@@ -144,9 +146,11 @@ class TestSearchContracts:
         retriever.search.return_value = results
         reranker.rerank.return_value = results
 
+        store = MagicMock()
         with (
             patch("zotpilot.tools.search._get_retriever", return_value=retriever),
             patch("zotpilot.tools.search._get_reranker", return_value=reranker),
+            patch("zotpilot.tools.search._get_store_optional", return_value=store),
             patch("zotpilot.tools.search._get_config", return_value=config),
             patch(
                 "zotpilot.tools.search._get_zotero",
@@ -245,6 +249,7 @@ class TestSearchContracts:
 
         with (
             patch("zotpilot.tools.search._get_store", return_value=store),
+            patch("zotpilot.tools.search._get_store_optional", return_value=store),
             patch("zotpilot.tools.search._get_reranker", return_value=reranker),
             patch("zotpilot.tools.search._get_config", return_value=config),
             patch(

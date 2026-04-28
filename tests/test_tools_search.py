@@ -54,6 +54,7 @@ def mock_singletons():
     with patch("zotpilot.tools.search._get_retriever", return_value=retriever), \
          patch("zotpilot.tools.search._get_reranker", return_value=reranker), \
          patch("zotpilot.tools.search._get_store", return_value=store), \
+         patch("zotpilot.tools.search._get_store_optional", return_value=store), \
          patch("zotpilot.tools.search._get_config", return_value=config), \
          patch("zotpilot.tools.search._get_zotero") as mock_zotero:
         mock_zotero.return_value.get_all_items_with_pdfs.return_value = [

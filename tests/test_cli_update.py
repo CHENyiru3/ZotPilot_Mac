@@ -30,14 +30,11 @@ def _make_args(**kwargs):
     return argparse.Namespace(**defaults)
 
 
-def _make_skill_dir(tmp_path: Path, name: str = "zotpilot") -> Path:
+def _make_skill_dir(tmp_path: Path, name: str = "ztp-research") -> Path:
     """Create a minimal valid skill directory structure."""
     skill_dir = tmp_path / name
     skill_dir.mkdir(exist_ok=True)
-    (skill_dir / ".git").mkdir(exist_ok=True)
-    (skill_dir / "scripts").mkdir(exist_ok=True)
-    (skill_dir / "scripts" / "run.py").touch()
-    (skill_dir / "SKILL.md").write_text("---\nname: zotpilot\n---\n")
+    (skill_dir / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
     return skill_dir
 
 
@@ -238,7 +235,7 @@ class TestGetSkillDirs:
         """Derives dirs from PLATFORMS, not a hardcoded list."""
         fake_skills = tmp_path / "skills"
         fake_skills.mkdir()
-        skill_path = fake_skills / "zotpilot"
+        skill_path = fake_skills / "ztp-research"
         skill_path.mkdir()
         fake_platforms = {
             "test-platform": {"tier": 1, "skills_dir": str(fake_skills)},
@@ -258,9 +255,9 @@ class TestGetSkillDirs:
         a_skills.mkdir()
         b_skills.mkdir()
 
-        real_skill = a_skills / "zotpilot"
+        real_skill = a_skills / "ztp-research"
         real_skill.mkdir()
-        sym_skill = b_skills / "zotpilot"
+        sym_skill = b_skills / "ztp-research"
         os.symlink(real_skill, sym_skill)
 
         fake_platforms = {
@@ -286,7 +283,7 @@ class TestGetSkillDirs:
         """Broken symlink included in results with is_broken_symlink=True."""
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
-        zotpilot_sym = skills_dir / "zotpilot"
+        zotpilot_sym = skills_dir / "ztp-research"
         os.symlink(tmp_path / "nonexistent_target", zotpilot_sym)
 
         fake_platforms = {
@@ -322,7 +319,6 @@ class TestDeploySkills:
         source = tmp_path / "source"
         skills_root.mkdir()
         source.mkdir()
-        (source / "SKILL.md").write_text("---\nname: zotpilot\n---\n")
         (source / "ztp-research.md").write_text("---\nname: ztp-research\n---\n")
         (source / "ztp-setup.md").write_text("---\nname: ztp-setup\n---\n")
 
@@ -343,10 +339,9 @@ class TestDeploySkills:
             self._restore_platforms(orig)
 
         assert result == {"codex": True}
-        assert (skills_root / "zotpilot" / "SKILL.md").exists()
         assert (skills_root / "ztp-research" / "SKILL.md").exists()
         assert (skills_root / "ztp-setup" / "SKILL.md").exists()
-        assert not (skills_root / "zotpilot" / "ztp-research.md").exists()
+        assert not (skills_root / "ztp-research" / "ztp-setup.md").exists()
 
     def test_redeploys_when_skill_content_changes_without_version_bump(self, tmp_path):
         skills_root = tmp_path / "skills"

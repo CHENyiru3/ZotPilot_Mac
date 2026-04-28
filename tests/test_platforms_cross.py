@@ -240,7 +240,7 @@ class TestSkillDeploymentCrossPlatform:
     def test_deploy_mac_claude(self, tmp_path, monkeypatch):
         sr = tmp_path/".claude"/"skills"; sr.mkdir(parents=True)
         src = tmp_path/"source"; src.mkdir()
-        (src/"SKILL.md").write_text("---\nname: zotpilot\n---\n")
+        (src/"ztp-research.md").write_text("---\nname: ztp-research\n---\n")
         monkeypatch.setenv("HOME", str(tmp_path))
         o = self._pp({"claude-code":{"tier":1,"binary":"claude","label":"CC","skills_dir":str(sr)}})
         try:
@@ -249,4 +249,4 @@ class TestSkillDeploymentCrossPlatform:
                 from zotpilot._platforms import deploy_skills
                 assert deploy_skills(platforms=["claude-code"]) == {"claude-code":True}
         finally: self._rp(o)
-        assert (sr/"zotpilot"/"SKILL.md").exists()
+        assert (sr/"ztp-research"/"SKILL.md").exists()
