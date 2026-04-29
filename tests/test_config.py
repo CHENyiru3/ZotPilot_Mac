@@ -74,6 +74,22 @@ class TestConfigLoadFromFile:
         assert cfg.vision_provider == "dashscope"
         assert cfg.vision_model == "qwen3-vl-flash"
 
+    def test_dashscope_vision_provider_replaces_stale_anthropic_default_model(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        config_file = tmp_path / "config.json"
+        config_file.write_text(
+            json.dumps({
+                "embedding_provider": "local",
+                "vision_provider": "dashscope",
+                "vision_model": "claude-haiku-4-5-20251001",
+            })
+        )
+
+        cfg = Config.load(path=config_file)
+
+        assert cfg.vision_provider == "dashscope"
+        assert cfg.vision_model == "qwen3-vl-flash"
+
     def test_loads_dashscope_native_embedding_endpoint(self, tmp_path, monkeypatch):
         _use_local_secrets(monkeypatch, tmp_path)
         config_file = tmp_path / "config.json"
@@ -218,6 +234,20 @@ class TestConfigValidation:
         errors = cfg.validate()
 
         assert any("Invalid vision_provider" in e for e in errors)
+
+    def test_validate_vision_model_provider_mismatch(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        cfg = Config.load(path=tmp_path / "nonexistent.json")
+        cfg.zotero_data_dir = tmp_path
+        (tmp_path / "zotero.sqlite").touch()
+        cfg.embedding_provider = "local"
+        cfg.vision_provider = "dashscope"
+        cfg.vision_model = "claude-haiku-4-5-20251001"
+        cfg.dashscope_api_key = "dashscope"
+
+        errors = cfg.validate()
+
+        assert any("Invalid vision_model" in e for e in errors)
 
     def test_validate_invalid_dashscope_embedding_endpoint(self, tmp_path, monkeypatch):
         _use_local_secrets(monkeypatch, tmp_path)

@@ -9,6 +9,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+ANTHROPIC_DEFAULT_VISION_MODEL = "claude-haiku-4-5-20251001"
+DASHSCOPE_DEFAULT_VISION_MODEL = "qwen3-vl-flash"
+
 
 def _default_config_dir() -> Path:
     """Platform-aware config directory."""
@@ -120,7 +123,16 @@ class Config:
         default_model, default_dims = model_defaults.get(provider, ("gemini-embedding-001", 768))
 
         vision_provider = data.get("vision_provider", "anthropic")
-        default_vision_model = "qwen3-vl-flash" if vision_provider == "dashscope" else "claude-haiku-4-5-20251001"
+        default_vision_model = (
+            DASHSCOPE_DEFAULT_VISION_MODEL
+            if vision_provider == "dashscope"
+            else ANTHROPIC_DEFAULT_VISION_MODEL
+        )
+        vision_model = data.get("vision_model", default_vision_model)
+        if vision_provider == "dashscope" and vision_model == ANTHROPIC_DEFAULT_VISION_MODEL:
+            vision_model = DASHSCOPE_DEFAULT_VISION_MODEL
+        elif vision_provider == "anthropic" and vision_model == DASHSCOPE_DEFAULT_VISION_MODEL:
+            vision_model = ANTHROPIC_DEFAULT_VISION_MODEL
 
         return cls(
             zotero_data_dir=Path(data.get("zotero_data_dir", "~/Zotero")).expanduser(),
@@ -146,7 +158,7 @@ class Config:
             openalex_email=data.get("openalex_email"),
             vision_enabled=data.get("vision_enabled", True),
             vision_provider=vision_provider,
-            vision_model=data.get("vision_model", default_vision_model),
+            vision_model=vision_model,
             anthropic_api_key=data.get("anthropic_api_key"),
             vision_max_tables_per_run=data.get("vision_max_tables_per_run"),
             vision_max_cost_usd=data.get("vision_max_cost_usd"),
@@ -250,5 +262,9 @@ class Config:
             errors.append("Invalid vision_provider: must be 'anthropic' or 'dashscope'")
         elif self.vision_enabled and self.vision_provider == "dashscope" and not self.dashscope_api_key:
             errors.append("DASHSCOPE_API_KEY not set (required for vision_provider='dashscope')")
+        if self.vision_provider == "dashscope" and self.vision_model.startswith("claude-"):
+            errors.append("Invalid vision_model for vision_provider='dashscope'")
+        elif self.vision_provider == "anthropic" and self.vision_model.startswith("qwen"):
+            errors.append("Invalid vision_model for vision_provider='anthropic'")
 
         return errors
