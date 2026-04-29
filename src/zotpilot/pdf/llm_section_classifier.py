@@ -186,7 +186,8 @@ class DeepSeekSectionClassifier:
                 retry_payload.pop("thinking", None)
                 response = client.post(url, headers=headers, json=retry_payload)
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            return data if isinstance(data, dict) else {}
 
     def _parse_decisions(self, parsed: dict[str, Any]) -> list[SectionLLMDecision]:
         raw_sections = parsed.get("sections", [])
@@ -201,7 +202,10 @@ class DeepSeekSectionClassifier:
             if label not in VALID_SECTION_LABELS:
                 continue
             try:
-                section_id = int(item.get("id"))
+                raw_id = item.get("id")
+                if raw_id is None:
+                    continue
+                section_id = int(raw_id)
                 confidence = float(item.get("confidence", 0))
             except (TypeError, ValueError):
                 continue
