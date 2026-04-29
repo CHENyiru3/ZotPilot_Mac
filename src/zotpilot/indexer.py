@@ -43,7 +43,12 @@ def _config_hash(config: Config) -> str:
         f"{config.ocr_language}:"
         f"{getattr(config, 'vision_enabled', True)}:"
         f"{getattr(config, 'vision_provider', 'anthropic')}:"
-        f"{getattr(config, 'vision_model', '')}"
+        f"{getattr(config, 'vision_model', '')}:"
+        f"{getattr(config, 'section_llm_enabled', False)}:"
+        f"{getattr(config, 'section_llm_provider', 'deepseek')}:"
+        f"{getattr(config, 'section_llm_model', 'deepseek-v4-pro')}:"
+        f"{getattr(config, 'section_llm_unknown_threshold', 0.15)}:"
+        f"{getattr(config, 'section_llm_max_spans', 24)}"
     )
     return hashlib.sha256(data.encode()).hexdigest()[:16]
 
@@ -102,6 +107,17 @@ class Indexer:
             )
         else:
             self._vision_api = None
+        self._section_llm = None
+        if getattr(config, "section_llm_enabled", False) is True and getattr(config, "deepseek_api_key", None):
+            from .pdf.llm_section_classifier import DeepSeekSectionClassifier
+            self._section_llm = DeepSeekSectionClassifier(
+                api_key=config.deepseek_api_key,
+                model=config.section_llm_model,
+                base_url=config.section_llm_base_url,
+                timeout=config.section_llm_timeout,
+                max_spans=config.section_llm_max_spans,
+                unknown_threshold=config.section_llm_unknown_threshold,
+            )
 
     # ------------------------------------------------------------------
     # Empty-doc tracking (keyed by item_key -> pdf file hash)
@@ -660,6 +676,8 @@ class Indexer:
         if not extraction.pages:
             return 0, 0, "PDF has 0 pages (corrupt or unreadable)", extraction.stats, "F"
 
+        self._refine_sections(item, extraction)
+
         total_chars = sum(len(p.markdown) for p in extraction.pages)
         quality_grade = extraction.quality_grade
 
@@ -775,6 +793,27 @@ class Indexer:
 
         logger.debug(f"Indexed {item.item_key}: {len(chunks)} chunks, {n_tables} tables, {n_figures} figures, quality {quality_grade}")  # noqa: E501
         return len(chunks), n_tables, "", extraction.stats, quality_grade
+
+    def _refine_sections(self, item: ZoteroItem, extraction) -> None:
+        """Optionally refine ambiguous section labels before chunking."""
+        if self._section_llm is None:
+            return
+
+        original = extraction.sections
+        refined = self._section_llm.refine_sections(
+            full_markdown=extraction.full_markdown,
+            sections=original,
+            title=item.title,
+            publication=item.publication,
+            year=item.year,
+        )
+        if refined is original:
+            return
+
+        extraction.sections = refined
+        if extraction.completeness is not None:
+            extraction.completeness.sections_identified = sum(1 for span in refined if span.label != "unknown")
+            extraction.completeness.unknown_sections = sum(1 for span in refined if span.label == "unknown")
 
     def index_document(self, item: ZoteroItem) -> int:
         """Index a single document. Returns number of chunks created."""

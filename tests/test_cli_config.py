@@ -16,6 +16,7 @@ def _use_local_secrets(monkeypatch, tmp_path: Path) -> Path:
         "GEMINI_API_KEY",
         "DASHSCOPE_API_KEY",
         "ANTHROPIC_API_KEY",
+        "DEEPSEEK_API_KEY",
         "ZOTERO_API_KEY",
         "ZOTERO_USER_ID",
         "OPENALEX_EMAIL",

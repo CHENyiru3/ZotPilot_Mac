@@ -81,6 +81,15 @@ class Config:
     zotero_library_type: str  # "user" or "group"
     # Semantic Scholar API key (optional, increases rate limit)
     semantic_scholar_api_key: str | None
+    # Optional LLM fallback for ambiguous section detection
+    deepseek_api_key: str | None = None
+    section_llm_enabled: bool = False
+    section_llm_provider: str = "deepseek"
+    section_llm_model: str = "deepseek-v4-pro"
+    section_llm_base_url: str = "https://api.deepseek.com"
+    section_llm_timeout: float = 30.0
+    section_llm_max_spans: int = 24
+    section_llm_unknown_threshold: float = 0.15
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "Config":
@@ -153,6 +162,14 @@ class Config:
             zotero_user_id=data.get("zotero_user_id"),
             zotero_library_type=data.get("zotero_library_type", "user"),
             semantic_scholar_api_key=data.get("semantic_scholar_api_key"),
+            deepseek_api_key=data.get("deepseek_api_key"),
+            section_llm_enabled=data.get("section_llm_enabled", False),
+            section_llm_provider=data.get("section_llm_provider", "deepseek"),
+            section_llm_model=data.get("section_llm_model", "deepseek-v4-pro"),
+            section_llm_base_url=data.get("section_llm_base_url", "https://api.deepseek.com"),
+            section_llm_timeout=data.get("section_llm_timeout", 30.0),
+            section_llm_max_spans=data.get("section_llm_max_spans", 24),
+            section_llm_unknown_threshold=data.get("section_llm_unknown_threshold", 0.15),
         )
 
     def save(self, path: Path | str | None = None) -> None:
@@ -198,6 +215,14 @@ class Config:
             "zotero_user_id": self.zotero_user_id,
             "zotero_library_type": self.zotero_library_type,
             "semantic_scholar_api_key": self.semantic_scholar_api_key,
+            "deepseek_api_key": self.deepseek_api_key,
+            "section_llm_enabled": self.section_llm_enabled,
+            "section_llm_provider": self.section_llm_provider,
+            "section_llm_model": self.section_llm_model,
+            "section_llm_base_url": self.section_llm_base_url,
+            "section_llm_timeout": self.section_llm_timeout,
+            "section_llm_max_spans": self.section_llm_max_spans,
+            "section_llm_unknown_threshold": self.section_llm_unknown_threshold,
         }
         data = {key: value for key, value in data.items() if value is not None}
 
@@ -244,5 +269,15 @@ class Config:
             errors.append("Invalid vision_provider: must be 'anthropic' or 'dashscope'")
         elif self.vision_enabled and self.vision_provider == "dashscope" and not self.dashscope_api_key:
             errors.append("DASHSCOPE_API_KEY not set (required for vision_provider='dashscope')")
+
+        if self.section_llm_enabled:
+            if self.section_llm_provider != "deepseek":
+                errors.append("Invalid section_llm_provider: must be 'deepseek'")
+            if not self.deepseek_api_key:
+                errors.append("DEEPSEEK_API_KEY not set (required for section_llm_enabled=true)")
+            if self.section_llm_max_spans < 1:
+                errors.append("section_llm_max_spans must be >= 1")
+            if not 0 <= self.section_llm_unknown_threshold <= 1:
+                errors.append("section_llm_unknown_threshold must be between 0 and 1")
 
         return errors

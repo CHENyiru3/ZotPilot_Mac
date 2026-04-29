@@ -16,6 +16,7 @@ def _use_local_secrets(monkeypatch, tmp_path: Path) -> None:
         "GEMINI_API_KEY",
         "DASHSCOPE_API_KEY",
         "ANTHROPIC_API_KEY",
+        "DEEPSEEK_API_KEY",
         "ZOTERO_API_KEY",
         "ZOTERO_USER_ID",
         "OPENALEX_EMAIL",
@@ -127,6 +128,17 @@ class TestRuntimeResolution:
         assert resolved.sources["gemini_api_key"] == "config"
         assert resolved.legacy_sources["gemini_api_key"] == "legacy-gemini"
 
+    def test_env_overrides_deepseek_key(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"embedding_provider": "local"}))
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "env-deepseek")
+
+        resolved = resolve_runtime_settings(config_file)
+
+        assert resolved.config.deepseek_api_key == "env-deepseek"
+        assert resolved.sources["deepseek_api_key"] == "env-override"
+
 
 class TestConfigSave:
     def test_save_persists_api_keys(self, tmp_path, monkeypatch):
@@ -202,3 +214,36 @@ class TestConfigValidation:
         errors = cfg.validate()
 
         assert any("Invalid vision_provider" in e for e in errors)
+
+    def test_validate_section_llm_requires_deepseek_key(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        zotero_dir = tmp_path / "Zotero"
+        zotero_dir.mkdir()
+        (zotero_dir / "zotero.sqlite").touch()
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "zotero_data_dir": str(zotero_dir),
+            "embedding_provider": "local",
+            "section_llm_enabled": True,
+        }))
+
+        cfg = Config.load(path=config_file)
+        errors = cfg.validate()
+
+        assert any("DEEPSEEK_API_KEY not set" in e for e in errors)
+
+    def test_validate_section_llm_numeric_bounds(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        cfg = Config.load(path=tmp_path / "nonexistent.json")
+        cfg.zotero_data_dir = tmp_path
+        (tmp_path / "zotero.sqlite").touch()
+        cfg.gemini_api_key = "set"
+        cfg.deepseek_api_key = "deepseek"
+        cfg.section_llm_enabled = True
+        cfg.section_llm_max_spans = 0
+        cfg.section_llm_unknown_threshold = 1.2
+
+        errors = cfg.validate()
+
+        assert any("section_llm_max_spans" in e for e in errors)
+        assert any("section_llm_unknown_threshold" in e for e in errors)

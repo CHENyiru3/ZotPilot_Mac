@@ -14,6 +14,7 @@ _ENV_TO_SECRET_FIELD = {
     "GEMINI_API_KEY": "gemini_api_key",
     "DASHSCOPE_API_KEY": "dashscope_api_key",
     "ANTHROPIC_API_KEY": "anthropic_api_key",
+    "DEEPSEEK_API_KEY": "deepseek_api_key",
     "ZOTERO_API_KEY": "zotero_api_key",
     "S2_API_KEY": "semantic_scholar_api_key",
 }

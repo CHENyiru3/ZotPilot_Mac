@@ -385,6 +385,90 @@ class TestVisionBudgetGuards:
 
         vision_cls.assert_called_once_with(api_key="dashscope-key", model="qwen3-vl-flash")
 
+    def test_section_llm_enabled_instantiates_deepseek_classifier(self, tmp_path):
+        from zotpilot.indexer import Indexer
+
+        config = MagicMock()
+        config.zotero_data_dir = Path("/fake")
+        config.chroma_db_path = tmp_path / "chroma"
+        config.chroma_db_path.mkdir()
+        config.chunk_size = 1000
+        config.chunk_overlap = 200
+        config.embedding_provider = "local"
+        config.embedding_dimensions = 384
+        config.embedding_model = "test"
+        config.ocr_language = "eng"
+        config.vision_enabled = False
+        config.vision_provider = "anthropic"
+        config.anthropic_api_key = None
+        config.section_llm_enabled = True
+        config.deepseek_api_key = "deepseek-key"
+        config.section_llm_model = "deepseek-v4-pro"
+        config.section_llm_base_url = "https://api.deepseek.com"
+        config.section_llm_timeout = 30.0
+        config.section_llm_max_spans = 12
+        config.section_llm_unknown_threshold = 0.2
+
+        import zotpilot.pdf.llm_section_classifier as llm_section_classifier
+
+        with patch("zotpilot.indexer.ZoteroClient"), \
+             patch("zotpilot.indexer.create_embedder"), \
+             patch("zotpilot.indexer.VectorStore"), \
+             patch("zotpilot.indexer.JournalRanker"), \
+             patch.object(llm_section_classifier, "DeepSeekSectionClassifier") as classifier_cls:
+            Indexer(config)
+
+        classifier_cls.assert_called_once_with(
+            api_key="deepseek-key",
+            model="deepseek-v4-pro",
+            base_url="https://api.deepseek.com",
+            timeout=30.0,
+            max_spans=12,
+            unknown_threshold=0.2,
+        )
+
+    def test_refine_sections_updates_extraction_and_completeness(self, tmp_path):
+        from zotpilot.indexer import Indexer
+        from zotpilot.models import SectionSpan
+
+        config = MagicMock()
+        config.zotero_data_dir = Path("/fake")
+        config.chroma_db_path = tmp_path / "chroma"
+        config.chroma_db_path.mkdir()
+        config.chunk_size = 1000
+        config.chunk_overlap = 200
+        config.embedding_provider = "local"
+        config.embedding_dimensions = 384
+        config.embedding_model = "test"
+        config.ocr_language = "eng"
+        config.vision_enabled = False
+        config.vision_provider = "anthropic"
+        config.anthropic_api_key = None
+        config.section_llm_enabled = False
+
+        with patch("zotpilot.indexer.ZoteroClient"), \
+             patch("zotpilot.indexer.create_embedder"), \
+             patch("zotpilot.indexer.VectorStore"), \
+             patch("zotpilot.indexer.JournalRanker"):
+            indexer = Indexer(config)
+
+        original = [SectionSpan("unknown", 0, 100, "Finding", 0.5)]
+        refined = [SectionSpan("results", 0, 100, "Finding", 0.8)]
+        extraction = SimpleNamespace(
+            full_markdown="Finding\n" + ("result text " * 20),
+            sections=original,
+            completeness=SimpleNamespace(sections_identified=0, unknown_sections=1),
+        )
+        item = SimpleNamespace(title="Paper", publication="Nature", year=2026)
+        indexer._section_llm = MagicMock()
+        indexer._section_llm.refine_sections.return_value = refined
+
+        indexer._refine_sections(item, extraction)
+
+        assert extraction.sections is refined
+        assert extraction.completeness.sections_identified == 1
+        assert extraction.completeness.unknown_sections == 0
+
     def test_skips_batch_vision_when_table_cap_is_exceeded(self):
         from zotpilot.indexer import Indexer
 

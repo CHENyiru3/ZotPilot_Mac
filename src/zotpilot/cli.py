@@ -418,9 +418,12 @@ def cmd_status(args):
             "embedding_provider": config.embedding_provider,
             "gemini_key_set": bool(config.gemini_api_key),
             "dashscope_key_set": bool(config.dashscope_api_key),
+            "deepseek_key_set": bool(config.deepseek_api_key),
             "vision_enabled": config.vision_enabled,
             "vision_provider": config.vision_provider,
             "vision_model": config.vision_model,
+            "section_llm_enabled": config.section_llm_enabled,
+            "section_llm_model": config.section_llm_model,
             "secret_backend": resolved.secret_backend,
             "legacy_secret_backend": resolved.secret_backend,
             "write_ops_ready": bool(config.zotero_api_key and config.zotero_user_id),
@@ -482,6 +485,8 @@ def cmd_status(args):
     print(f"  Vision enabled:     {config.vision_enabled}")
     print(f"  Vision provider:    {config.vision_provider}")
     print(f"  Vision model:       {config.vision_model}")
+    print(f"  Section LLM:        {config.section_llm_enabled}")
+    print(f"  Section LLM model:  {config.section_llm_model}")
     print("\n  Client integration:")
     detected = deployment["detected_platforms"]
     print(f"    Detected:   {', '.join(detected) if detected else 'none'}")
@@ -594,7 +599,7 @@ def _mask_secret(v: str) -> str:
 
 _SENSITIVE_FIELDS = {
     "gemini_api_key", "dashscope_api_key", "anthropic_api_key",
-    "zotero_api_key", "semantic_scholar_api_key",
+    "deepseek_api_key", "zotero_api_key", "semantic_scholar_api_key",
 }
 
 _SENSITIVE_REGISTER_FLAGS = {
@@ -609,6 +614,8 @@ _SCALAR_TYPES = {
     "oversample_multiplier": int, "oversample_topic_factor": int,
     "stats_sample_limit": int, "max_pages": int, "vision_enabled": bool,
     "embedding_dimensions": int, "preflight_enabled": bool,
+    "section_llm_enabled": bool, "section_llm_timeout": float,
+    "section_llm_max_spans": int, "section_llm_unknown_threshold": float,
 }
 
 
@@ -666,6 +673,7 @@ def _write_config_data(config_path: Path, data: dict) -> None:
 _ENV_TO_CONFIG = {
     "GEMINI_API_KEY": "gemini_api_key",
     "DASHSCOPE_API_KEY": "dashscope_api_key",
+    "DEEPSEEK_API_KEY": "deepseek_api_key",
     "ZOTERO_API_KEY": "zotero_api_key",
     "ZOTERO_USER_ID": "zotero_user_id",
     "OPENALEX_EMAIL": "openalex_email",
