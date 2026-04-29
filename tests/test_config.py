@@ -33,6 +33,7 @@ class TestConfigLoadDefaults:
         cfg = Config.load(path=tmp_path / "nonexistent" / "config.json")
         assert cfg.zotero_data_dir == Path("~/Zotero").expanduser()
         assert cfg.embedding_provider == "gemini"
+        assert cfg.dashscope_embedding_endpoint == "compatible"
         assert cfg.vision_provider == "anthropic"
         assert cfg.vision_model == "claude-haiku-4-5-20251001"
         assert cfg.gemini_api_key is None
@@ -59,6 +60,7 @@ class TestConfigLoadFromFile:
         assert cfg.zotero_data_dir == tmp_path / "MyZotero"
         assert cfg.embedding_model == "custom-model"
         assert cfg.embedding_provider == "local"
+        assert cfg.dashscope_embedding_endpoint == "compatible"
         assert cfg.zotero_user_id == "12345"
         assert cfg.openalex_email == "user@example.com"
         assert cfg.gemini_api_key is None
@@ -72,6 +74,36 @@ class TestConfigLoadFromFile:
 
         assert cfg.vision_provider == "dashscope"
         assert cfg.vision_model == "qwen3-vl-flash"
+
+    def test_dashscope_vision_provider_replaces_stale_anthropic_default_model(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        config_file = tmp_path / "config.json"
+        config_file.write_text(
+            json.dumps({
+                "embedding_provider": "local",
+                "vision_provider": "dashscope",
+                "vision_model": "claude-haiku-4-5-20251001",
+            })
+        )
+
+        cfg = Config.load(path=config_file)
+
+        assert cfg.vision_provider == "dashscope"
+        assert cfg.vision_model == "qwen3-vl-flash"
+
+    def test_loads_dashscope_native_embedding_endpoint(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        config_file = tmp_path / "config.json"
+        config_file.write_text(
+            json.dumps({
+                "embedding_provider": "dashscope",
+                "dashscope_embedding_endpoint": "native",
+            })
+        )
+
+        cfg = Config.load(path=config_file)
+
+        assert cfg.dashscope_embedding_endpoint == "native"
 
 
 class TestRuntimeResolution:
@@ -215,6 +247,20 @@ class TestConfigValidation:
 
         assert any("Invalid vision_provider" in e for e in errors)
 
+    def test_validate_vision_model_provider_mismatch(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        cfg = Config.load(path=tmp_path / "nonexistent.json")
+        cfg.zotero_data_dir = tmp_path
+        (tmp_path / "zotero.sqlite").touch()
+        cfg.embedding_provider = "local"
+        cfg.vision_provider = "dashscope"
+        cfg.vision_model = "claude-haiku-4-5-20251001"
+        cfg.dashscope_api_key = "dashscope"
+
+        errors = cfg.validate()
+
+        assert any("Invalid vision_model" in e for e in errors)
+
     def test_validate_section_llm_requires_deepseek_key(self, tmp_path, monkeypatch):
         _use_local_secrets(monkeypatch, tmp_path)
         zotero_dir = tmp_path / "Zotero"
@@ -247,3 +293,15 @@ class TestConfigValidation:
 
         assert any("section_llm_max_spans" in e for e in errors)
         assert any("section_llm_unknown_threshold" in e for e in errors)
+
+    def test_validate_invalid_dashscope_embedding_endpoint(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        cfg = Config.load(path=tmp_path / "nonexistent.json")
+        cfg.zotero_data_dir = tmp_path
+        (tmp_path / "zotero.sqlite").touch()
+        cfg.gemini_api_key = "set"
+        cfg.dashscope_embedding_endpoint = "invalid"
+
+        errors = cfg.validate()
+
+        assert any("Invalid dashscope_embedding_endpoint" in e for e in errors)

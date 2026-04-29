@@ -39,6 +39,7 @@ def _config_hash(config: Config) -> str:
         f"{config.chunk_size}:"
         f"{config.chunk_overlap}:"
         f"{config.embedding_provider}:"
+        f"{getattr(config, 'dashscope_embedding_endpoint', 'compatible')}:"
         f"{config.embedding_dimensions}:"
         f"{config.embedding_model}:"
         f"{config.ocr_language}:"
