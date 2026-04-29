@@ -83,6 +83,11 @@ class Retriever:
                 journal_quartile=journal_quartile,
                 context_before=context_before,
                 context_after=context_after,
+                unit_id=hit.metadata.get("unit_id", hit.id),
+                unit_type=hit.metadata.get("unit_type", "chunk"),
+                parent_article_id=hit.metadata.get("parent_article_id", hit.metadata.get("doc_id", "")),
+                parent_section_id=hit.metadata.get("parent_section_id", ""),
+                content_type=hit.metadata.get("content_type", hit.metadata.get("chunk_type", "text")),
             ))
 
         return results

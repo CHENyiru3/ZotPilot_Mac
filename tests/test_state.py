@@ -61,6 +61,20 @@ class TestBuildChromadbFilters:
         result = _build_chromadb_filters(chunk_types=["text", "figure"])
         assert result == {"chunk_type": {"$in": ["text", "figure"]}}
 
+    def test_build_chromadb_filters_unit_types_and_doc_ids(self):
+        result = _build_chromadb_filters(
+            chunk_types=["text"],
+            unit_types=["chunk", "modal"],
+            doc_ids=["DOC1", "DOC2"],
+        )
+        assert result == {
+            "$and": [
+                {"chunk_type": {"$eq": "text"}},
+                {"unit_type": {"$in": ["chunk", "modal"]}},
+                {"doc_id": {"$in": ["DOC1", "DOC2"]}},
+            ]
+        }
+
 
 # ---------------------------------------------------------------------------
 # _apply_text_filters

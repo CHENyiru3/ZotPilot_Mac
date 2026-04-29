@@ -22,6 +22,11 @@ def _stored_chunk_to_retrieval_result(chunk) -> RetrievalResult:
         tags=meta.get("tags", ""),
         collections=meta.get("collections", ""),
         journal_quartile=meta.get("journal_quartile"),
+        unit_id=meta.get("unit_id", chunk.id),
+        unit_type=meta.get("unit_type", "chunk"),
+        parent_article_id=meta.get("parent_article_id", meta.get("doc_id", "")),
+        parent_section_id=meta.get("parent_section_id", ""),
+        content_type=meta.get("content_type", meta.get("chunk_type", "text")),
     )
 
 
@@ -60,6 +65,8 @@ def _result_to_dict(r, verbosity: str = "full") -> dict:
         "composite_score": round(r.composite_score, 3) if r.composite_score is not None else None,
         "section": r.section,
         "passage": r.text,
+        "unit_id": r.unit_id or r.chunk_id,
+        "unit_type": r.unit_type,
     }
 
     if verbosity != "minimal" and (r.context_before or r.context_after):
@@ -76,12 +83,15 @@ def _result_to_dict(r, verbosity: str = "full") -> dict:
             "publication": r.publication,
             "section_confidence": round(r.section_confidence, 2),
             "journal_quartile": r.journal_quartile,
+            "content_type": r.content_type,
         })
 
     if verbosity == "full":
         result.update({
             "tags": r.tags,
             "collections": r.collections,
+            "parent_article": r.parent_article_id or r.doc_id,
+            "parent_section": r.parent_section_id,
         })
 
     return result

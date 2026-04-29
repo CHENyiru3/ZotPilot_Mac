@@ -353,6 +353,144 @@ class TestSkipTracking:
         # refreshed library snapshot no longer contained it.
         indexer.store.delete_document.assert_called_once_with("K1")
 
+    def test_index_storage_failure_cleans_partial_document_rows(self):
+        from unittest.mock import MagicMock, patch
+
+        item = self._make_item("K1", "Paper A", has_pdf=True)
+        indexer = self._make_indexer([item])
+        self._patch_indexer(indexer)
+        indexer.store.delete_document = MagicMock()
+
+        mock_extraction = MagicMock()
+        mock_extraction.pages = [MagicMock()]
+        mock_extraction.stats = {"total_pages": 1, "text_pages": 1, "ocr_pages": 0, "empty_pages": 0}
+        mock_extraction.quality_grade = "A"
+        mock_extraction.pending_vision = None
+
+        with patch("zotpilot.indexer.extract_document", return_value=mock_extraction), \
+             patch.object(indexer, "_index_extraction", side_effect=RuntimeError("store failed")):
+            result = indexer.index_all(batch_size=None)
+
+        assert result["failed"] == 1
+        indexer.store.delete_document.assert_called_once_with("K1")
+
+
+class TestLayeredIndexUnits:
+    def test_section_unit_extraction_skips_references_and_short_spans(self):
+        from zotpilot.indexer import _extract_section_units
+        from zotpilot.models import PageExtraction, SectionSpan
+
+        intro = "Introduction\n" + ("context " * 40)
+        refs = "References\n1. Smith. 2. Doe. 3. Zhang."
+        short = "Tiny note."
+        full_text = intro + "\n" + refs + "\n" + short
+        intro_start = 0
+        intro_end = len(intro)
+        refs_start = intro_end + 1
+        refs_end = refs_start + len(refs)
+        short_start = refs_end + 1
+
+        extraction = SimpleNamespace(
+            full_markdown=full_text,
+            pages=[PageExtraction(page_num=1, markdown=full_text, char_start=0)],
+            sections=[
+                SectionSpan("introduction", intro_start, intro_end, "Introduction", 1.0),
+                SectionSpan("references", refs_start, refs_end, "References", 1.0),
+                SectionSpan("results", short_start, len(full_text), "Result", 0.8),
+            ],
+        )
+
+        units = _extract_section_units(extraction)
+
+        assert [unit["label"] for unit in units] == ["introduction"]
+        assert units[0]["heading"] == "Introduction"
+        assert units[0]["page_num"] == 1
+
+    def test_index_extraction_stores_article_and_section_units_before_chunks(self, tmp_path):
+        from zotpilot.indexer import Indexer
+        from zotpilot.models import Chunk, PageExtraction, SectionSpan
+
+        config = MagicMock()
+        config.zotero_data_dir = Path("/fake")
+        config.chroma_db_path = tmp_path / "chroma"
+        config.chroma_db_path.mkdir()
+        config.chunk_size = 1000
+        config.chunk_overlap = 200
+        config.embedding_provider = "local"
+        config.embedding_dimensions = 384
+        config.embedding_model = "test"
+        config.ocr_language = "eng"
+        config.vision_enabled = False
+        config.vision_provider = "anthropic"
+        config.anthropic_api_key = None
+        config.section_llm_enabled = False
+
+        with patch("zotpilot.indexer.ZoteroClient"), \
+             patch("zotpilot.indexer.create_embedder"), \
+             patch("zotpilot.indexer.VectorStore"), \
+             patch("zotpilot.indexer.JournalRanker"):
+            indexer = Indexer(config)
+
+        abstract = "Abstract\n" + ("abstract finding " * 30)
+        results = "Results\n" + ("result detail " * 30)
+        full_text = abstract + "\n" + results
+        results_start = len(abstract) + 1
+        extraction = SimpleNamespace(
+            pages=[
+                PageExtraction(page_num=1, markdown=abstract, char_start=0),
+                PageExtraction(page_num=2, markdown=results, char_start=results_start),
+            ],
+            full_markdown=full_text,
+            sections=[
+                SectionSpan("abstract", 0, len(abstract), "Abstract", 1.0),
+                SectionSpan("results", results_start, len(full_text), "Results", 1.0),
+            ],
+            tables=[],
+            figures=[],
+            stats={"total_pages": 2, "text_pages": 2, "ocr_pages": 0, "empty_pages": 0},
+            quality_grade="A",
+            completeness=None,
+        )
+        item = SimpleNamespace(
+            item_key="DOC1",
+            title="Layered Retrieval",
+            authors="Chen, Y.",
+            year=2026,
+            citation_key="chen2026",
+            publication="Journal",
+            doi="10/test",
+            tags="rag",
+            collections="AI",
+            pdf_path=Path("/fake/doc.pdf"),
+        )
+        chunks = [
+            Chunk(
+                text="chunk text",
+                chunk_index=0,
+                page_num=1,
+                char_start=0,
+                char_end=20,
+                section="abstract",
+            )
+        ]
+        indexer.chunker = MagicMock()
+        indexer.chunker.chunk.return_value = chunks
+        indexer.journal_ranker.lookup.return_value = "Q1"
+        indexer._pdf_hash = MagicMock(return_value="pdf-hash")
+
+        n_chunks, n_tables, reason, _stats, quality = indexer._index_extraction(item, extraction)
+
+        assert (n_chunks, n_tables, reason, quality) == (1, 0, "", "A")
+        indexer.store.add_article.assert_called_once()
+        article_text = indexer.store.add_article.call_args.args[2]
+        assert "Title: Layered Retrieval" in article_text
+        assert "Abstract:" in article_text
+        indexer.store.add_sections.assert_called_once()
+        section_units = indexer.store.add_sections.call_args.args[2]
+        assert [unit["label"] for unit in section_units] == ["abstract", "results"]
+        method_names = [call[0] for call in indexer.store.method_calls]
+        assert method_names.index("add_article") < method_names.index("add_sections") < method_names.index("add_chunks")
+
 
 class TestVisionBudgetGuards:
     def test_dashscope_vision_provider_uses_dashscope_api(self, tmp_path):

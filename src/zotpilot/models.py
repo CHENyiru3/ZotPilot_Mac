@@ -311,6 +311,11 @@ class RetrievalResult:
     composite_score: float | None = None  # Reranked score (similarity x section x journal)
     context_before: list[str] = field(default_factory=list)
     context_after: list[str] = field(default_factory=list)
+    unit_id: str = ""
+    unit_type: str = "chunk"
+    parent_article_id: str = ""
+    parent_section_id: str = ""
+    content_type: str = "text"
 
     def full_context(self) -> str:
         """Return chunk with surrounding context merged."""

@@ -1,14 +1,19 @@
 """ChromaDB filter builders and post-retrieval text filters."""
 
+from .pdf.section_classifier import is_reference_like_text
+
 VALID_CHUNK_TYPES = {"text", "figure", "table"}
+VALID_UNIT_TYPES = {"article", "section", "chunk", "modal"}
 
 
 def _build_chromadb_filters(
     year_min: int | None = None,
     year_max: int | None = None,
     chunk_types: list[str] | None = None,
+    unit_types: list[str] | None = None,
+    doc_ids: list[str] | None = None,
 ) -> dict | None:
-    """Build ChromaDB where clause for year range and chunk_type filters.
+    """Build ChromaDB where clause for year range and metadata filters.
 
     IMPORTANT: ChromaDB only supports: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin
     It does NOT support substring/contains operations on metadata.
@@ -18,20 +23,32 @@ def _build_chromadb_filters(
         year_min: Minimum publication year
         year_max: Maximum publication year
         chunk_types: Filter to specific chunk types (text, figure, table)
+        unit_types: Filter to evidence unit types (article, section, chunk, modal)
+        doc_ids: Restrict results to specific Zotero item keys
 
     Returns:
         ChromaDB where clause dict, or None if no filters
     """
     conditions = []
-    if year_min:
+    if year_min is not None:
         conditions.append({"year": {"$gte": year_min}})
-    if year_max:
+    if year_max is not None:
         conditions.append({"year": {"$lte": year_max}})
     if chunk_types:
         if len(chunk_types) == 1:
             conditions.append({"chunk_type": {"$eq": chunk_types[0]}})
         else:
             conditions.append({"chunk_type": {"$in": chunk_types}})
+    if unit_types:
+        if len(unit_types) == 1:
+            conditions.append({"unit_type": {"$eq": unit_types[0]}})
+        else:
+            conditions.append({"unit_type": {"$in": unit_types}})
+    if doc_ids:
+        if len(doc_ids) == 1:
+            conditions.append({"doc_id": {"$eq": doc_ids[0]}})
+        else:
+            conditions.append({"doc_id": {"$in": doc_ids}})
 
     if not conditions:
         return None
@@ -118,4 +135,23 @@ def _apply_required_terms(results: list, terms: list[str]) -> list:
         combined = text + ' ' + full_ctx
         if all(p.search(combined) for p in patterns):
             filtered.append(r)
+    return filtered
+
+
+def _apply_reference_filter(results: list, include_references: bool = False) -> list:
+    """Hide bibliography/reference evidence unless explicitly requested."""
+    if include_references:
+        return results
+
+    filtered = []
+    for r in results:
+        text = getattr(r, "text", "") or ""
+        section = _meta_get(r, "section", "")
+        content_type = _meta_get(r, "content_type", _meta_get(r, "chunk_type", ""))
+
+        if section == "references":
+            continue
+        if content_type in {"text", "section"} and is_reference_like_text(text):
+            continue
+        filtered.append(r)
     return filtered

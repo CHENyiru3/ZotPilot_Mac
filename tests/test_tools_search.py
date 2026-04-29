@@ -87,7 +87,7 @@ class TestSearchPapers:
             query="test query",
             top_k=15,
             context_window=0,
-            filters=None,
+            filters={"chunk_type": {"$in": ["text", "figure", "table"]}},
         )
 
     def test_invalid_chunk_types_raises(self, mock_singletons):
@@ -119,6 +119,20 @@ class TestSearchPapers:
 
         assert [row["doc_id"] for row in output] == ["DOC1"]
 
+    def test_hides_reference_passages_by_default(self, mock_singletons):
+        from zotpilot.tools.search import search_papers
+
+        reference = _make_rr(doc_id="DOC1", text="References\n1. Smith J. Test paper. Nature. 2020.")
+        reference.section = "references"
+        evidence = _make_rr(doc_id="DOC1", chunk_index=1, text="Evidence passage")
+        results = [reference, evidence]
+        mock_singletons["retriever"].search.return_value = results
+        mock_singletons["reranker"].rerank.side_effect = lambda rows, *_args, **_kwargs: rows
+
+        output = search_papers(query="test query", top_k=5)
+
+        assert [row["passage"] for row in output] == ["Evidence passage"]
+
 
 class TestSearchTopic:
     def test_happy_path(self, mock_singletons):
@@ -133,12 +147,26 @@ class TestSearchTopic:
         assert "best_passage" not in output[0]
         assert "best_passage_chunk_index" in output[0]
         assert "best_passage_context" not in output[0]
-        mock_singletons["retriever"].search.assert_called_once_with(
-            query="neural networks",
-            top_k=50,
-            context_window=0,
-            filters=None,
-        )
+        assert mock_singletons["retriever"].search.call_count == 2
+        first_call = mock_singletons["retriever"].search.call_args_list[0]
+        second_call = mock_singletons["retriever"].search.call_args_list[1]
+        assert first_call.kwargs == {
+            "query": "neural networks",
+            "top_k": 25,
+            "context_window": 0,
+            "filters": {"unit_type": {"$in": ["article", "section"]}},
+        }
+        assert second_call.kwargs == {
+            "query": "neural networks",
+            "top_k": 50,
+            "context_window": 0,
+            "filters": {
+                "$and": [
+                    {"chunk_type": {"$in": ["text", "figure", "table"]}},
+                    {"doc_id": {"$in": ["A", "B"]}},
+                ]
+            },
+        }
 
     def test_invalid_chunk_types_raises(self, mock_singletons):
         from zotpilot.tools.search import search_topic

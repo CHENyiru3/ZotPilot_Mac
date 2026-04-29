@@ -19,6 +19,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+MAX_EMBEDDING_TEXT_CHARS = 12000
+
+
+def _truncate_for_embedding(text: str, max_chars: int = MAX_EMBEDDING_TEXT_CHARS) -> str:
+    """Keep embedding inputs within provider token limits using a rough char budget."""
+    text = (text or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rsplit("\n", 1)[0].strip() or text[:max_chars].strip()
+
 
 def _probe_chroma_db_access(db_path: Path) -> bool:
     """Probe whether an existing Chroma index can be opened safely.
@@ -159,6 +169,115 @@ class VectorStore:
             "quality_grade": doc_meta.get("quality_grade", ""),
         }
 
+    @staticmethod
+    def _build_contextual_embedding_text(
+        doc_meta: dict,
+        text: str,
+        *,
+        unit_type: str,
+        section: str = "",
+        heading: str = "",
+        page_num: int | None = None,
+    ) -> str:
+        """Build provider input that gives standalone units article context."""
+        parts = [
+            f"Unit type: {unit_type}",
+            f"Title: {doc_meta.get('title', '')}",
+            f"Authors: {doc_meta.get('authors', '')}",
+            f"Year: {doc_meta.get('year') or ''}",
+            f"Publication: {doc_meta.get('publication', '')}",
+        ]
+        if section:
+            parts.append(f"Section: {section}")
+        if heading:
+            parts.append(f"Heading: {heading}")
+        if page_num:
+            parts.append(f"Page: {page_num}")
+        parts.extend(["", text])
+        return _truncate_for_embedding("\n".join(parts))
+
+    def add_article(self, doc_id: str, doc_meta: dict, article_text: str) -> None:
+        """Add a paper-level evidence unit for broad topic discovery."""
+        article_text = article_text.strip()
+        if not article_text:
+            return
+
+        unit_id = f"{doc_id}_article"
+        metadata = self._build_base_metadata(doc_id, doc_meta)
+        metadata.update({
+            "unit_id": unit_id,
+            "unit_type": "article",
+            "content_type": "article",
+            "chunk_type": "article",
+            "page_num": 1,
+            "chunk_index": -1,
+            "section": "article",
+            "section_confidence": 1.0,
+            "parent_article_id": doc_id,
+            "parent_section_id": "",
+        })
+        embedding_text = self._build_contextual_embedding_text(
+            doc_meta, article_text, unit_type="article", section="article"
+        )
+        embeddings = self.embedder.embed([embedding_text], task_type="RETRIEVAL_DOCUMENT")
+        self.collection.add(
+            ids=[unit_id],
+            documents=[article_text],
+            embeddings=embeddings,
+            metadatas=[metadata],
+        )
+
+    def add_sections(self, doc_id: str, doc_meta: dict, sections: list[dict]) -> None:
+        """Add section-level evidence units for hierarchical retrieval."""
+        ids = []
+        documents = []
+        metadatas = []
+        embedding_texts = []
+
+        for idx, section in enumerate(sections):
+            text = (section.get("text") or "").strip()
+            if not text:
+                continue
+            label = section.get("label", "unknown")
+            heading = section.get("heading", "")
+            unit_id = f"{doc_id}_section_{idx:03d}"
+            metadata = self._build_base_metadata(doc_id, doc_meta)
+            metadata.update({
+                "unit_id": unit_id,
+                "unit_type": "section",
+                "content_type": "section",
+                "chunk_type": "section",
+                "page_num": section.get("page_num", 1),
+                "chunk_index": -1000 - idx,
+                "section": label,
+                "section_confidence": section.get("confidence", 1.0),
+                "section_heading": heading,
+                "parent_article_id": doc_id,
+                "parent_section_id": unit_id,
+            })
+            ids.append(unit_id)
+            documents.append(text)
+            metadatas.append(metadata)
+            embedding_texts.append(
+                self._build_contextual_embedding_text(
+                    doc_meta,
+                    text,
+                    unit_type="section",
+                    section=label,
+                    heading=heading,
+                    page_num=section.get("page_num", 1),
+                )
+            )
+
+        if ids:
+            embeddings = self.embedder.embed(embedding_texts, task_type="RETRIEVAL_DOCUMENT")
+            self.collection.add(
+                ids=ids,
+                documents=documents,
+                embeddings=embeddings,
+                metadatas=metadatas,
+            )
+
     def add_chunks(self, doc_id: str, doc_meta: dict, chunks: list[Chunk]) -> None:
         """
         Add all chunks for a document.
@@ -173,14 +292,27 @@ class VectorStore:
 
         ids = [f"{doc_id}_chunk_{c.chunk_index:04d}" for c in chunks]
         texts = [c.text for c in chunks]
+        embedding_texts = [
+            self._build_contextual_embedding_text(
+                doc_meta,
+                c.text,
+                unit_type="chunk",
+                section=c.section,
+                page_num=c.page_num,
+            )
+            for c in chunks
+        ]
 
         # Use RETRIEVAL_DOCUMENT task type
-        embeddings = self.embedder.embed(texts, task_type="RETRIEVAL_DOCUMENT")
+        embeddings = self.embedder.embed(embedding_texts, task_type="RETRIEVAL_DOCUMENT")
 
         metadatas = []
-        for c in chunks:
+        for idx, c in enumerate(chunks):
             meta = self._build_base_metadata(doc_id, doc_meta)
             meta.update({
+                "unit_id": ids[idx],
+                "unit_type": "chunk",
+                "content_type": "text",
                 "page_num": c.page_num,
                 "chunk_index": c.chunk_index,
                 "total_chunks": len(chunks),
@@ -189,6 +321,8 @@ class VectorStore:
                 "section": c.section,
                 "section_confidence": c.section_confidence,
                 "chunk_type": "text",
+                "parent_article_id": doc_id,
+                "parent_section_id": "",
             })
             metadatas.append(meta)
 
@@ -225,14 +359,35 @@ class VectorStore:
             for t in tables
         ]
         texts = [t.to_markdown() for t in tables]
+        embedding_texts = [
+            self._build_contextual_embedding_text(
+                doc_meta,
+                "\n".join(
+                    part
+                    for part in [
+                        t.to_markdown(),
+                        getattr(t, "reference_context", "") or "",
+                    ]
+                    if part
+                ),
+                unit_type="modal",
+                section="table",
+                heading=t.caption or "",
+                page_num=t.page_num,
+            )
+            for t in tables
+        ]
 
         # Use RETRIEVAL_DOCUMENT task type
-        embeddings = self.embedder.embed(texts, task_type="RETRIEVAL_DOCUMENT")
+        embeddings = self.embedder.embed(embedding_texts, task_type="RETRIEVAL_DOCUMENT")
 
         metadatas = []
-        for t in tables:
+        for idx, t in enumerate(tables):
             meta = self._build_base_metadata(doc_id, doc_meta)
             meta.update({
+                "unit_id": ids[idx],
+                "unit_type": "modal",
+                "content_type": "table",
                 "page_num": t.page_num,
                 "chunk_index": _ref_chunk_index(ref_map, "table", t) if ref_map else -1,
                 "chunk_type": "table",
@@ -243,6 +398,8 @@ class VectorStore:
                 "reference_context": getattr(t, 'reference_context', '') or "",
                 "section": "table",
                 "section_confidence": 1.0,
+                "parent_article_id": doc_id,
+                "parent_section_id": "",
             })
             metadatas.append(meta)
 
@@ -285,6 +442,9 @@ class VectorStore:
 
             metadata = self._build_base_metadata(doc_id, doc_meta)
             metadata.update({
+                "unit_id": chunk_id,
+                "unit_type": "modal",
+                "content_type": "figure",
                 "chunk_type": "figure",
                 "page_num": fig.page_num,
                 "chunk_index": _ref_chunk_index(ref_map, "figure", fig) if ref_map else -1,
@@ -294,6 +454,8 @@ class VectorStore:
                 "reference_context": getattr(fig, 'reference_context', '') or "",
                 "section": "figure",
                 "section_confidence": 1.0,
+                "parent_article_id": doc_id,
+                "parent_section_id": "",
             })
 
             ids.append(chunk_id)
@@ -301,7 +463,18 @@ class VectorStore:
             metadatas.append(metadata)
 
         if ids:
-            embeddings = self.embedder.embed(documents, task_type="RETRIEVAL_DOCUMENT")
+            embedding_texts = [
+                self._build_contextual_embedding_text(
+                    doc_meta,
+                    documents[i],
+                    unit_type="modal",
+                    section="figure",
+                    heading=metadatas[i].get("caption", ""),
+                    page_num=metadatas[i].get("page_num"),
+                )
+                for i in range(len(documents))
+            ]
+            embeddings = self.embedder.embed(embedding_texts, task_type="RETRIEVAL_DOCUMENT")
             self.collection.add(
                 ids=ids,
                 documents=documents,
@@ -386,6 +559,7 @@ class VectorStore:
             where={
                 "$and": [
                     {"doc_id": {"$eq": doc_id}},
+                    {"chunk_type": {"$eq": "text"}},
                     {"chunk_index": {"$gte": chunk_index - window}},
                     {"chunk_index": {"$lte": chunk_index + window}}
                 ]
@@ -412,7 +586,9 @@ class VectorStore:
         """Get set of all indexed document IDs.
 
         Memory-efficient: extracts doc_id from chunk IDs without loading metadata.
-        Handles text chunks ({doc_id}_chunk_{index:04d}),
+        Handles article records ({doc_id}_article),
+        section records ({doc_id}_section_{index:03d}),
+        text chunks ({doc_id}_chunk_{index:04d}),
         table chunks ({doc_id}_table_{page:04d}_{table_idx:02d}),
         and figure chunks ({doc_id}_fig_{page:03d}_{fig_idx:02d}).
         """
@@ -430,7 +606,11 @@ class VectorStore:
     @staticmethod
     def _doc_id_from_chunk_id(chunk_id: str) -> str | None:
         """Extract the logical document ID from a chunk/table/figure row ID."""
-        if '_chunk_' in chunk_id:
+        if chunk_id.endswith("_article"):
+            parts = [chunk_id[:-len("_article")], "article"]
+        elif '_section_' in chunk_id:
+            parts = chunk_id.rsplit('_section_', 1)
+        elif '_chunk_' in chunk_id:
             parts = chunk_id.rsplit('_chunk_', 1)
         elif '_table_' in chunk_id:
             parts = chunk_id.rsplit('_table_', 1)

@@ -10,6 +10,7 @@ from pydantic import Field
 
 from ..filters import (
     VALID_CHUNK_TYPES,
+    _apply_reference_filter,
     _apply_required_terms,
     _apply_text_filters,
     _build_chromadb_filters,
@@ -35,6 +36,7 @@ from ..state import (
 from .profiles import tool_tags
 
 logger = logging.getLogger(__name__)
+DEFAULT_RETRIEVAL_CHUNK_TYPES = ["text", "figure", "table"]
 
 
 def _filter_live_results(results, live_doc_ids: set[str]):
@@ -63,6 +65,10 @@ def search_papers(
     section_weights: Annotated[dict[str, float] | None, Field(description="Section relevance 0.0-1.0. Keys: abstract, introduction, background, methods, results, discussion, conclusion, references, appendix, preamble, table, unknown")] = None,  # noqa: E501
     journal_weights: Annotated[dict[str, float] | None, Field(description="Journal quartile weights 0.0-1.0. Keys: Q1, Q2, Q3, Q4, unknown")] = None,  # noqa: E501
     required_terms: Annotated[list[str] | None, Field(description="Words that must appear in passage (case-insensitive whole-word match)")] = None,  # noqa: E501
+    include_references: Annotated[
+        bool,
+        Field(description="Include bibliography/reference passages in normal results"),
+    ] = False,
     verbosity: Annotated[
         Literal["minimal", "standard", "full"],
         Field(description="Response detail level"),
@@ -129,17 +135,19 @@ def search_papers(
     fetch_k = base_fetch * 3 if has_post_filters else base_fetch
 
     all_results = []
+    effective_chunk_types = chunk_types or DEFAULT_RETRIEVAL_CHUNK_TYPES
     for q in queries:
         r = retriever.search(
             query=q,
             top_k=fetch_k,
             context_window=min(context_chunks, 3),
-            filters=_build_chromadb_filters(year_min, year_max, chunk_types)
+            filters=_build_chromadb_filters(year_min, year_max, effective_chunk_types)
         )
         r = _filter_live_results(r, live_doc_ids)
         r = _apply_text_filters(r, author, tag, collection)
         if required_terms:
             r = _apply_required_terms(r, required_terms)
+        r = _apply_reference_filter(r, include_references)
         if _config.rerank_enabled:
             r = reranker.rerank(r, section_weights, journal_weights)
         else:
@@ -167,6 +175,10 @@ def search_topic(
     chunk_types: Annotated[list[str] | None, Field(description="Content types to include: text, figure, table. Omit for all.")] = None,  # noqa: E501
     section_weights: Annotated[dict[str, float] | None, Field(description="Section relevance 0.0-1.0. Keys: abstract, introduction, background, methods, results, discussion, conclusion, references, appendix, preamble, table, unknown")] = None,  # noqa: E501
     journal_weights: Annotated[dict[str, float] | None, Field(description="Journal quartile weights 0.0-1.0. Keys: Q1, Q2, Q3, Q4, unknown")] = None,  # noqa: E501
+    include_references: Annotated[
+        bool,
+        Field(description="Include bibliography/reference passages in topic evidence"),
+    ] = False,
     verbosity: Annotated[
         Literal["minimal", "standard", "full"],
         Field(description="Response detail level"),
@@ -221,20 +233,59 @@ def search_topic(
         fetch_k = base_fetch
 
     all_chunks: list = []
+    matched_units_by_doc: dict[str, list] = defaultdict(list)
+    effective_chunk_types = chunk_types or DEFAULT_RETRIEVAL_CHUNK_TYPES
     for q in queries:
+        unit_fetch_k = min(num_papers * _config.oversample_topic_factor, 250)
+        unit_hits = retriever.search(
+            query=q,
+            top_k=unit_fetch_k,
+            context_window=0,
+            filters=_build_chromadb_filters(
+                year_min,
+                year_max,
+                unit_types=["article", "section"],
+            )
+        )
+        unit_hits = _filter_live_results(unit_hits, live_doc_ids)
+        unit_hits = _apply_text_filters(unit_hits, author, tag, collection)
+        unit_hits = _apply_reference_filter(unit_hits, include_references)
+        if _config.rerank_enabled:
+            unit_hits = reranker.rerank(unit_hits, section_weights, journal_weights)
+        else:
+            unit_hits = [replace(x, composite_score=x.score) for x in unit_hits]
+
+        for hit in unit_hits[:num_papers * 5]:
+            matched_units_by_doc[hit.doc_id].append(hit)
+
+        matched_doc_ids = list(dict.fromkeys(hit.doc_id for hit in unit_hits[:num_papers * 5]))
+        if matched_doc_ids:
+            chunk_filters = _build_chromadb_filters(
+                year_min,
+                year_max,
+                effective_chunk_types,
+                doc_ids=matched_doc_ids,
+            )
+        else:
+            # Backward compatibility for indexes created before article/section units.
+            chunk_filters = _build_chromadb_filters(year_min, year_max, effective_chunk_types)
+
         r = retriever.search(
             query=q,
             top_k=fetch_k,
             context_window=0,
-            filters=_build_chromadb_filters(year_min, year_max, chunk_types)
+            filters=chunk_filters,
         )
         r = _filter_live_results(r, live_doc_ids)
         r = _apply_text_filters(r, author, tag, collection)
+        r = _apply_reference_filter(r, include_references)
         if _config.rerank_enabled:
             r = reranker.rerank(r, section_weights, journal_weights)
         else:
             r = [replace(x, composite_score=x.score) for x in r]
         all_chunks.extend(r)
+        if not r:
+            all_chunks.extend(unit_hits[:fetch_k])
 
     # Deduplicate by (doc_id, chunk_index), keep best composite score
     if len(queries) > 1:
@@ -280,6 +331,8 @@ def search_topic(
             "best_passage_page": best_hit.page_num,
             "best_passage_chunk_index": best_hit.chunk_index,
             "best_passage_section": best_hit.section,
+            "best_unit_id": best_hit.unit_id or best_hit.chunk_id,
+            "best_unit_type": best_hit.unit_type,
         })
 
         if verbosity in {"standard", "full"}:
@@ -293,6 +346,18 @@ def search_topic(
                 "avg_score": round(sum(h.score for h in hits) / len(hits), 3),
                 "best_chunk_score": round(best_hit.score, 3),
                 "best_passage_section_confidence": round(best_hit.section_confidence, 2),
+                "matched_units": [
+                    {
+                        "unit_id": u.unit_id or u.chunk_id,
+                        "unit_type": u.unit_type,
+                        "section": u.section,
+                        "score": round(u.score, 3),
+                        "composite_score": round(u.composite_score, 3)
+                        if u.composite_score is not None else None,
+                        "text": u.text[:1000],
+                    }
+                    for u in matched_units_by_doc.get(doc_id, [])[:5]
+                ],
             })
 
         if verbosity == "full":

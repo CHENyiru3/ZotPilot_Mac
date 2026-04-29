@@ -35,6 +35,7 @@ def _config_hash(config: Config) -> str:
     Changes to these values require re-indexing.
     """
     data = (
+        "hierarchy-v1:"
         f"{config.chunk_size}:"
         f"{config.chunk_overlap}:"
         f"{config.embedding_provider}:"
@@ -63,6 +64,84 @@ class IndexResult:
     n_chunks: int = 0
     n_tables: int = 0
     quality_grade: str = ""  # A/B/C/D/F quality grade per document
+
+
+def _text_slice(text: str, start: int, end: int, max_chars: int = 10000) -> str:
+    """Return a bounded, clean text slice for section/article embeddings."""
+    snippet = text[start:end].strip()
+    if len(snippet) <= max_chars:
+        return snippet
+    return snippet[:max_chars].rsplit("\n", 1)[0].strip() or snippet[:max_chars].strip()
+
+
+def _page_for_offset(pages, offset: int) -> int:
+    """Find the page number that owns a character offset."""
+    page_num = 1
+    for page in pages:
+        if page.char_start <= offset:
+            page_num = page.page_num
+        else:
+            break
+    return page_num
+
+
+def _extract_section_units(extraction) -> list[dict]:
+    """Build section-level evidence units from detected section spans."""
+    units = []
+    skip_labels = {"references", "preamble"}
+    full_text = getattr(extraction, "full_markdown", "") or ""
+
+    for span in getattr(extraction, "sections", []) or []:
+        if span.label in skip_labels:
+            continue
+        text = _text_slice(full_text, span.char_start, span.char_end)
+        if len(text) < 200:
+            continue
+        units.append({
+            "label": span.label,
+            "heading": span.heading_text,
+            "confidence": span.confidence,
+            "page_num": _page_for_offset(getattr(extraction, "pages", []) or [], span.char_start),
+            "text": text,
+        })
+    return units
+
+
+def _build_article_text(item: ZoteroItem, extraction) -> str:
+    """Build an extractive article-level representation for broad retrieval."""
+    section_units = _extract_section_units(extraction)
+    abstract = next((s["text"] for s in section_units if s["label"] == "abstract"), "")
+    results = next((s["text"] for s in section_units if s["label"] == "results"), "")
+    conclusion = next(
+        (s["text"] for s in section_units if s["label"] in {"conclusion", "discussion"}),
+        "",
+    )
+
+    parts = [
+        f"Title: {item.title}",
+        f"Authors: {item.authors}",
+        f"Year: {item.year or ''}",
+        f"Publication: {item.publication}",
+        f"DOI: {item.doi}",
+    ]
+    if abstract:
+        parts.extend(["", "Abstract:", _text_slice(abstract, 0, len(abstract), max_chars=6000)])
+    else:
+        opening = _text_slice(
+            getattr(extraction, "full_markdown", "") or "",
+            0,
+            min(len(getattr(extraction, "full_markdown", "") or ""), 6000),
+        )
+        parts.extend(["", "Opening text:", opening])
+    if results:
+        parts.extend(["", "Results excerpt:", _text_slice(results, 0, len(results), max_chars=4000)])
+    if conclusion:
+        parts.extend([
+            "",
+            "Discussion or conclusion excerpt:",
+            _text_slice(conclusion, 0, len(conclusion), max_chars=4000),
+        ])
+    return "\n".join(part for part in parts if part is not None).strip()
 
 
 class Indexer:
@@ -543,6 +622,14 @@ class Indexer:
                 logger.debug(f"Completed {item.item_key}: {n_chunks} chunks, {n_tables} tables, quality {quality_grade}")  # noqa: E501
             except Exception as e:
                 logger.error(f"Failed to index {item.item_key}: {type(e).__name__}: {e}")
+                try:
+                    self.store.delete_document(item.item_key)
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "Failed to clean partial index for %s: %s",
+                        item.item_key,
+                        cleanup_error,
+                    )
                 results.append(IndexResult(
                     item.item_key, item.title, "failed",
                     reason=f"{type(e).__name__}: {e}"))
@@ -722,6 +809,9 @@ class Indexer:
             "quality_grade": quality_grade,
         }
         store_started = time.perf_counter()
+        section_units = _extract_section_units(extraction)
+        self.store.add_article(item.item_key, doc_meta, _build_article_text(item, extraction))
+        self.store.add_sections(item.item_key, doc_meta, section_units)
         self.store.add_chunks(item.item_key, doc_meta, chunks)
         store_elapsed = time.perf_counter() - store_started
 
