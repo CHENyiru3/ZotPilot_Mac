@@ -29,10 +29,12 @@ def _truncate_text(text: str, max_chars: int = SAFE_INPUT_CHARS) -> str:
 
 class DashScopeEmbedder:
     """
-    Alibaba Cloud Bailian embedding wrapper using the native API.
+    Alibaba Cloud Bailian embedding wrapper.
 
     Supports text-embedding-v3 and text-embedding-v4 (Qwen3-Embedding).
-    Uses asymmetric embeddings via DashScope native text_type parameter.
+    The default compatible endpoint preserves DashScope's OpenAI-compatible
+    behavior. The native endpoint can be selected for asymmetric retrieval via
+    DashScope's text_type parameter.
 
     Default model: text-embedding-v4
     Output dimensions: configurable (v3: 64–1024, v4: 64–2048)
@@ -47,6 +49,7 @@ class DashScopeEmbedder:
         dimensions: int = 1024,
         api_key: str | None = None,
         base_url: str = DEFAULT_BASE_URL,
+        endpoint: str = "compatible",
         native_url: str | None = None,
         timeout: float = 120.0,
         max_retries: int = 3,
@@ -62,6 +65,9 @@ class DashScopeEmbedder:
         self.model = model
         self.dimensions = dimensions
         self.base_url = base_url.rstrip("/")
+        if endpoint not in ("compatible", "native"):
+            raise ValueError("DashScope embedding endpoint must be 'compatible' or 'native'")
+        self.endpoint = endpoint
         self.native_url = native_url or (
             INTL_NATIVE_URL if "dashscope-intl" in self.base_url else DEFAULT_NATIVE_URL
         )
@@ -88,29 +94,17 @@ class DashScopeEmbedder:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        text_type = "query" if task_type == "RETRIEVAL_QUERY" else "document"
-        parameters: dict[str, Any] = {
-            "dimension": self.dimensions,
-            "text_type": text_type,
-        }
-        if text_type == "query":
-            parameters["instruct"] = QUERY_INSTRUCT
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "input": {"texts": batch},
-            "parameters": parameters,
-        }
+        url, payload = self._build_payload(batch, task_type)
 
         last_error = ""
         for attempt in range(1, self.max_retries + 1):
             try:
                 with httpx.Client(timeout=self.timeout) as client:
-                    response = client.post(self.native_url, headers=headers, json=payload)
+                    response = client.post(url, headers=headers, json=payload)
                     response.raise_for_status()
                     data = response.json()
 
-                embeddings = sorted(data["output"]["embeddings"], key=lambda x: x.get("text_index", x.get("index", 0)))
-                result = [e["embedding"] for e in embeddings]
+                result = self._parse_embeddings(data)
                 logger.debug(
                     f"Batch {batch_num}/{total_batches} succeeded "
                     f"(attempt {attempt}), got {len(result)} embeddings"
@@ -148,6 +142,41 @@ class DashScopeEmbedder:
             + (f": {last_error}" if last_error else "")
         )
 
+    def _build_payload(self, batch: list[str], task_type: str) -> tuple[str, dict[str, Any]]:
+        if self.endpoint == "compatible":
+            return (
+                f"{self.base_url}/embeddings",
+                {
+                    "model": self.model,
+                    "input": batch,
+                    "dimensions": self.dimensions,
+                    "encoding_format": "float",
+                },
+            )
+
+        text_type = "query" if task_type == "RETRIEVAL_QUERY" else "document"
+        parameters: dict[str, Any] = {
+            "dimension": self.dimensions,
+            "text_type": text_type,
+        }
+        if text_type == "query":
+            parameters["instruct"] = QUERY_INSTRUCT
+        return (
+            self.native_url,
+            {
+                "model": self.model,
+                "input": {"texts": batch},
+                "parameters": parameters,
+            },
+        )
+
+    def _parse_embeddings(self, data: dict[str, Any]) -> list[list[float]]:
+        if self.endpoint == "compatible":
+            embeddings = sorted(data["data"], key=lambda x: x["index"])
+        else:
+            embeddings = sorted(data["output"]["embeddings"], key=lambda x: x.get("text_index", x.get("index", 0)))
+        return [e["embedding"] for e in embeddings]
+
     def embed(
         self,
         texts: list[str],
@@ -158,8 +187,9 @@ class DashScopeEmbedder:
 
         Args:
             texts: List of texts to embed
-            task_type: RETRIEVAL_DOCUMENT uses text_type=document;
-                       RETRIEVAL_QUERY uses text_type=query + instruct.
+            task_type: In native mode, RETRIEVAL_DOCUMENT uses
+                       text_type=document and RETRIEVAL_QUERY uses
+                       text_type=query + instruct. Compatible mode ignores it.
 
         Returns:
             List of embedding vectors

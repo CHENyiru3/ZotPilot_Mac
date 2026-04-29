@@ -32,6 +32,7 @@ class TestConfigLoadDefaults:
         cfg = Config.load(path=tmp_path / "nonexistent" / "config.json")
         assert cfg.zotero_data_dir == Path("~/Zotero").expanduser()
         assert cfg.embedding_provider == "gemini"
+        assert cfg.dashscope_embedding_endpoint == "compatible"
         assert cfg.vision_provider == "anthropic"
         assert cfg.vision_model == "claude-haiku-4-5-20251001"
         assert cfg.gemini_api_key is None
@@ -58,6 +59,7 @@ class TestConfigLoadFromFile:
         assert cfg.zotero_data_dir == tmp_path / "MyZotero"
         assert cfg.embedding_model == "custom-model"
         assert cfg.embedding_provider == "local"
+        assert cfg.dashscope_embedding_endpoint == "compatible"
         assert cfg.zotero_user_id == "12345"
         assert cfg.openalex_email == "user@example.com"
         assert cfg.gemini_api_key is None
@@ -71,6 +73,20 @@ class TestConfigLoadFromFile:
 
         assert cfg.vision_provider == "dashscope"
         assert cfg.vision_model == "qwen3-vl-flash"
+
+    def test_loads_dashscope_native_embedding_endpoint(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        config_file = tmp_path / "config.json"
+        config_file.write_text(
+            json.dumps({
+                "embedding_provider": "dashscope",
+                "dashscope_embedding_endpoint": "native",
+            })
+        )
+
+        cfg = Config.load(path=config_file)
+
+        assert cfg.dashscope_embedding_endpoint == "native"
 
 
 class TestRuntimeResolution:
@@ -202,3 +218,15 @@ class TestConfigValidation:
         errors = cfg.validate()
 
         assert any("Invalid vision_provider" in e for e in errors)
+
+    def test_validate_invalid_dashscope_embedding_endpoint(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        cfg = Config.load(path=tmp_path / "nonexistent.json")
+        cfg.zotero_data_dir = tmp_path
+        (tmp_path / "zotero.sqlite").touch()
+        cfg.gemini_api_key = "set"
+        cfg.dashscope_embedding_endpoint = "invalid"
+
+        errors = cfg.validate()
+
+        assert any("Invalid dashscope_embedding_endpoint" in e for e in errors)

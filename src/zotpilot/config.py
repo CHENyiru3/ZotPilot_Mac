@@ -50,6 +50,8 @@ class Config:
     dashscope_api_key: str | None
     # Embedding provider: "gemini", "dashscope", "local", or "none" (No-RAG mode)
     embedding_provider: str
+    # DashScope embedding endpoint: "compatible" or "native"
+    dashscope_embedding_endpoint: str
     # Embedding settings
     embedding_timeout: float
     embedding_max_retries: int
@@ -130,6 +132,7 @@ class Config:
             gemini_api_key=data.get("gemini_api_key"),
             dashscope_api_key=data.get("dashscope_api_key"),
             embedding_provider=data.get("embedding_provider", "gemini"),
+            dashscope_embedding_endpoint=data.get("dashscope_embedding_endpoint", "compatible"),
             embedding_timeout=data.get("embedding_timeout", 120.0),
             embedding_max_retries=data.get("embedding_max_retries", 3),
             rerank_alpha=data.get("rerank_alpha", 0.7),
@@ -173,6 +176,7 @@ class Config:
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
             "embedding_provider": self.embedding_provider,
+            "dashscope_embedding_endpoint": self.dashscope_embedding_endpoint,
             "embedding_timeout": self.embedding_timeout,
             "embedding_max_retries": self.embedding_max_retries,
             "rerank_alpha": self.rerank_alpha,
@@ -239,6 +243,8 @@ class Config:
             errors.append("DASHSCOPE_API_KEY not set (required for embedding_provider='dashscope')")
         elif self.embedding_provider not in ("gemini", "dashscope", "local", "none"):
             errors.append(f"Invalid embedding_provider: {self.embedding_provider}. Must be 'gemini', 'dashscope', 'local', or 'none'")  # noqa: E501
+        if self.dashscope_embedding_endpoint not in ("compatible", "native"):
+            errors.append("Invalid dashscope_embedding_endpoint: must be 'compatible' or 'native'")
 
         if self.vision_provider not in ("anthropic", "dashscope"):
             errors.append("Invalid vision_provider: must be 'anthropic' or 'dashscope'")

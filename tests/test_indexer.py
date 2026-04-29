@@ -7,6 +7,27 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+class TestConfigHash:
+    def test_dashscope_embedding_endpoint_affects_index_hash(self):
+        from zotpilot.indexer import _config_hash
+
+        base = SimpleNamespace(
+            chunk_size=400,
+            chunk_overlap=100,
+            embedding_provider="dashscope",
+            dashscope_embedding_endpoint="compatible",
+            embedding_dimensions=1024,
+            embedding_model="text-embedding-v4",
+            ocr_language="eng",
+            vision_enabled=False,
+            vision_provider="anthropic",
+            vision_model="",
+        )
+        native = SimpleNamespace(**{**base.__dict__, "dashscope_embedding_endpoint": "native"})
+
+        assert _config_hash(base) != _config_hash(native)
+
+
 class TestTitlePatternValidation:
     """Test P0-3: ReDoS protection on title_pattern in Indexer.index_all()."""
 
